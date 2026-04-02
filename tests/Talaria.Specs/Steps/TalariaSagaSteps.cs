@@ -117,23 +117,28 @@ public class TalariaSagaSteps : IAsyncDisposable
     public async Task ThenTheSagaStateForShouldExist(string id)
     {
         var store = _host!.Services.GetRequiredService<IStateStore<OrderSagaState>>();
-        var state = await store.GetAsync(id);
+        OrderSagaState? state = null;
+        for (int i = 0; i < 50; i++)
+        {
+            state = await store.GetAsync(id);
+            if (state != null) break;
+            await Task.Delay(50);
+        }
         Assert.NotNull(state);
     }
 
     [Then(@"^the saga state for ""([^""]*)"" should not exist$")]
-    public async Task ThenTheSagaStateForShouldNotExist(string id)
-    {
-        var store = _host!.Services.GetRequiredService<IStateStore<OrderSagaState>>();
-        var state = await store.GetAsync(id);
-        Assert.Null(state);
-    }
-
     [Then(@"^the saga state for ""([^""]*)"" should no longer exist$")]
-    public async Task ThenTheSagaStateForShouldNoLongerExist(string id)
+    public async Task ThenTheSagaStateForShouldNotExistOrShouldNoLongerExist(string id)
     {
         var store = _host!.Services.GetRequiredService<IStateStore<OrderSagaState>>();
-        var state = await store.GetAsync(id);
+        OrderSagaState? state = null;
+        for (int i = 0; i < 50; i++)
+        {
+            state = await store.GetAsync(id);
+            if (state == null) break;
+            await Task.Delay(50);
+        }
         Assert.Null(state);
     }
 
@@ -143,8 +148,13 @@ public class TalariaSagaSteps : IAsyncDisposable
         if (messageType == "OrderCompleted")
         {
             var topic = typeof(OrderCompletedSaga).Name.ToLowerInvariant();
-            var messages = await _transport.ReadAllFromTopicAsync<OrderCompletedSaga>(topic);
-            Assert.NotEmpty(messages);
+            for (int i = 0; i < 50; i++)
+            {
+                var messages = await _transport.ReadAllFromTopicAsync<OrderCompletedSaga>(topic);
+                if (messages.Count > 0) return;
+                await Task.Delay(50);
+            }
+            Assert.Fail("Message was not dispatched.");
         }
     }
 

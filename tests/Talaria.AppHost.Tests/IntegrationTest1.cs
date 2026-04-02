@@ -77,31 +77,34 @@ public class IntegrationTest1
             Assert.Equal(HttpStatusCode.Accepted, res.StatusCode);
         }
 
-        // Delay to allow Kafka ingestion and processing
-        await Task.Delay(5000, cancellationToken);
-
-        // The Redis connection string is exposed via resource configurations
+        // Wait for Kafka to route identical footprint clusters securely into redis (Polling to eliminate explicit CI Race Conditions natively)
         var redisConnString = await app.GetConnectionStringAsync("redis", cancellationToken);
         Assert.NotNull(redisConnString);
 
         var redis = StackExchange.Redis.ConnectionMultiplexer.Connect(redisConnString);
         var db = redis.GetDatabase();
-
-        // 1. Verify the Idempotency Lock successfully captured the execution footprint as COMPLETED
         var lockKey = $"onboarding:idemp:Talaria.Client.Api:{targetMessageId}";
-        var lockVal = await db.StringGetAsync(lockKey);
+        var stateKey = $"onboarding:onboardingstate:{targetAccountId}";
+
+        RedisValue lockVal = default;
+        RedisValue stateVal = default;
+
+        for (int i = 0; i < 60; i++) 
+        {
+            lockVal = await db.StringGetAsync(lockKey);
+            stateVal = await db.StringGetAsync(stateKey);
+            
+            if (lockVal.HasValue && stateVal.HasValue && stateVal.ToString().Contains("Created"))
+            {
+                break;
+            }
+            
+            await Task.Delay(500, cancellationToken);
+        }
 
         Assert.True(lockVal.HasValue, "Idempotency physical footprint was completely lost.");
         Assert.Equal("COMPLETED", (string?)lockVal);
-
-        // 2. Verify the State output was identical to a single run through
-        // Note: The physical Kafka consumers ran concurrently across all 3 AppHost nodes!
-        var stateKey = $"onboarding:onboardingstate:{targetAccountId}";
-        var stateVal = await db.StringGetAsync(stateKey);
-        
         Assert.True(stateVal.HasValue, "Saga state wasn't generated.");
-        
-        var jsonValue = stateVal.ToString();
-        Assert.Contains("Created", jsonValue!); // It must contain the 'Created' state
+        Assert.Contains("Created", stateVal.ToString());
     }
 }
