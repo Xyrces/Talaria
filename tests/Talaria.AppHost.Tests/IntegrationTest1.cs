@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
+using StackExchange.Redis;
 
 namespace Talaria.AppHost.Tests;
 
