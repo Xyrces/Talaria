@@ -19,6 +19,8 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Required for MinVer to index repository tags and calculate semantic history
 
       - name: Setup .NET 8.0
         uses: actions/setup-dotnet@v4
@@ -41,11 +43,10 @@ jobs:
       - name: Pack NuGets
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          # Use run_number to explicitly increment versions across builds ensuring no identical push failures
-          dotnet pack src/Talaria.Core/Talaria.Core.csproj -c Release -o ./out -p:Version=1.0.${{ github.run_number }}
-          dotnet pack src/Talaria.Transports.Kafka/Talaria.Transports.Kafka.csproj -c Release -o ./out -p:Version=1.0.${{ github.run_number }}
-          dotnet pack src/Talaria.StateStores.Redis/Talaria.StateStores.Redis.csproj -c Release -o ./out -p:Version=1.0.${{ github.run_number }}
-          dotnet pack src/Talaria.Transports.InMemory/Talaria.Transports.InMemory.csproj -c Release -o ./out -p:Version=1.0.${{ github.run_number }}
+          dotnet pack src/Talaria.Core/Talaria.Core.csproj -c Release -o ./out
+          dotnet pack src/Talaria.Transports.Kafka/Talaria.Transports.Kafka.csproj -c Release -o ./out
+          dotnet pack src/Talaria.StateStores.Redis/Talaria.StateStores.Redis.csproj -c Release -o ./out
+          dotnet pack src/Talaria.Transports.InMemory/Talaria.Transports.InMemory.csproj -c Release -o ./out
           
       - name: Publish to GitHub Packages
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
