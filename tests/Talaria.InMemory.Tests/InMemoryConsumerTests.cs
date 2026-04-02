@@ -15,7 +15,7 @@ public class InMemoryConsumerTests
         var appDlqCh = Channel.CreateUnbounded<InMemoryMessage>();
         var options = new InMemoryTransportOptions { SimulatedLatency = latency };
         
-        var consumer = new InMemoryConsumer<string>(ch, dlqCh, appDlqCh, options);
+        var consumer = new InMemoryConsumer<string>("test-topic", ch, dlqCh, appDlqCh, options);
         return (ch, dlqCh, appDlqCh, consumer);
     }
 

@@ -29,8 +29,9 @@ public class TalariaHostedServiceTests
         });
 
         var opts = Options.Create(new TalariaOptions());
+        var services = new ServiceCollection().BuildServiceProvider();
 
-        var hostedService = new TalariaHostedService(transport, topicReg, opts, NullLogger<TalariaHostedService>.Instance);
+        var hostedService = new TalariaHostedService(transport, topicReg, opts, NullLogger<TalariaHostedService>.Instance, services);
         
         using var cts = new CancellationTokenSource();
         await hostedService.StartAsync(cts.Token);
