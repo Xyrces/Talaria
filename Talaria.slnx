@@ -1,0 +1,21 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Talaria.AppHost/Talaria.AppHost.csproj" />
+    <Project Path="src/Talaria.Client.Api/Talaria.Client.Api.csproj" />
+    <Project Path="src/Talaria.Core/Talaria.Core.csproj" />
+    <Project Path="src/Talaria.ServiceDefaults/Talaria.ServiceDefaults.csproj" />
+    <Project Path="src/Talaria.SourceGenerators/Talaria.SourceGenerators.csproj" />
+    <Project Path="src/Talaria.StateStores.Redis/Talaria.StateStores.Redis.csproj" />
+    <Project Path="src/Talaria.Transports.InMemory/Talaria.Transports.InMemory.csproj" />
+    <Project Path="src/Talaria.Transports.Kafka/Talaria.Transports.Kafka.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Talaria.AppHost.Tests/Talaria.AppHost.Tests.csproj" />
+    <Project Path="tests/Talaria.Core.Tests/Talaria.Core.Tests.csproj" />
+    <Project Path="tests/Talaria.InMemory.Tests/Talaria.InMemory.Tests.csproj" />
+    <Project Path="tests/Talaria.SourceGenerators.Tests/Talaria.SourceGenerators.Tests.csproj" />
+    <Project Path="tests/Talaria.Specs/Talaria.Specs.csproj" />
+    <Project Path="tests/Talaria.StateStores.Redis.Tests/Talaria.StateStores.Redis.Tests.csproj" />
+    <Project Path="tests/Talaria.Transports.Kafka.Tests/Talaria.Transports.Kafka.Tests.csproj" />
+  </Folder>
+</Solution>

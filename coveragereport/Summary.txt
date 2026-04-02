@@ -1,0 +1,54 @@
+Summary
+  Generated on: 4/2/2026 - 10:35:51 AM
+  Coverage date: 3/31/2026 - 10:51:47 AM - 4/2/2026 - 10:35:40 AM
+  Parser: MultiReport (28x Cobertura)
+  Assemblies: 2
+  Classes: 30
+  Files: 26
+  Line coverage: 93.7%
+  Covered lines: 863
+  Uncovered lines: 58
+  Coverable lines: 921
+  Total lines: 1650
+  Branch coverage: 81.5% (194 of 238)
+  Covered branches: 194
+  Total branches: 238
+  Method coverage: 92.5% (148 of 160)
+  Full method coverage: 87.5% (140 of 160)
+  Covered methods: 148
+  Fully covered methods: 140
+  Total methods: 160
+
+Talaria.Core                                                   93%
+  Talaria.Core.Abstractions.ConsumerOptions                   100%
+  Talaria.Core.Abstractions.MessageEnvelope<T>               87.5%
+  Talaria.Core.Abstractions.MessageHeaders                   92.8%
+  Talaria.Core.Abstractions.ProducerOptions                   100%
+  Talaria.Core.Attributes.MessageVersionAttribute             100%
+  Talaria.Core.Attributes.TalariaHandlerAttribute            83.3%
+  Talaria.Core.Diagnostics.TalariaDiagnostics                 100%
+  Talaria.Core.Hosting.SagaHostedService                     89.6%
+  Talaria.Core.Hosting.TalariaHostedService                    99%
+  Talaria.Core.Registration.TalariaBuilder                   76.4%
+  Talaria.Core.Registration.TalariaEndpointExtensions        82.2%
+  Talaria.Core.Registration.TalariaServiceExtensions          100%
+  Talaria.Core.Registration.TopicRegistration                 100%
+  Talaria.Core.Registration.TopicRegistry                     100%
+  Talaria.Core.Sagas.CorrelationResolver                      100%
+  Talaria.Core.Sagas.SagaConfigurator<T>                       95%
+  Talaria.Core.Sagas.SagaContext<T>                           100%
+  Talaria.Core.Sagas.SagaRegistration                         100%
+  Talaria.Core.Sagas.SagaRegistry                             100%
+  Talaria.Core.Sagas.SagaResult<T>                            100%
+  Talaria.Core.Sagas.SagaStepRegistration                     100%
+  Talaria.Core.TalariaOptions                                 100%
+
+Talaria.Transports.InMemory                                  95.7%
+  Talaria.Transports.InMemory.InMemoryConsumer<T>            97.4%
+  Talaria.Transports.InMemory.InMemoryMessage                  80%
+  Talaria.Transports.InMemory.InMemoryProducer<T>            91.1%
+  Talaria.Transports.InMemory.InMemoryStateStore<T>          86.6%
+  Talaria.Transports.InMemory.InMemoryTransactionalSession    100%
+  Talaria.Transports.InMemory.InMemoryTransport              98.3%
+  Talaria.Transports.InMemory.InMemoryTransportExtensions     100%
+  Talaria.Transports.InMemory.InMemoryTransportOptions        100%

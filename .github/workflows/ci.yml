@@ -1,0 +1,52 @@
+name: Talaria CI/CD
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build_test_publish:
+    name: Build, Test, and Publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8.0
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+          source-url: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
+        env:
+          NUGET_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
+
+      - name: Restore Dependencies
+        run: dotnet restore Talaria.slnx
+
+      - name: Build Solution
+        run: dotnet build Talaria.slnx --configuration Release --no-restore
+
+      - name: Run Integration Tests
+        # Ensure TestContainers can leverage docker locally on the ubuntu runner
+        run: dotnet test Talaria.slnx --configuration Release --no-build --verbosity normal
+
+      - name: Pack NuGets
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          # Use run_number to explicitly increment versions across builds ensuring no identical push failures
+          dotnet pack src/Talaria.Core/Talaria.Core.csproj -c Release -o ./out -p:Version=1.0.${{ github.run_number }}
+          dotnet pack src/Talaria.Transports.Kafka/Talaria.Transports.Kafka.csproj -c Release -o ./out -p:Version=1.0.${{ github.run_number }}
+          dotnet pack src/Talaria.StateStores.Redis/Talaria.StateStores.Redis.csproj -c Release -o ./out -p:Version=1.0.${{ github.run_number }}
+          dotnet pack src/Talaria.Transports.InMemory/Talaria.Transports.InMemory.csproj -c Release -o ./out -p:Version=1.0.${{ github.run_number }}
+          
+      - name: Publish to GitHub Packages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: dotnet nuget push "./out/*.nupkg" --api-key ${{ secrets.GITHUB_TOKEN }} --source github --skip-duplicate
