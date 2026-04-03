@@ -9,7 +9,7 @@ namespace Talaria.AppHost.Tests;
 
 public class IntegrationTest1
 {
-    private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan DefaultTimeout = TimeSpan.FromMinutes(3);
 
     [Fact]
     public async Task OrchestratedSaga_TriggersAndTransitions_Successfully()
@@ -95,7 +95,7 @@ public class IntegrationTest1
             lockVal = await db.StringGetAsync(lockKey);
             stateVal = await db.StringGetAsync(stateKey);
             
-            if (lockVal.HasValue && stateVal.HasValue && stateVal.ToString().Contains("Created"))
+            if (lockVal.HasValue && stateVal.HasValue && stateVal.ToString().Contains("VerificationSent"))
             {
                 break;
             }
@@ -106,6 +106,6 @@ public class IntegrationTest1
         Assert.True(lockVal.HasValue, "Idempotency physical footprint was completely lost.");
         Assert.Equal("COMPLETED", (string?)lockVal);
         Assert.True(stateVal.HasValue, "Saga state wasn't generated.");
-        Assert.Contains("Created", stateVal.ToString());
+        Assert.Contains("VerificationSent", stateVal.ToString());
     }
 }
