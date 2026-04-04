@@ -58,10 +58,17 @@ public static class Extensions
                 metrics.AddAspNetCoreInstrumentation()
                     .AddHttpClientInstrumentation()
                     .AddRuntimeInstrumentation();
+                    
+                var grafanaMetrics = builder.Configuration["GRAFANA_OTLP_METRICS_ENDPOINT"];
+                if (!string.IsNullOrWhiteSpace(grafanaMetrics))
+                {
+                    metrics.AddOtlpExporter("grafana", opts => opts.Endpoint = new Uri(grafanaMetrics));
+                }
             })
             .WithTracing(tracing =>
             {
                 tracing.AddSource(builder.Environment.ApplicationName)
+                    .AddSource("Talaria.Core")
                     .AddAspNetCoreInstrumentation(tracing =>
                         // Exclude health check requests from tracing
                         tracing.Filter = context =>
@@ -71,6 +78,12 @@ public static class Extensions
                     // Uncomment the following line to enable gRPC instrumentation (requires the OpenTelemetry.Instrumentation.GrpcNetClient package)
                     //.AddGrpcClientInstrumentation()
                     .AddHttpClientInstrumentation();
+                    
+                var grafanaTraces = builder.Configuration["GRAFANA_OTLP_TRACES_ENDPOINT"];
+                if (!string.IsNullOrWhiteSpace(grafanaTraces))
+                {
+                    tracing.AddOtlpExporter("grafana", opts => opts.Endpoint = new Uri(grafanaTraces));
+                }
             });
 
         builder.AddOpenTelemetryExporters();
