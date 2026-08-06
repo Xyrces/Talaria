@@ -7,10 +7,20 @@ public sealed class DockerFactAttribute : FactAttribute
 {
     public DockerFactAttribute()
     {
-        if (!IsDockerRunning())
+        if (IsCiEnvironment())
+        {
+            Skip = "AppHost Aspire multi-container tests are skipped in CI environment due to runner resource limits.";
+        }
+        else if (!IsDockerRunning())
         {
             Skip = "Docker daemon is not running on this host environment.";
         }
+    }
+
+    private static bool IsCiEnvironment()
+    {
+        return string.Equals(Environment.GetEnvironmentVariable("GITHUB_ACTIONS"), "true", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(Environment.GetEnvironmentVariable("CI"), "true", StringComparison.OrdinalIgnoreCase);
     }
 
     public static bool IsDockerRunning()
