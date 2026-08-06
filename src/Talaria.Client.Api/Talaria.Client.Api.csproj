@@ -15,6 +15,7 @@
     <ProjectReference Include="..\Talaria.Core\Talaria.Core.csproj" />
     <ProjectReference Include="..\Talaria.ServiceDefaults\Talaria.ServiceDefaults.csproj" />
     <ProjectReference Include="..\Talaria.Transports.Kafka\Talaria.Transports.Kafka.csproj" />
+    <ProjectReference Include="..\Talaria.Transports.InMemory\Talaria.Transports.InMemory.csproj" />
     <ProjectReference Include="..\Talaria.StateStores.Redis\Talaria.StateStores.Redis.csproj" />
   </ItemGroup>
 
