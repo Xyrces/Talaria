@@ -54,6 +54,7 @@ public class IntegrationTest1
         await app.StartAsync(cancellationToken).WaitAsync(TimeSpan.FromMinutes(3), cancellationToken);
 
         var httpClient = app.CreateHttpClient("talaria-client");
+        httpClient.Timeout = TimeSpan.FromMinutes(3);
         await app.ResourceNotifications.WaitForResourceHealthyAsync("talaria-client", cancellationToken).WaitAsync(TimeSpan.FromMinutes(3), cancellationToken);
 
         // Act

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Confluent.Kafka;
 using Talaria.Core;
 using Talaria.Core.Abstractions;
@@ -7,9 +8,10 @@ namespace Talaria.Transports.Kafka;
 /// <summary>
 /// Apache Kafka transport entry point. Configures and registers Kafka channels.
 /// </summary>
-public sealed class KafkaTransport : ITransport
+public sealed class KafkaTransport : ITransport, IAsyncDisposable
 {
     private readonly KafkaTransportOptions _kafkaOptions;
+    private readonly ConcurrentDictionary<string, IProducer<string, byte[]>> _producers = new();
 
     /// <summary>
     /// Creates a KafkaTransport with the specified options.
@@ -20,6 +22,19 @@ public sealed class KafkaTransport : ITransport
     }
 
     public string Name => "Kafka";
+
+    private IProducer<string, byte[]> GetOrCreateRawProducer(string topic)
+    {
+        return _producers.GetOrAdd(topic, t =>
+        {
+            var producerConfig = new ProducerConfig(_kafkaOptions.BaseProducerConfig)
+            {
+                BootstrapServers = _kafkaOptions.BootstrapServers,
+                Acks = Acks.All
+            };
+            return new ProducerBuilder<string, byte[]>(producerConfig).Build();
+        });
+    }
 
     /// <summary>
     /// Creates a new consumer for a specific topic.
@@ -38,12 +53,7 @@ public sealed class KafkaTransport : ITransport
         };
 
         var confluentConsumer = new ConsumerBuilder<string, byte[]>(config).Build();
-        
-        var producerConfig = new ProducerConfig(_kafkaOptions.BaseProducerConfig)
-        {
-            BootstrapServers = _kafkaOptions.BootstrapServers
-        };
-        var confluentDlqProducer = new ProducerBuilder<string, byte[]>(producerConfig).Build();
+        var confluentDlqProducer = GetOrCreateRawProducer(topic + ".dlq");
 
         IConsumer<T> wrapper = new KafkaConsumer<T>(confluentConsumer, confluentDlqProducer, topic, _kafkaOptions, ".dlq");
         return Task.FromResult(wrapper);
@@ -57,14 +67,8 @@ public sealed class KafkaTransport : ITransport
         ProducerOptions options,
         CancellationToken ct = default)
     {
-        var producerConfig = new ProducerConfig(_kafkaOptions.BaseProducerConfig)
-        {
-            BootstrapServers = _kafkaOptions.BootstrapServers
-        };
-        
-        var confluentProducer = new ProducerBuilder<string, byte[]>(producerConfig).Build();
-
-        IProducer<T> wrapper = new KafkaProducer<T>(confluentProducer, topic);
+        var rawProducer = GetOrCreateRawProducer(topic);
+        IProducer<T> wrapper = new KafkaProducer<T>(rawProducer, topic);
         return Task.FromResult(wrapper);
     }
 
@@ -77,6 +81,24 @@ public sealed class KafkaTransport : ITransport
         // For MVP, we'll return a NoOpSession.
         ITransactionalSession session = new NoOpKafkaTransactionalSession();
         return Task.FromResult(session);
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        foreach (var producer in _producers.Values)
+        {
+            try
+            {
+                producer.Flush(TimeSpan.FromSeconds(5));
+                producer.Dispose();
+            }
+            catch
+            {
+                // Ignore cleanup errors during shutdown
+            }
+        }
+        _producers.Clear();
+        return ValueTask.CompletedTask;
     }
 }
 
