@@ -42,6 +42,7 @@ dotnet test
 Integrating Talaria natively binds through intuitive extension extensions injected efficiently into the Minimal API request builder pipeline:
 
 ```csharp
+// Distributed Production Configuration (Kafka + Redis)
 builder.Services.AddTalaria()
     .UseKafkaTransport(opts =>
     {
@@ -56,6 +57,12 @@ builder.Services.AddTalaria()
     {
         opts.Configuration = builder.Configuration.GetConnectionString("redis");
     });
+
+// Zero-Dependency Local & Testing Configuration (In-Memory)
+builder.Services.AddTalaria()
+    .UseInMemoryTransport()
+    .UseInMemoryStateStore()
+    .UseInMemoryIdempotencyStore();
 ```
 
 ### Simple Stateless Handlers
