@@ -33,78 +33,98 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
 
     public async IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsync([EnumeratorCancellation] CancellationToken ct = default)
     {
-        // Must subscribe outside loop or right here
-        _consumer.Subscribe(_topic);
-
-        while (!ct.IsCancellationRequested)
+        var channel = System.Threading.Channels.Channel.CreateBounded<MessageEnvelope<T>>(new System.Threading.Channels.BoundedChannelOptions(100)
         {
-            ConsumeResult<string, byte[]>? consumeResult = null;
+            SingleWriter = true,
+            SingleReader = true,
+            FullMode = System.Threading.Channels.BoundedChannelFullMode.Wait
+        });
+
+        _ = Task.Factory.StartNew(async () =>
+        {
             try
             {
-                // Task.Run to avoid blocking async thread pool on physical socket poll
-                consumeResult = await Task.Run(() => _consumer.Consume(ct), ct);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch (ConsumeException)
-            {
-                try { await Task.Delay(100, ct).ConfigureAwait(false); } catch (OperationCanceledException) { break; }
-                continue;
-            }
+                _consumer.Subscribe(_topic);
 
-            if (consumeResult == null || consumeResult.IsPartitionEOF)
-            {
-                try { await Task.Delay(50, ct).ConfigureAwait(false); } catch (OperationCanceledException) { break; }
-                continue;
-            }
+                while (!ct.IsCancellationRequested)
+                {
+                    ConsumeResult<string, byte[]>? consumeResult = null;
+                    try
+                    {
+                        consumeResult = _consumer.Consume(TimeSpan.FromMilliseconds(100));
+                    }
+                    catch (ConsumeException)
+                    {
+                        try { await Task.Delay(100, ct).ConfigureAwait(false); } catch (OperationCanceledException) { break; }
+                        continue;
+                    }
 
-            var talariaHeaders = new MessageHeaders();
-            foreach (var header in consumeResult.Message.Headers)
-            {
-                talariaHeaders[header.Key] = Encoding.UTF8.GetString(header.GetValueBytes());
-            }
+                    if (consumeResult == null || consumeResult.IsPartitionEOF)
+                    {
+                        continue;
+                    }
 
-            T? payload = default;
-            try
-            {
-                payload = JsonSerializer.Deserialize<T>(consumeResult.Message.Value);
+                    var talariaHeaders = new MessageHeaders();
+                    if (consumeResult.Message.Headers != null)
+                    {
+                        foreach (var header in consumeResult.Message.Headers)
+                        {
+                            talariaHeaders[header.Key] = Encoding.UTF8.GetString(header.GetValueBytes());
+                        }
+                    }
+
+                    T? payload = default;
+                    try
+                    {
+                        payload = JsonSerializer.Deserialize<T>(consumeResult.Message.Value);
+                    }
+                    catch (Exception ex)
+                    {
+                        talariaHeaders.DlqReason = "DeserializationFailed";
+                        talariaHeaders.DlqException = ex.Message;
+                        
+                        await RouteToDlqAsync(consumeResult, talariaHeaders, ct).ConfigureAwait(false);
+                        _consumer.Commit(consumeResult);
+                        continue;
+                    }
+
+                    if (payload == null)
+                    {
+                        _consumer.Commit(consumeResult);
+                        continue;
+                    }
+
+                    var env = new MessageEnvelope<T>
+                    {
+                        Payload = payload,
+                        Headers = talariaHeaders,
+                        SourceTopic = _topic,
+                        PartitionKey = consumeResult.Message.Key,
+                        Timestamp = consumeResult.Message.Timestamp.UtcDateTime,
+                        Offset = consumeResult.Offset.Value
+                    };
+                    env.Headers["x-kafka-partition"] = consumeResult.Partition.Value.ToString();
+
+                    await channel.Writer.WriteAsync(env, ct).ConfigureAwait(false);
+                }
             }
+            catch (OperationCanceledException) { }
             catch (Exception ex)
             {
-                // If we can't deserialize the target payload, we MUST DLQ it immediately.
-                // It can never be processed.
-                talariaHeaders.DlqReason = "DeserializationFailed";
-                talariaHeaders.DlqException = ex.Message;
-                
-                await RouteToDlqAsync(consumeResult, talariaHeaders, ct);
-                
-                _consumer.Commit(consumeResult);
-                continue;
+                channel.Writer.TryComplete(ex);
+                return;
             }
-
-            if (payload == null)
+            finally
             {
-                _consumer.Commit(consumeResult);
-                continue; // Cannot yield null payloads.
+                try { _consumer.Unsubscribe(); } catch { }
+                channel.Writer.TryComplete();
             }
+        }, ct, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
-            var env = new MessageEnvelope<T>
-            {
-                Payload = payload,
-                Headers = talariaHeaders,
-                SourceTopic = _topic,
-                PartitionKey = consumeResult.Message.Key,
-                Timestamp = consumeResult.Message.Timestamp.UtcDateTime,
-                Offset = consumeResult.Offset.Value
-            };
-            env.Headers["x-kafka-partition"] = consumeResult.Partition.Value.ToString();
-
+        await foreach (var env in channel.Reader.ReadAllAsync(ct))
+        {
             yield return env;
         }
-
-        _consumer.Unsubscribe();
     }
 
     public Task CommitAsync(MessageEnvelope<T> message, CancellationToken ct = default)
@@ -177,61 +197,85 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
 
     public async IAsyncEnumerable<MessageEnvelope<T>> ConsumeDlqAsync([EnumeratorCancellation] CancellationToken ct = default)
     {
-        // Secondary subscription for replaying DLQ messages
-        _consumer.Subscribe(_dlqTopic);
-
-        while (!ct.IsCancellationRequested)
+        var channel = System.Threading.Channels.Channel.CreateBounded<MessageEnvelope<T>>(new System.Threading.Channels.BoundedChannelOptions(100)
         {
-            ConsumeResult<string, byte[]>? consumeResult = null;
+            SingleWriter = true,
+            SingleReader = true,
+            FullMode = System.Threading.Channels.BoundedChannelFullMode.Wait
+        });
+
+        _ = Task.Factory.StartNew(async () =>
+        {
             try
             {
-                consumeResult = await Task.Run(() => _consumer.Consume(ct), ct);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch (ConsumeException)
-            {
-                try { await Task.Delay(100, ct).ConfigureAwait(false); } catch (OperationCanceledException) { break; }
-                continue;
-            }
+                _consumer.Subscribe(_dlqTopic);
 
-            if (consumeResult == null || consumeResult.IsPartitionEOF)
-            {
-                try { await Task.Delay(50, ct).ConfigureAwait(false); } catch (OperationCanceledException) { break; }
-                continue;
+                while (!ct.IsCancellationRequested)
+                {
+                    ConsumeResult<string, byte[]>? consumeResult = null;
+                    try
+                    {
+                        consumeResult = _consumer.Consume(TimeSpan.FromMilliseconds(100));
+                    }
+                    catch (ConsumeException)
+                    {
+                        try { await Task.Delay(100, ct).ConfigureAwait(false); } catch (OperationCanceledException) { break; }
+                        continue;
+                    }
+
+                    if (consumeResult == null || consumeResult.IsPartitionEOF)
+                    {
+                        continue;
+                    }
+
+                    var talariaHeaders = new MessageHeaders();
+                    if (consumeResult.Message.Headers != null)
+                    {
+                        foreach (var header in consumeResult.Message.Headers)
+                        {
+                            talariaHeaders[header.Key] = Encoding.UTF8.GetString(header.GetValueBytes());
+                        }
+                    }
+
+                    T? payload = JsonSerializer.Deserialize<T>(consumeResult.Message.Value);
+                    
+                    if (payload == null)
+                    {
+                        _consumer.Commit(consumeResult);
+                        continue;
+                    }
+
+                    var env = new MessageEnvelope<T>
+                    {
+                        Payload = payload,
+                        Headers = talariaHeaders,
+                        SourceTopic = _dlqTopic,
+                        PartitionKey = consumeResult.Message.Key,
+                        Timestamp = consumeResult.Message.Timestamp.UtcDateTime,
+                        Offset = consumeResult.Offset.Value
+                    };
+                    env.Headers["x-kafka-partition"] = consumeResult.Partition.Value.ToString();
+
+                    await channel.Writer.WriteAsync(env, ct).ConfigureAwait(false);
+                }
             }
-
-            var talariaHeaders = new MessageHeaders();
-            foreach (var header in consumeResult.Message.Headers)
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
             {
-                talariaHeaders[header.Key] = Encoding.UTF8.GetString(header.GetValueBytes());
+                channel.Writer.TryComplete(ex);
+                return;
             }
-
-            T? payload = JsonSerializer.Deserialize<T>(consumeResult.Message.Value);
-            
-            if (payload == null)
+            finally
             {
-                _consumer.Commit(consumeResult);
-                continue;
+                try { _consumer.Unsubscribe(); } catch { }
+                channel.Writer.TryComplete();
             }
+        }, ct, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
-            var env = new MessageEnvelope<T>
-            {
-                Payload = payload,
-                Headers = talariaHeaders,
-                SourceTopic = _dlqTopic,
-                PartitionKey = consumeResult.Message.Key,
-                Timestamp = consumeResult.Message.Timestamp.UtcDateTime,
-                Offset = consumeResult.Offset.Value
-            };
-            env.Headers["x-kafka-partition"] = consumeResult.Partition.Value.ToString();
-
+        await foreach (var env in channel.Reader.ReadAllAsync(ct))
+        {
             yield return env;
         }
-
-        _consumer.Unsubscribe();
     }
 
     public ValueTask DisposeAsync()
