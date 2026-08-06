@@ -50,12 +50,15 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
             }
             catch (ConsumeException)
             {
-                // Typical to log consumer polling exceptions, but skip yielding to retry next loop iteration
+                try { await Task.Delay(100, ct).ConfigureAwait(false); } catch (OperationCanceledException) { break; }
                 continue;
             }
 
             if (consumeResult == null || consumeResult.IsPartitionEOF)
+            {
+                try { await Task.Delay(50, ct).ConfigureAwait(false); } catch (OperationCanceledException) { break; }
                 continue;
+            }
 
             var talariaHeaders = new MessageHeaders();
             foreach (var header in consumeResult.Message.Headers)
@@ -190,11 +193,15 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
             }
             catch (ConsumeException)
             {
+                try { await Task.Delay(100, ct).ConfigureAwait(false); } catch (OperationCanceledException) { break; }
                 continue;
             }
 
             if (consumeResult == null || consumeResult.IsPartitionEOF)
+            {
+                try { await Task.Delay(50, ct).ConfigureAwait(false); } catch (OperationCanceledException) { break; }
                 continue;
+            }
 
             var talariaHeaders = new MessageHeaders();
             foreach (var header in consumeResult.Message.Headers)
