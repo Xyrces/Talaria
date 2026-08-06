@@ -3,6 +3,7 @@ using Talaria.Client.Api.Sagas;
 using Talaria.Core.Abstractions;
 using Talaria.Core.Registration;
 using Talaria.StateStores.Redis;
+using Talaria.Transports.InMemory;
 using Talaria.Transports.Kafka;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -10,22 +11,34 @@ var builder = WebApplication.CreateBuilder(args);
 // Add service defaults & Aspire components
 builder.AddServiceDefaults();
 
-// Configure Talaria
-builder.Services.AddTalaria()
-    .UseKafkaTransport(opts =>
-    {
-        opts.BootstrapServers = builder.Configuration.GetConnectionString("kafka") ?? "localhost:9092";
-    })
-    .UseRedisStateStore(opts =>
-    {
-        opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
-        opts.KeyPrefix = "onboarding:";
-    })
-    .UseRedisIdempotencyStore(opts => 
-    {
-        opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
-        opts.KeyPrefix = "onboarding:";
-    });
+var messagingProvider = builder.Configuration["Messaging:Provider"] ?? "Kafka";
+var talaria = builder.Services.AddTalaria();
+
+if (messagingProvider.Equals("InMemory", StringComparison.OrdinalIgnoreCase))
+{
+    talaria
+        .UseInMemoryTransport()
+        .UseInMemoryStateStore()
+        .UseInMemoryIdempotencyStore();
+}
+else
+{
+    talaria
+        .UseKafkaTransport(opts =>
+        {
+            opts.BootstrapServers = builder.Configuration.GetConnectionString("kafka") ?? "localhost:9092";
+        })
+        .UseRedisStateStore(opts =>
+        {
+            opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
+            opts.KeyPrefix = "onboarding:";
+        })
+        .UseRedisIdempotencyStore(opts => 
+        {
+            opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
+            opts.KeyPrefix = "onboarding:";
+        });
+}
 
 var app = builder.Build();
 

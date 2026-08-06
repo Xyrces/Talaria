@@ -36,11 +36,28 @@ public static class InMemoryTransportExtensions
         this TalariaBuilder builder,
         InMemoryTransport transport)
     {
-        Microsoft.Extensions.DependencyInjection.Extensions.ServiceCollectionDescriptorExtensions.TryAddSingleton(
-            builder.Services, 
-            typeof(Talaria.Core.Abstractions.IStateStore<>), 
-            typeof(InMemoryStateStore<>));
-            
+        builder.UseInMemoryStateStore();
         return builder.UseTransport(transport);
+    }
+
+    /// <summary>
+    /// Configures Talaria to use the in-memory saga state store.
+    /// </summary>
+    public static TalariaBuilder UseInMemoryStateStore(this TalariaBuilder builder)
+    {
+        Microsoft.Extensions.DependencyInjection.Extensions.ServiceCollectionDescriptorExtensions.TryAddSingleton(
+            builder.Services,
+            typeof(Talaria.Core.Abstractions.IStateStore<>),
+            typeof(InMemoryStateStore<>));
+        return builder;
+    }
+
+    /// <summary>
+    /// Configures Talaria to use the in-memory idempotency store.
+    /// </summary>
+    public static TalariaBuilder UseInMemoryIdempotencyStore(this TalariaBuilder builder)
+    {
+        builder.Services.AddSingleton<Talaria.Core.Abstractions.IIdempotencyStore, InMemoryIdempotencyStore>();
+        return builder;
     }
 }
