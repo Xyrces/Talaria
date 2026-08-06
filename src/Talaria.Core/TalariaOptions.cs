@@ -40,4 +40,10 @@ public sealed class TalariaOptions
     /// Suffix appended to topic names for dead-letter queues.
     /// </summary>
     public string DlqSuffix { get; set; } = ".dlq";
+
+    /// <summary>
+    /// Expiration duration for idempotency processing locks.
+    /// Defaults to 2 minutes.
+    /// </summary>
+    public TimeSpan IdempotencyLockTtl { get; set; } = TimeSpan.FromMinutes(2);
 }

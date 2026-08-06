@@ -117,8 +117,8 @@ public sealed class TalariaHostedService : BackgroundService
                 {
                     if (idempotencyStore != null && !string.IsNullOrEmpty(msgId))
                     {
-                        // Expiration is generous to allow for slow processing without immediate concurrent retry overlaps
-                        hasLock = await idempotencyStore.TryAcquireLockAsync(msgId, consumerGroup, TimeSpan.FromMinutes(2), ct);
+                        // Expiration is configurable via options to allow for slow processing without immediate concurrent retry overlaps
+                        hasLock = await idempotencyStore.TryAcquireLockAsync(msgId, consumerGroup, _options.IdempotencyLockTtl, ct);
                         
                         if (!hasLock)
                         {

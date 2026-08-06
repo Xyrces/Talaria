@@ -11,7 +11,7 @@ public class IntegrationTest1
 {
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromMinutes(3);
 
-    [Fact]
+    [DockerFact]
     public async Task OrchestratedSaga_TriggersAndTransitions_Successfully()
     {
         // Arrange
@@ -42,7 +42,7 @@ public class IntegrationTest1
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task ScaledIdempotency_IdenticalMessagesBombardment_ExecutesExactlyOnce()
     {
         // Arrange
@@ -54,6 +54,7 @@ public class IntegrationTest1
         await app.StartAsync(cancellationToken).WaitAsync(TimeSpan.FromMinutes(3), cancellationToken);
 
         var httpClient = app.CreateHttpClient("talaria-client");
+        httpClient.Timeout = TimeSpan.FromMinutes(3);
         await app.ResourceNotifications.WaitForResourceHealthyAsync("talaria-client", cancellationToken).WaitAsync(TimeSpan.FromMinutes(3), cancellationToken);
 
         // Act

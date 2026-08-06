@@ -109,13 +109,22 @@ namespace Talaria.SourceGenerators
                 handlers.Add(new HandlerNode(type, consumed, produced));
             }
 
-            // 3. Cycle Detection over the gathered topology
+            // 3. Multi-hop Cycle Detection over the gathered topology
             foreach (var handler in handlers)
             {
-                // Simple 1-hop check (consumes X and produces X directly)
                 foreach (var c in handler.Consumed)
                 {
-                    if (handler.Produced.Contains(c))
+                    bool cycleFound = false;
+                    foreach (var p in handler.Produced)
+                    {
+                        if (CanReach(p, c, handlers))
+                        {
+                            cycleFound = true;
+                            break;
+                        }
+                    }
+
+                    if (cycleFound)
                     {
                         var location = handler.Symbol.Locations.FirstOrDefault();
                         if (location != null)
@@ -126,6 +135,41 @@ namespace Talaria.SourceGenerators
                     }
                 }
             }
+        }
+
+        private static bool CanReach(ITypeSymbol start, ITypeSymbol target, System.Collections.Generic.List<HandlerNode> handlers)
+        {
+            var visited = new System.Collections.Generic.HashSet<ITypeSymbol>(SymbolEqualityComparer.Default);
+            var stack = new System.Collections.Generic.Stack<ITypeSymbol>();
+            stack.Push(start);
+
+            while (stack.Count > 0)
+            {
+                var current = stack.Pop();
+                if (SymbolEqualityComparer.Default.Equals(current, target))
+                {
+                    return true;
+                }
+
+                if (visited.Add(current))
+                {
+                    foreach (var h in handlers)
+                    {
+                        if (h.Consumed.Contains(current))
+                        {
+                            foreach (var p in h.Produced)
+                            {
+                                if (!visited.Contains(p))
+                                {
+                                    stack.Push(p);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            return false;
         }
 
         private static System.Collections.Generic.IEnumerable<INamedTypeSymbol> GetAllClasses(INamespaceSymbol root)
