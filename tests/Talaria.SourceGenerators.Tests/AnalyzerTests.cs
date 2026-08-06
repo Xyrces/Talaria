@@ -85,6 +85,44 @@ public class OrderHandler
         Assert.Empty(diagnostics);
     }
 
+    [Fact]
+    public async Task TopologyAnalyzer_ReportsWarning_WhenMultiHopCycleDetected()
+    {
+        var source = @"
+using System.Threading.Tasks;
+using Talaria.Core.Attributes;
+using Talaria.Core.Abstractions;
+
+namespace TestNamespace;
+
+public class Msg1 { }
+public class Msg2 { }
+
+public class HandlerA
+{
+    private readonly IProducer<Msg2> _producer;
+    public HandlerA(IProducer<Msg2> producer) { _producer = producer; }
+
+    [TalariaHandler(""topic.one"")]
+    public Task Handle(Msg1 msg) => _producer.ProduceAsync(new Msg2());
+}
+
+public class HandlerB
+{
+    private readonly IProducer<Msg1> _producer;
+    public HandlerB(IProducer<Msg1> producer) { _producer = producer; }
+
+    [TalariaHandler(""topic.two"")]
+    public Task Handle(Msg2 msg) => _producer.ProduceAsync(new Msg1());
+}
+";
+
+        var diagnostics = await RunAnalyzerAsync(source);
+
+        Assert.Equal(2, diagnostics.Length);
+        Assert.All(diagnostics, d => Assert.Equal("TALA001", d.Id));
+    }
+
     private static async Task<ImmutableArray<Diagnostic>> RunAnalyzerAsync(string source)
     {
         // Force load Talaria.Core

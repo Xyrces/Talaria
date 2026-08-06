@@ -143,7 +143,7 @@ public sealed class SagaHostedService : BackgroundService
             if (idempotencyStore != null && !string.IsNullOrEmpty(msgId))
             {
                 // Expiration is generous to allow for slow processing without immediate concurrent retry overlaps
-                hasLock = await idempotencyStore.TryAcquireLockAsync(msgId, _options.ApplicationName, TimeSpan.FromMinutes(2), ct);
+                hasLock = await idempotencyStore.TryAcquireLockAsync(msgId, _options.ApplicationName, _options.IdempotencyLockTtl, ct);
                 
                 if (!hasLock)
                 {

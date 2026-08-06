@@ -14,6 +14,8 @@ public class KafkaTransportIntegrationTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
+        if (!DockerFactAttribute.IsDockerRunning()) return;
+
         _kafkaContainer = new KafkaBuilder()
             .WithImage("confluentinc/cp-kafka:7.4.0")
             .Build();
@@ -39,7 +41,7 @@ public class KafkaTransportIntegrationTests : IAsyncLifetime
         }
     }
 
-    [Fact]
+    [DockerFact]
     public async Task ProducerAndConsumer_RoundtripMessage_Successfully()
     {
         var transport = _serviceProvider.GetRequiredService<ITransport>();

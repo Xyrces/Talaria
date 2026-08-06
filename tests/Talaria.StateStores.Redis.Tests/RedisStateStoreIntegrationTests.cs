@@ -13,6 +13,8 @@ public class RedisStateStoreIntegrationTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
+        if (!DockerFactAttribute.IsDockerRunning()) return;
+
         _redisContainer = new RedisBuilder()
             .WithImage("redis:7.2")
             .Build();
@@ -38,7 +40,7 @@ public class RedisStateStoreIntegrationTests : IAsyncLifetime
         }
     }
 
-    [Fact]
+    [DockerFact]
     public async Task SaveAndLoad_SagaState_Successfully()
     {
         var stateStore = _serviceProvider.GetRequiredService<IStateStore<DummyState>>();

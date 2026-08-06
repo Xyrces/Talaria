@@ -11,7 +11,7 @@ public class IntegrationTest1
 {
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromMinutes(3);
 
-    [Fact]
+    [DockerFact]
     public async Task OrchestratedSaga_TriggersAndTransitions_Successfully()
     {
         // Arrange
@@ -42,7 +42,7 @@ public class IntegrationTest1
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task ScaledIdempotency_IdenticalMessagesBombardment_ExecutesExactlyOnce()
     {
         // Arrange

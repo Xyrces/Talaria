@@ -96,6 +96,7 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
                 Timestamp = consumeResult.Message.Timestamp.UtcDateTime,
                 Offset = consumeResult.Offset.Value
             };
+            env.Headers["x-kafka-partition"] = consumeResult.Partition.Value.ToString();
 
             yield return env;
         }
@@ -105,15 +106,17 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
 
     public Task CommitAsync(MessageEnvelope<T> message, CancellationToken ct = default)
     {
-        // In Kafka, we must commit offsets explicitly.
-        // For performance, Confluent Kafka AutoCommit can be used, but since sagas use transactions, explicit commit is safer.
-        // Wait, to commit explicitly we need the TopicPartitionOffset... which we don't carry back on MessageEnvelope except as a raw long. 
-        // We'd have to store TopicPartition metadata on Envelope, but we don't have that in the core abstraction.
-        // Standard practice when IConsumer<T> doesn't expose partition is to either:
-        // 1. Just call Commit() which commits the *latest* offset consumed by the consumer in the current thread.
-        // 2. Put the original ConsumeResult in Envelope headers.
-        
-        _consumer.Commit();
+        if (!string.IsNullOrEmpty(message.SourceTopic) &&
+            message.Headers.TryGetValue("x-kafka-partition", out var pStr) &&
+            int.TryParse(pStr, out var partitionVal))
+        {
+            var tpo = new TopicPartitionOffset(message.SourceTopic, new Partition(partitionVal), new Offset(message.Offset));
+            _consumer.Commit(new[] { tpo });
+        }
+        else
+        {
+            _consumer.Commit();
+        }
         return Task.CompletedTask;
     }
 
@@ -135,7 +138,18 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
         };
 
         await _producer.ProduceAsync(_dlqTopic, dlqMsg, ct);
-        _consumer.Commit();
+
+        if (!string.IsNullOrEmpty(message.SourceTopic) &&
+            message.Headers.TryGetValue("x-kafka-partition", out var pStr) &&
+            int.TryParse(pStr, out var partitionVal))
+        {
+            var tpo = new TopicPartitionOffset(message.SourceTopic, new Partition(partitionVal), new Offset(message.Offset));
+            _consumer.Commit(new[] { tpo });
+        }
+        else
+        {
+            _consumer.Commit();
+        }
     }
 
     private async Task RouteToDlqAsync(ConsumeResult<string, byte[]> consumeResult, MessageHeaders headers, CancellationToken ct)
@@ -205,6 +219,7 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
                 Timestamp = consumeResult.Message.Timestamp.UtcDateTime,
                 Offset = consumeResult.Offset.Value
             };
+            env.Headers["x-kafka-partition"] = consumeResult.Partition.Value.ToString();
 
             yield return env;
         }
