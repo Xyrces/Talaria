@@ -74,6 +74,9 @@ public static class OnboardingSagaConfigurator
                     return context.Complete();
                 },
                 correlateBy: msg => msg.AccountId);
+
+            // The email handler listens on "email-commands" (see Program.cs).
+            sagas.DispatchTo<SendVerificationEmailCommand>("email-commands");
         });
     }
 }

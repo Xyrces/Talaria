@@ -44,6 +44,10 @@ internal sealed class InMemoryProducer<T> : IProducer<T>
             finalHeaders.MessageId = Guid.NewGuid().ToString("N");
         }
 
+        // Engine-owned routing metadata: the CLR type of the payload, used by consumers
+        // that fan a topic out to multiple typed handlers.
+        finalHeaders[MessageHeaders.MessageTypeKey] = typeof(T).FullName ?? typeof(T).Name;
+
         // Engine-owned hop counter: fresh messages start at 0; forwarded messages (already
         // carrying a count) are incremented so cyclic flows trip the max-hop guard.
         if (finalHeaders.ContainsKey(MessageHeaders.HopCountKey))

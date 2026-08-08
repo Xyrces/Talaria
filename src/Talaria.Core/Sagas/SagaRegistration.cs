@@ -8,6 +8,12 @@ public class SagaRegistration
     public required Type StateType { get; init; }
 
     public List<SagaStepRegistration> Steps { get; } = new();
+
+    /// <summary>
+    /// Explicit routing for dispatched messages: message CLR type → topic.
+    /// Declared via <c>SagaConfigurator.DispatchTo</c>.
+    /// </summary>
+    public Dictionary<Type, string> DispatchTopics { get; } = new();
 }
 
 /// <summary>

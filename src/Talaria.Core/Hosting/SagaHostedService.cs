@@ -1,15 +1,20 @@
-using System.Reflection;
+using System.Collections.Concurrent;
+using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Talaria.Core.Abstractions;
+using Talaria.Core.Registration;
 using Talaria.Core.Sagas;
 
 namespace Talaria.Core.Hosting;
 
 /// <summary>
 /// Hosted service that listens on all configured saga topics.
+/// One supervised consumer per topic; messages are fanned out to the correct saga step
+/// via the message-type header. Dispatch topics are explicit (DispatchTo) and producers
+/// are created once at startup — no reflection in the per-message hot path.
 /// </summary>
 public sealed class SagaHostedService : BackgroundService
 {
@@ -17,8 +22,44 @@ public sealed class SagaHostedService : BackgroundService
     private readonly IServiceProvider _serviceProvider;
     private readonly TalariaOptions _options;
     private readonly ILogger<SagaHostedService> _logger;
-    private readonly List<IAsyncDisposable> _consumers = new();
-    private readonly List<Task> _consumerTasks = new();
+
+    // Cached producers keyed by (topic, message type) — created once, reused per dispatch.
+    private readonly ConcurrentDictionary<(string Topic, Type MessageType), ProducerInvoker> _producers = new();
+
+    // Merged dispatch routes across all sagas: message CLR type → topic.
+    private IReadOnlyDictionary<Type, string> _dispatchRoutes = new Dictionary<Type, string>();
+
+    private sealed record ProducerInvoker(
+        Func<object, MessageHeaders?, CancellationToken, Task> Produce,
+        IAsyncDisposable Producer);
+
+    private sealed record StepRoute(
+        SagaRegistration Registration,
+        SagaStepRegistration Step,
+        IStateStoreAccessor StateStore);
+
+    /// <summary>Non-generic facade over <see cref="IStateStore{TState}"/> resolved per DI scope.</summary>
+    private interface IStateStoreAccessor
+    {
+        Task<object?> GetAsync(IServiceProvider scope, string correlationId, CancellationToken ct);
+        Task SaveAsync(IServiceProvider scope, string correlationId, object state, CancellationToken ct);
+        Task DeleteAsync(IServiceProvider scope, string correlationId, CancellationToken ct);
+        object NewState();
+    }
+
+    private sealed class StateStoreAccessor<TState> : IStateStoreAccessor where TState : class, new()
+    {
+        public async Task<object?> GetAsync(IServiceProvider scope, string correlationId, CancellationToken ct)
+            => await scope.GetRequiredService<IStateStore<TState>>().GetAsync(correlationId, ct);
+
+        public async Task SaveAsync(IServiceProvider scope, string correlationId, object state, CancellationToken ct)
+            => await scope.GetRequiredService<IStateStore<TState>>().SaveAsync(correlationId, (TState)state, ct);
+
+        public async Task DeleteAsync(IServiceProvider scope, string correlationId, CancellationToken ct)
+            => await scope.GetRequiredService<IStateStore<TState>>().DeleteAsync(correlationId, ct);
+
+        public object NewState() => new TState();
+    }
 
     public SagaHostedService(
         SagaRegistry registry,
@@ -34,279 +75,301 @@ public sealed class SagaHostedService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // 1. Get the transport
         var transport = _serviceProvider.GetRequiredService<ITransport>();
-        
-        // 2. Discover all topics sagas subscribe to
-        var consumerTasksGroupedByTopic = new Dictionary<string, Func<Task>>();
-        
-        foreach (var sagaReg in _registry.Registrations)
+        var pipeline = new MessageProcessingPipeline(
+            _serviceProvider.GetService<IIdempotencyStore>(),
+            _options,
+            _logger);
+
+        // Group every step of every saga by topic — one consumer per topic.
+        var stepsByTopic = _registry.Registrations
+            .SelectMany(r => r.Steps.Select(s => new StepRoute(r, s, CreateStateStoreAccessor(r.StateType))))
+            .GroupBy(x => x.Step.TopicName)
+            .ToDictionary(g => g.Key, g => (IReadOnlyList<StepRoute>)g.ToList());
+
+        _dispatchRoutes = BuildAndValidateDispatchRoutes(stepsByTopic.Keys);
+
+        // Pre-create producers for all declared dispatch routes and step topics
+        // (the latter are used for deferral republishing).
+        foreach (var (type, topic) in _dispatchRoutes)
         {
-            var stateType = sagaReg.StateType;
-            var stateStoreType = typeof(IStateStore<>).MakeGenericType(stateType);
+            await GetOrCreateProducerAsync(transport, topic, type, stoppingToken);
+        }
+        foreach (var route in stepsByTopic.Values.SelectMany(x => x))
+        {
+            await GetOrCreateProducerAsync(transport, route.Step.TopicName, route.Step.MessageType, stoppingToken);
+        }
 
-            foreach (var step in sagaReg.Steps)
+        var tasks = stepsByTopic.Select(kvp =>
+            ConsumerSupervision.RunSupervisedAsync(
+                $"saga:{kvp.Key}",
+                ct => ConsumeTopicLoopAsync(kvp.Key, kvp.Value, transport, pipeline, ct),
+                _logger,
+                stoppingToken)).ToList();
+
+        _logger.LogInformation("Talaria Sagas: started {Count} topic consumers.", tasks.Count);
+
+        await Task.WhenAll(tasks);
+    }
+
+    /// <summary>
+    /// Merges all sagas' DispatchTo mappings and warns about declared targets that have no
+    /// registered consumer in this host (they may still be consumed by other services).
+    /// </summary>
+    private IReadOnlyDictionary<Type, string> BuildAndValidateDispatchRoutes(ICollection<string> sagaTopics)
+    {
+        var routes = new Dictionary<Type, string>();
+        foreach (var reg in _registry.Registrations)
+        {
+            foreach (var (type, topic) in reg.DispatchTopics)
             {
-                var topic = step.TopicName;
-                var messageType = step.MessageType;
-                var resolver = step.CorrelationResolver;
-
-                if (consumerTasksGroupedByTopic.ContainsKey(topic))
-                {
-                    throw new InvalidOperationException(
-                        $"Multiple saga steps are mapped to topic '{topic}' (saga state '{sagaReg.StateType.Name}', message '{messageType.Name}'). " +
-                        "Only one saga step per topic is currently supported; map each step to a distinct topic.");
-                }
-
-                var consumerOpts = new ConsumerOptions
-                {
-                    ConsumerGroup = _options.ApplicationName,
-                    BufferCapacity = 1 // Process sagas one at a time per consumer for now
-                };
-
-                // Build a strongly typed CreateConsumer call for the topic
-                var createConsumerMethod = typeof(ITransport)
-                    .GetMethod(nameof(ITransport.CreateConsumerAsync))!
-                    .MakeGenericMethod(messageType);
-
-                consumerTasksGroupedByTopic[topic] = async () =>
-                {
-                    var consumerTask = (Task)createConsumerMethod.Invoke(transport, new object[] { topic, consumerOpts, stoppingToken })!;
-                    await consumerTask.ConfigureAwait(false);
-                    var consumer = consumerTask.GetType().GetProperty("Result")!.GetValue(consumerTask)!;
-                    
-                    _consumers.Add((IAsyncDisposable)consumer);
-                    
-                    var loopMethod = typeof(SagaHostedService)
-                        .GetMethod(nameof(ConsumeLoopAsync), BindingFlags.NonPublic | BindingFlags.Instance)!
-                        .MakeGenericMethod(messageType, stateType);
-
-                    var loopTask = (Task)loopMethod.Invoke(this, new[]
-                    {
-                        consumer,
-                        step,
-                        stateStoreType,
-                        transport,
-                        stoppingToken
-                    })!;
-                    
-                    _consumerTasks.Add(loopTask);
-                };
+                routes[type] = topic;
             }
         }
 
-        foreach (var factory in consumerTasksGroupedByTopic.Values)
+        var consumedTopics = new HashSet<string>(sagaTopics);
+        var topicRegistry = _serviceProvider.GetService<TopicRegistry>();
+        if (topicRegistry != null)
         {
-            await factory();
+            foreach (var t in topicRegistry.Registrations)
+            {
+                consumedTopics.Add(t.TopicName);
+            }
         }
-        
-        _logger.LogInformation("Talaria Sagas: started {Count} topic consumers.", _consumerTasks.Count);
-        
-        await Task.WhenAll(_consumerTasks);
+
+        foreach (var topic in routes.Values.Distinct())
+        {
+            if (!consumedTopics.Contains(topic))
+            {
+                _logger.LogWarning(
+                    "Saga dispatch target topic '{Topic}' has no registered consumer in this host. " +
+                    "If it is not consumed by another service, dispatched messages will go unread.",
+                    topic);
+            }
+        }
+
+        return routes;
     }
 
-    private async Task ConsumeLoopAsync<TMessage, TState>(
-        IConsumer<TMessage> consumer,
-        SagaStepRegistration step,
-        Type stateStoreType,
+    private async Task ConsumeTopicLoopAsync(
+        string topic,
+        IReadOnlyList<StepRoute> routes,
         ITransport transport,
-        CancellationToken ct) where TMessage : class where TState : class, new()
+        MessageProcessingPipeline pipeline,
+        CancellationToken ct)
     {
+        await using var consumer = await transport.CreateConsumerAsync<JsonElement>(
+            topic,
+            new ConsumerOptions { ConsumerGroup = _options.ApplicationName },
+            ct);
+
         await foreach (var env in consumer.ConsumeAsync(ct))
         {
-            using var activity = Diagnostics.TalariaDiagnostics.StartConsumerActivity(
-                step.TopicName, typeof(TMessage).Name, env.Headers);
-            activity?.SetTag("saga.type", typeof(TState).Name);
+            var route = ResolveStep(env, routes);
+            if (route is null)
+            {
+                var typeHeader = env.Headers.TryGetValue(MessageHeaders.MessageTypeKey, out var v) ? v : "(none)";
+                _logger.LogWarning(
+                    "No saga step found for message on topic '{Topic}' (message type header: '{TypeHeader}'). Routing to DLQ.",
+                    topic, typeHeader);
 
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            
+                env.Headers.DlqReason = "unknown_message_type";
+                Diagnostics.TalariaDiagnostics.DlqRouted.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", topic));
+
+                await consumer.NackAsync(env, ct);
+                continue;
+            }
+
+            await ProcessStepMessageAsync(env, route, transport, pipeline, consumer, ct);
+        }
+    }
+
+    private static StepRoute? ResolveStep(
+        MessageEnvelope<JsonElement> env,
+        IReadOnlyList<StepRoute> routes)
+    {
+        if (routes.Count == 1)
+        {
+            return routes[0];
+        }
+
+        var typeName = env.Headers.TryGetValue(MessageHeaders.MessageTypeKey, out var v) ? v : null;
+        if (typeName is null)
+        {
+            return null;
+        }
+
+        return routes.FirstOrDefault(r =>
+            string.Equals(r.Step.MessageType.FullName, typeName, StringComparison.Ordinal) ||
+            string.Equals(r.Step.MessageType.Name, typeName, StringComparison.Ordinal));
+    }
+
+    private async Task ProcessStepMessageAsync(
+        MessageEnvelope<JsonElement> env,
+        StepRoute route,
+        ITransport transport,
+        MessageProcessingPipeline pipeline,
+        IConsumer<JsonElement> consumer,
+        CancellationToken ct)
+    {
+        var step = route.Step;
+        var stateStore = route.StateStore;
+        var stateType = route.Registration.StateType;
+
+        using var activity = Diagnostics.TalariaDiagnostics.StartConsumerActivity(
+            step.TopicName, step.MessageType.Name, env.Headers);
+        activity?.SetTag("saga.type", stateType.Name);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+
+        try
+        {
             using var scope = _serviceProvider.CreateScope();
-            var stateStore = (IStateStore<TState>)scope.ServiceProvider.GetRequiredService(stateStoreType);
-            
-            // 1. Resolve Correlation Id
-            var correlationId = step.CorrelationResolver != null 
-                ? step.CorrelationResolver(env.Payload) 
-                : Core.Sagas.CorrelationResolver.Resolve(env.Payload, env.Headers);
+
+            // 1. Deserialize the payload to the step's message type.
+            object payload;
+            try
+            {
+                payload = env.Payload.Deserialize(step.MessageType)
+                    ?? throw new JsonException($"Payload deserialized to null for {step.MessageType.Name}.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to deserialize saga message on topic '{Topic}' as {MessageType}.", step.TopicName, step.MessageType.Name);
+                env.Headers.DlqReason = "deserialization_failed";
+                Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
+                Diagnostics.TalariaDiagnostics.DlqRouted.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
+                await consumer.NackAsync(env, ct);
+                return;
+            }
+
+            // 2. Resolve correlation ID.
+            var correlationId = step.CorrelationResolver != null
+                ? step.CorrelationResolver(payload)
+                : Core.Sagas.CorrelationResolver.Resolve(payload, env.Headers);
 
             if (string.IsNullOrWhiteSpace(correlationId))
             {
-                _logger.LogWarning("No correlation ID found for saga message {Type} on topic {Topic}", typeof(TMessage).Name, env.SourceTopic);
-                
+                _logger.LogWarning("No correlation ID found for saga message {Type} on topic {Topic}", step.MessageType.Name, env.SourceTopic);
+
                 env.Headers.DlqReason = "missing_correlation_id";
                 activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, "Missing Correlation Id");
                 Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
                 Diagnostics.TalariaDiagnostics.DlqRouted.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
 
                 await consumer.NackAsync(env, ct);
-                continue;
+                return;
             }
-            
+
             activity?.SetTag("saga.correlation_id", correlationId);
 
-            var idempotencyStore = (IIdempotencyStore?)_serviceProvider.GetService(typeof(IIdempotencyStore));
-            var msgId = env.Headers.MessageId;
-            IdempotencyLock? idempotencyLock = null;
-
-            if (idempotencyStore != null && !string.IsNullOrEmpty(msgId))
+            // 3. Idempotency gate, keyed per saga topic.
+            var gate = await pipeline.AcquireAsync(env, $"{_options.ApplicationName}.{step.TopicName}", ct);
+            if (gate.IsDuplicate)
             {
-                // Expiration is generous to allow for slow processing without immediate concurrent retry overlaps
-                idempotencyLock = await idempotencyStore.TryAcquireLockAsync(msgId, _options.ApplicationName, _options.IdempotencyLockTtl, ct);
-                
-                if (idempotencyLock is null)
-                {
-                    _logger.LogDebug("Saga Message {MessageId} skipped. Idempotency lock claimed by another worker or already completed.", msgId);
-                    // We immediately commit the message to suppress further polling!
-                    await consumer.CommitAsync(env, ct);
-                    continue;
-                }
+                _logger.LogDebug("Saga Message {MessageId} skipped. Idempotency lock claimed by another worker or already completed.", env.Headers.MessageId);
+                // We immediately commit the message to suppress further polling!
+                await consumer.CommitAsync(env, ct);
+                return;
             }
 
-            // 2. Load State
-            var state = await stateStore.GetAsync(correlationId, ct);
+            // 4. Load state.
+            var state = await stateStore.GetAsync(scope.ServiceProvider, correlationId, ct);
 
-            // 3. Guards / Starter checking
+            // 5a. Defer out-of-order message (no state yet for a non-starter step).
             if (state == null && !step.IsStarter)
             {
-                // Defer out-of-order message
-                _logger.LogInformation("Received non-starter message for Saga {SagaType} but state {Id} not found. Deferring...", typeof(TState).Name, correlationId);
-                try 
+                _logger.LogInformation("Received non-starter message for Saga {SagaType} but state {Id} not found. Deferring...", stateType.Name, correlationId);
+                try
                 {
-                    await HandleDeferralAsync(env, transport, ct);
+                    await HandleDeferralAsync(env, payload, step, transport, ct);
 
                     // The deferred copy is published — safe to commit the original and release the
                     // idempotency lock so the deferred copy (new MessageId) is not skipped as a duplicate.
-                    if (idempotencyLock is not null && idempotencyStore != null)
-                    {
-                        await idempotencyStore.ReleaseLockAsync(idempotencyLock, ct);
-                    }
+                    await ReleaseLockBestEffortAsync(pipeline, gate.Lock, ct);
                     await consumer.CommitAsync(env, ct);
 
-                    Diagnostics.TalariaDiagnostics.MessagesDeferred.Add(1, new KeyValuePair<string, object?>("saga.type", typeof(TState).Name));
+                    Diagnostics.TalariaDiagnostics.MessagesDeferred.Add(1, new KeyValuePair<string, object?>("saga.type", stateType.Name));
                 }
                 catch (InvalidOperationException ex)
                 {
-                    env.Headers.DlqException = ex.Message;
-                    env.Headers.DlqReason = "max_deferrals_exceeded";
-
-                    if (idempotencyLock is not null && idempotencyStore != null)
-                    {
-                        await idempotencyStore.ReleaseLockAsync(idempotencyLock, ct);
-                    }
-
                     Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
                     Diagnostics.TalariaDiagnostics.DlqRouted.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
 
-                    await consumer.NackAsync(env, ct);
+                    await pipeline.FailAsync(gate.Lock, consumer, env, ex, "max_deferrals_exceeded", ct);
                 }
-                finally
-                {
-                    sw.Stop();
-                    Diagnostics.TalariaDiagnostics.ProcessingDuration.Record(sw.Elapsed.TotalMilliseconds, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
-                }
-                continue;
+                return;
             }
+
+            // 5b. Starter replay: state already exists — idempotent replay, skip and commit.
             if (state != null && step.IsStarter)
             {
-                // Starter message but state already exists — idempotent replay (e.g. redelivery after a
-                // crash between state save and offset commit). Do not re-run the starter handler:
-                // acknowledge the message and move on.
                 _logger.LogWarning(
                     "Saga {SagaType} starter message {MessageId} on topic {Topic} received, but state for correlation {CorrelationId} already exists. Skipping as an idempotent replay.",
-                    typeof(TState).Name, msgId, step.TopicName, correlationId);
+                    stateType.Name, env.Headers.MessageId, step.TopicName, correlationId);
 
-                if (idempotencyLock is not null && idempotencyStore != null)
-                {
-                    await idempotencyStore.MarkCompleteAsync(idempotencyLock, ct);
-                }
-                await consumer.CommitAsync(env, ct);
-                continue;
+                await pipeline.CompleteAsync(gate.Lock, consumer, env, ct);
+                return;
             }
 
-            var runState = state ?? new TState();
-            
-            // 4. Run pure function
+            // 6. Run the saga step (pure function).
             var context = new Core.Sagas.SagaContext<object>();
             Core.Sagas.SagaResult<object> result;
             try
             {
-                result = await step.Handler(runState, env.Payload, context);
+                result = await step.Handler(state ?? stateStore.NewState(), payload, context);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Saga {Type} threw an exception while handling message {MsgType}", typeof(TState).Name, typeof(TMessage).Name);
-                env.Headers.DlqException = ex.Message;
+                _logger.LogError(ex, "Saga {Type} threw an exception while handling message {MsgType}", stateType.Name, step.MessageType.Name);
                 activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, ex.Message);
-                
-                if (idempotencyLock is not null && idempotencyStore != null)
-                {
-                    await idempotencyStore.ReleaseLockAsync(idempotencyLock, ct);
-                }
 
                 Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
                 Diagnostics.TalariaDiagnostics.DlqRouted.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
 
-                await consumer.NackAsync(env, ct);
-                sw.Stop();
-                Diagnostics.TalariaDiagnostics.ProcessingDuration.Record(sw.Elapsed.TotalMilliseconds, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
-                continue;
+                await pipeline.FailAsync(gate.Lock, consumer, env, ex, null, ct);
+                return;
             }
 
-            // If function deferred manually
+            // 7. Handler-initiated deferral.
             if (result.IsDeferred)
             {
-                try 
+                try
                 {
                     activity?.SetTag("saga.status", "deferred");
-                    await HandleDeferralAsync(env, transport, ct);
+                    await HandleDeferralAsync(env, payload, step, transport, ct);
 
-                    // The deferred copy is published — safe to commit the original and release the
-                    // idempotency lock so the deferred copy (new MessageId) is not skipped as a duplicate.
-                    if (idempotencyLock is not null && idempotencyStore != null)
-                    {
-                        await idempotencyStore.ReleaseLockAsync(idempotencyLock, ct);
-                    }
+                    await ReleaseLockBestEffortAsync(pipeline, gate.Lock, ct);
                     await consumer.CommitAsync(env, ct);
 
-                    Diagnostics.TalariaDiagnostics.MessagesDeferred.Add(1, new KeyValuePair<string, object?>("saga.type", typeof(TState).Name));
+                    Diagnostics.TalariaDiagnostics.MessagesDeferred.Add(1, new KeyValuePair<string, object?>("saga.type", stateType.Name));
                 }
                 catch (InvalidOperationException ex)
                 {
-                    env.Headers.DlqException = ex.Message;
-                    env.Headers.DlqReason = "max_deferrals_exceeded";
-
-                    if (idempotencyLock is not null && idempotencyStore != null)
-                    {
-                        await idempotencyStore.ReleaseLockAsync(idempotencyLock, ct);
-                    }
-
                     Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
                     Diagnostics.TalariaDiagnostics.DlqRouted.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
 
-                    await consumer.NackAsync(env, ct);
+                    await pipeline.FailAsync(gate.Lock, consumer, env, ex, "max_deferrals_exceeded", ct);
                 }
-                finally
-                {
-                    sw.Stop();
-                    Diagnostics.TalariaDiagnostics.ProcessingDuration.Record(sw.Elapsed.TotalMilliseconds, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
-                }
-                continue;
+                return;
             }
 
-            // 5. Transactional dispatch
+            // 8. Transactional dispatch of outbound messages via explicit routes.
             await using var tx = await transport.BeginTransactionAsync(ct);
-            
+
             foreach (var outbound in result.OutboundMessages)
             {
-                var producerMethod = typeof(ITransport)
-                    .GetMethod(nameof(ITransport.CreateProducerAsync))!
-                    .MakeGenericMethod(outbound.GetType());
-                
-                var topic = outbound.GetType().Name.ToLowerInvariant();
-                var prodTask = (Task)producerMethod.Invoke(transport, new object?[] { topic, new ProducerOptions(), ct })!;
-                await prodTask.ConfigureAwait(false);
-                var dynProducer = prodTask.GetType().GetProperty("Result")!.GetValue(prodTask)!;
-                
-                // Propagate trace context!
+                var outboundType = outbound.GetType();
+                if (!_dispatchRoutes.TryGetValue(outboundType, out var outboundTopic))
+                {
+                    throw new InvalidOperationException(
+                        $"Saga '{stateType.Name}' dispatched message type '{outboundType.Name}' with no DispatchTo mapping. " +
+                        $"Declare the route with saga.DispatchTo<{outboundType.Name}>(\"topic\").");
+                }
+
+                var invoker = await GetOrCreateProducerAsync(transport, outboundTopic, outboundType, ct);
+
+                // Propagate trace context
                 var headers = new MessageHeaders();
                 if (System.Diagnostics.Activity.Current != null)
                 {
@@ -314,64 +377,59 @@ public sealed class SagaHostedService : BackgroundService
                     headers.TraceState = System.Diagnostics.Activity.Current.TraceStateString;
                 }
 
-                var produceMethod = dynProducer.GetType().GetMethod(nameof(IProducer<object>.ProduceAsync))!;
-                var produceTask = (Task)produceMethod.Invoke(dynProducer, new object?[] { outbound, headers, null, ct })!;
-                await produceTask.ConfigureAwait(false);
+                await invoker.Produce(outbound, headers, ct);
             }
 
-            // 6. Save or purge state
+            // 9. Save or purge state.
             if (result.IsCompleted)
             {
-                await stateStore.DeleteAsync(correlationId, ct);
+                await stateStore.DeleteAsync(scope.ServiceProvider, correlationId, ct);
                 activity?.SetTag("saga.status", "completed");
             }
             else
             {
-                // Safe cast since result.State is definitely TState based on our generic wrapper
-                await stateStore.SaveAsync(correlationId, (TState)result.State!, ct);
+                await stateStore.SaveAsync(scope.ServiceProvider, correlationId, result.State!, ct);
                 activity?.SetTag("saga.status", "transitioned");
             }
 
-            try 
+            // 10. Commit the transition, the offset, and the idempotency marker.
+            try
             {
                 await tx.CommitAsync(ct);
-                await consumer.CommitAsync(env, ct);
-                
-                if (idempotencyLock is not null && idempotencyStore != null)
-                {
-                    await idempotencyStore.MarkCompleteAsync(idempotencyLock, ct);
-                }
+                await pipeline.CompleteAsync(gate.Lock, consumer, env, ct);
 
                 Diagnostics.TalariaDiagnostics.MessagesConsumed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
             }
-            catch(Exception ex)
+            catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to commit saga transition");
-                
-                if (idempotencyLock is not null && idempotencyStore != null)
-                {
-                    await idempotencyStore.ReleaseLockAsync(idempotencyLock, ct);
-                }
+
+                await ReleaseLockBestEffortAsync(pipeline, gate.Lock, ct);
 
                 activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, ex.Message);
                 Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
-                
+
                 await tx.AbortAsync(ct);
                 await consumer.NackAsync(env, ct);
             }
-            finally
-            {
-                sw.Stop();
-                Diagnostics.TalariaDiagnostics.ProcessingDuration.Record(sw.Elapsed.TotalMilliseconds, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
-            }
+        }
+        finally
+        {
+            sw.Stop();
+            Diagnostics.TalariaDiagnostics.ProcessingDuration.Record(sw.Elapsed.TotalMilliseconds, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
         }
     }
 
-    private async Task HandleDeferralAsync<TMessage>(MessageEnvelope<TMessage> env, ITransport transport, CancellationToken ct) where TMessage : class
+    private async Task HandleDeferralAsync(
+        MessageEnvelope<JsonElement> env,
+        object payload,
+        SagaStepRegistration step,
+        ITransport transport,
+        CancellationToken ct)
     {
         if (string.IsNullOrEmpty(env.SourceTopic))
         {
-            throw new InvalidOperationException($"Cannot defer saga message of type {typeof(TMessage).Name}: the envelope has no source topic.");
+            throw new InvalidOperationException($"Cannot defer saga message of type {step.MessageType.Name}: the envelope has no source topic.");
         }
 
         int attempt = 1;
@@ -383,7 +441,7 @@ public sealed class SagaHostedService : BackgroundService
         if (attempt > _options.MaxDeferralAttempts)
         {
             _logger.LogWarning("Message exceeded max deferral attempts ({Max}). Routing to DLQ.", _options.MaxDeferralAttempts);
-            throw new InvalidOperationException($"Max deferral attempts ({_options.MaxDeferralAttempts}) exceeded for Saga message of type {typeof(TMessage).Name}");
+            throw new InvalidOperationException($"Max deferral attempts ({_options.MaxDeferralAttempts}) exceeded for Saga message of type {step.MessageType.Name}");
         }
 
         env.Headers[MessageHeaders.DeferralAttemptKey] = attempt.ToString();
@@ -401,31 +459,25 @@ public sealed class SagaHostedService : BackgroundService
         env.Headers.HopCount = env.Headers.HopCount + 1;
 
         var delay = TimeSpan.FromMilliseconds(_options.DeferralBackoff.TotalMilliseconds * attempt);
+        var headers = env.Headers;
+        var sourceTopic = env.SourceTopic!;
 
-        // Run background task to delay and reproduce
+        // Run background task to delay and reproduce via the cached producer.
         _ = Task.Run(async () =>
         {
             try
             {
                 await Task.Delay(delay, ct);
-                
-                var producerMethod = typeof(ITransport)
-                    .GetMethod(nameof(ITransport.CreateProducerAsync))!
-                    .MakeGenericMethod(typeof(TMessage));
-                
-                var prodTask = (Task)producerMethod.Invoke(transport, new object?[] { env.SourceTopic, new ProducerOptions(), ct })!;
-                await prodTask.ConfigureAwait(false);
-                var dynProducer = prodTask.GetType().GetProperty("Result")!.GetValue(prodTask)!;
-                
+
+                var invoker = await GetOrCreateProducerAsync(transport, sourceTopic, step.MessageType, ct);
+
                 if (System.Diagnostics.Activity.Current != null)
                 {
-                    env.Headers.TraceParent = System.Diagnostics.Activity.Current.Id;
-                    env.Headers.TraceState = System.Diagnostics.Activity.Current.TraceStateString;
+                    headers.TraceParent = System.Diagnostics.Activity.Current.Id;
+                    headers.TraceState = System.Diagnostics.Activity.Current.TraceStateString;
                 }
 
-                var produceMethod = dynProducer.GetType().GetMethod(nameof(IProducer<object>.ProduceAsync))!;
-                var produceTask = (Task)produceMethod.Invoke(dynProducer, new object?[] { env.Payload, env.Headers, null, ct })!;
-                await produceTask.ConfigureAwait(false);
+                await invoker.Produce(payload, headers, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -438,12 +490,76 @@ public sealed class SagaHostedService : BackgroundService
         }, ct);
     }
 
-    public override void Dispose()
+    private async Task<ProducerInvoker> GetOrCreateProducerAsync(
+        ITransport transport,
+        string topic,
+        Type messageType,
+        CancellationToken ct)
     {
-        foreach (var consumer in _consumers)
+        if (_producers.TryGetValue((topic, messageType), out var existing))
         {
-            consumer.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            return existing;
         }
-        base.Dispose();
+
+        // One-time generic dispatch per producer — never in the per-message hot path.
+        var method = typeof(SagaHostedService)
+            .GetMethod(nameof(CreateProducerInvokerAsync), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+            .MakeGenericMethod(messageType);
+
+        var invoker = await (Task<ProducerInvoker>)method.Invoke(null, [transport, topic, ct])!;
+        return _producers.GetOrAdd((topic, messageType), invoker);
+    }
+
+    private static async Task<ProducerInvoker> CreateProducerInvokerAsync<T>(ITransport transport, string topic, CancellationToken ct)
+        where T : class
+    {
+        var producer = await transport.CreateProducerAsync<T>(topic, new ProducerOptions(), ct);
+        return new ProducerInvoker(
+            async (msg, headers, token) => await producer.ProduceAsync((T)msg, headers, null, token),
+            producer);
+    }
+
+    private static IStateStoreAccessor CreateStateStoreAccessor(Type stateType)
+    {
+        // One-time generic dispatch per saga registration — never per message.
+        var method = typeof(SagaHostedService)
+            .GetMethod(nameof(CreateStateStoreAccessorTyped), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+            .MakeGenericMethod(stateType);
+
+        return (IStateStoreAccessor)method.Invoke(null, null)!;
+    }
+
+    private static IStateStoreAccessor CreateStateStoreAccessorTyped<TState>() where TState : class, new()
+        => new StateStoreAccessor<TState>();
+
+    private async Task ReleaseLockBestEffortAsync(MessageProcessingPipeline pipeline, IdempotencyLock? lck, CancellationToken ct)
+    {
+        if (lck is null)
+        {
+            return;
+        }
+
+        // Release failures must not mask the successful deferral path; the lock expires via TTL.
+        try
+        {
+            await pipeline.ReleaseAsync(lck, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to release idempotency lock {MessageId}; it expires via TTL.", lck.MessageId);
+        }
+    }
+
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        await base.StopAsync(cancellationToken);
+
+        foreach (var invoker in _producers.Values)
+        {
+            await invoker.Producer.DisposeAsync();
+        }
+
+        _producers.Clear();
+        _logger.LogInformation("Talaria Sagas: all producers disposed.");
     }
 }

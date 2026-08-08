@@ -58,6 +58,18 @@ public class SagaConfigurator<TState> where TState : class, new()
     }
 
     /// <summary>
+    /// Declares the topic that dispatched messages of <typeparamref name="TMessage"/> are routed to.
+    /// Required for every message type any step of this saga dispatches — the engine throws
+    /// at dispatch time when a dispatched type has no mapping (instead of silently deriving
+    /// a topic from the CLR type name).
+    /// </summary>
+    public SagaConfigurator<TState> DispatchTo<TMessage>(string topic) where TMessage : class
+    {
+        _registration.DispatchTopics[typeof(TMessage)] = topic;
+        return this;
+    }
+
+    /// <summary>
     /// Configures an existing saga transition via a message.
     /// </summary>
     public SagaConfigurator<TState> On<TMessage>(

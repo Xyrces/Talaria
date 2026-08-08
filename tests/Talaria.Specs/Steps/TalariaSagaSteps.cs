@@ -65,6 +65,9 @@ public class TalariaSagaSteps : IAsyncDisposable
                     }
                     return ctx.Transition(state);
                 });
+
+            // Explicit dispatch route (was previously derived from the CLR type name).
+            saga.DispatchTo<OrderCompletedSaga>(typeof(OrderCompletedSaga).Name.ToLowerInvariant());
         });
     }
 
