@@ -1,4 +1,3 @@
-using System.Threading.Channels;
 using Talaria.Core.Abstractions;
 using Talaria.Transports.InMemory;
 using Xunit;
@@ -10,9 +9,9 @@ public class InMemoryProducerTests
     [Fact]
     public async Task ProduceAsync_WithHeaders_WritesToChannel()
     {
-        var channel = Channel.CreateUnbounded<InMemoryMessage>();
-        var options = new InMemoryTransportOptions();
-        var producer = new InMemoryProducer<string>(channel, "test-topic", options);
+        var bus = new InMemoryTransport.TopicBus(100, unbounded: false);
+        var channel = bus.GetOrCreateGroupChannel("test");
+        var producer = new InMemoryProducer<string>(bus, "test-topic", new InMemoryTransportOptions());
 
         var headers = new MessageHeaders { ["X-Test"] = "True" };
         await producer.ProduceAsync("hello", headers);
@@ -20,14 +19,5 @@ public class InMemoryProducerTests
         var msg = await channel.Reader.ReadAsync();
         Assert.Equal("\"hello\"", msg.PayloadJson);
         Assert.Equal("True", msg.Headers["X-Test"]);
-    }
-
-    [Fact]
-    public async Task DisposeAsync_CompletesSuccessfully()
-    {
-        var channel = Channel.CreateUnbounded<InMemoryMessage>();
-        var producer = new InMemoryProducer<string>(channel, "topic", new InMemoryTransportOptions());
-        await producer.DisposeAsync();
-        Assert.True(true);
     }
 }

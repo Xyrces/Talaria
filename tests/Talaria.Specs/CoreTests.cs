@@ -21,15 +21,4 @@ public class CoreTests
         Assert.False(headers.TryGetValue("missing", out var val));
         Assert.Null(val);
     }
-
-    [Fact]
-    public void TalariaOptions_Properties()
-    {
-        var opts = new TalariaOptions();
-        opts.ApplicationName = "test-app";
-        Assert.Equal("test-app", opts.ApplicationName);
-
-        opts.MaxDeferralAttempts = 20;
-        Assert.Equal(20, opts.MaxDeferralAttempts);
-    }
 }

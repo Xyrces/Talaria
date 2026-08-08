@@ -6,9 +6,11 @@ namespace Talaria.StateStores.Redis;
 public sealed class TalariaRedisOptions
 {
     /// <summary>
-    /// The Redis connection string (Configuration).
+    /// The Redis connection string (Configuration). Required — registration throws
+    /// when it is null or empty. For production deployments include TLS and auth,
+    /// e.g. "host:6379,ssl=true,password=...".
     /// </summary>
-    public string Configuration { get; set; } = "localhost:6379";
+    public string Configuration { get; set; } = string.Empty;
 
     /// <summary>
     /// An optional prefix applied to all Redis keys to isolate environments or tenants.
@@ -17,8 +19,9 @@ public sealed class TalariaRedisOptions
     public string KeyPrefix { get; set; } = "talaria:";
 
     /// <summary>
-    /// Defines a global TTL for saga states.
-    /// By default sagas expire after 30 days of inactivity to prevent memory bloat.
+    /// Global TTL applied both to persisted saga states AND to idempotency completion
+    /// markers (lowering it shortens dedup retention as well as saga memory).
+    /// By default entries expire after 30 days of inactivity to prevent memory bloat.
     /// </summary>
     public TimeSpan DefaultStateTtl { get; set; } = TimeSpan.FromDays(30);
 }

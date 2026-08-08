@@ -9,15 +9,14 @@ namespace Talaria.Transports.Kafka.Tests;
 
 public class KafkaTransportIntegrationTests : IAsyncLifetime
 {
-    private KafkaContainer _kafkaContainer;
-    private IServiceProvider _serviceProvider;
+    private KafkaContainer? _kafkaContainer;
+    private IServiceProvider _serviceProvider = null!;
 
     public async Task InitializeAsync()
     {
         if (!DockerFactAttribute.IsDockerRunning()) return;
 
-        _kafkaContainer = new KafkaBuilder()
-            .WithImage("confluentinc/cp-kafka:7.4.0")
+        _kafkaContainer = new KafkaBuilder("confluentinc/cp-kafka:7.4.0")
             .Build();
 
         await _kafkaContainer.StartAsync();
@@ -26,7 +25,7 @@ public class KafkaTransportIntegrationTests : IAsyncLifetime
         var builder = services.AddTalaria();
         builder.UseKafkaTransport(opts =>
         {
-            opts.BootstrapServers = _kafkaContainer.GetBootstrapAddress();
+            opts.BootstrapServers = _kafkaContainer!.GetBootstrapAddress();
             opts.BaseConsumerConfig.AutoOffsetReset = Confluent.Kafka.AutoOffsetReset.Earliest;
         });
 

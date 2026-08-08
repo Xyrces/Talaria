@@ -11,7 +11,7 @@ public class TalariaBuilderTests
         public string Name => "Dummy";
         public Task<IConsumer<T>> CreateConsumerAsync<T>(string topic, ConsumerOptions options, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<IProducer<T>> CreateProducerAsync<T>(string topic, ProducerOptions options, CancellationToken ct = default) => throw new NotImplementedException();
-        public Task<ITransactionalSession> BeginTransactionAsync(CancellationToken ct = default) => throw new NotImplementedException();
+        public Task<ITransactionalSession> BeginTransactionAsync(string? consumerGroup = null, TransactionOffsetSource? offsetSource = null, CancellationToken ct = default) => throw new NotImplementedException();
     }
 
     [Fact]

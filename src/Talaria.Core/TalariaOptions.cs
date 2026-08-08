@@ -9,20 +9,42 @@ public sealed class TalariaOptions
 {
     /// <summary>
     /// Maximum number of hops a message can take before being routed to the DLQ.
-    /// Provides runtime protection against cyclic message loops.
+    /// Provides runtime protection against cyclic message loops. Must be greater than zero.
     /// </summary>
     public int MaxHopCount { get; set; } = 32;
 
     /// <summary>
     /// Maximum number of deferral attempts for saga out-of-order messages
-    /// before routing to the DLQ.
+    /// before routing to the DLQ. Must be greater than zero.
     /// </summary>
     public int MaxDeferralAttempts { get; set; } = 5;
 
     /// <summary>
-    /// Base backoff delay for saga message deferrals. Uses exponential backoff.
+    /// Base backoff delay for saga message deferrals.
+    /// Uses linear backoff: the delay is this value multiplied by the attempt number.
     /// </summary>
     public TimeSpan DeferralBackoff { get; set; } = TimeSpan.FromMilliseconds(100);
+
+    /// <summary>
+    /// How long a swept deferral stays leased (hidden from other sweepers) while it is
+    /// being republished. If the sweeper crashes before completing, the entry becomes
+    /// acquirable again after this duration. Must be greater than zero.
+    /// </summary>
+    public TimeSpan DeferralLeaseTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How long an outbox entry stays leased (hidden from other relays) while it is
+    /// being published. If the relay crashes before completing, the entry becomes
+    /// acquirable again after this duration. Must be greater than zero.
+    /// </summary>
+    public TimeSpan OutboxLeaseTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Poll interval of the transactional outbox relay when no entries are pending.
+    /// Lower values reduce the latency the outbox adds to saga dispatches; higher
+    /// values reduce load on the store. Must be greater than zero.
+    /// </summary>
+    public TimeSpan OutboxRelayInterval { get; set; } = TimeSpan.FromMilliseconds(250);
 
     /// <summary>
     /// Application name used for consumer group auto-generation and DLQ naming.
@@ -37,13 +59,16 @@ public sealed class TalariaOptions
     public string? ConsumerGroupOverride { get; set; }
 
     /// <summary>
-    /// Suffix appended to topic names for dead-letter queues.
-    /// </summary>
-    public string DlqSuffix { get; set; } = ".dlq";
-
-    /// <summary>
     /// Expiration duration for idempotency processing locks.
-    /// Defaults to 2 minutes.
+    /// Defaults to 2 minutes. Must be greater than zero — a zero/negative TTL causes
+    /// every acquire to fail and messages to be skipped without processing.
     /// </summary>
     public TimeSpan IdempotencyLockTtl { get; set; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// When false (default), DLQ messages carry a generic exception note instead of the
+    /// raw exception message, which may contain sensitive payload data. Enable in
+    /// non-production environments for easier debugging.
+    /// </summary>
+    public bool IncludeExceptionDetailsInDlq { get; set; }
 }

@@ -32,6 +32,11 @@ public sealed record MessageEnvelope<T>
     public string? PartitionKey { get; init; }
 
     /// <summary>
+    /// The transport partition the message was consumed from (if the transport is partitioned).
+    /// </summary>
+    public int? Partition { get; init; }
+
+    /// <summary>
     /// Timestamp of when the message was produced.
     /// </summary>
     public DateTimeOffset Timestamp { get; init; } = DateTimeOffset.UtcNow;

@@ -10,10 +10,13 @@ public static class CorrelationResolver
 {
     /// <summary>
     /// Resolves the correlation ID for a message payload by examining:
-    /// 1. Expected envelope headers (if present).
+    /// 1. The correlation envelope header (if present).
     /// 2. Properties marked with [SagaCorrelation].
-    /// 3. Properties named "CorrelationId".
-    /// 4. Properties named "Id".
+    /// 3. Properties named "CorrelationId" (case-insensitive).
+    /// 4. Properties named "Id" (case-insensitive).
+    /// 5. The first property whose name ENDS WITH "Id" (e.g. "OrderId", "AccountId").
+    ///    Beware: this broad fallback can bind an unintended property — prefer
+    ///    [SagaCorrelation] or an explicit correlateBy when in doubt.
     /// </summary>
     public static string? Resolve<TMessage>(TMessage message, MessageHeaders headers) where TMessage : class
     {

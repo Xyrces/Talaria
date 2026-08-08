@@ -1,12 +1,16 @@
-using System.Text.Json;
 using Talaria.Core.Abstractions;
 
 namespace Talaria.Core.Sagas;
 
+/// <summary>
+/// Fluent DSL for defining a saga's message-driven state machine.
+/// The registration is only added to the registry once configuration completes
+/// successfully (see <see cref="Registration.TalariaEndpointExtensions.MapSaga{TState}"/>).
+/// </summary>
 public class SagaConfigurator<TState> where TState : class, new()
 {
     private readonly SagaRegistry _registry;
-    private readonly SagaRegistration _registration = new SagaRegistration
+    private readonly SagaRegistration _registration = new()
     {
         StateType = typeof(TState)
     };
@@ -14,6 +18,14 @@ public class SagaConfigurator<TState> where TState : class, new()
     public SagaConfigurator(SagaRegistry registry)
     {
         _registry = registry;
+    }
+
+    /// <summary>
+    /// Publishes the configured registration into the registry. Called by MapSaga after
+    /// the configure callback completes; a throwing callback leaves nothing registered.
+    /// </summary>
+    internal void Complete()
+    {
         _registry.Add(_registration);
     }
 
@@ -35,21 +47,25 @@ public class SagaConfigurator<TState> where TState : class, new()
             {
                 var message = (TMessage)msgObj;
                 // Since this is a starter, stateObj should be null or default
-                
-                // Wrap the object-typed context in a typed wrapper or cast it.
-                // Our internal rawContext is actually SagaContext<TState> but masquerading as ISagaContext<object>?
-                // Actually we can implement a generic TypedContext in the dispatch pipeline.
-                var context = new TypedSagaContextWrapper((ISagaContext<object>)rawContext);
-                
+                var context = new TypedSagaContextWrapper(rawContext);
+
                 var result = await handler(message, context);
 
-                return new SagaResult<object>(
-                    result.State!,
-                    result.IsCompleted,
-                    result.IsDeferred,
-                    result.OutboundMessages);
+                return ToObjectResult(result);
             }
         });
+        return this;
+    }
+
+    /// <summary>
+    /// Declares the topic that dispatched messages of <typeparamref name="TMessage"/> are routed to.
+    /// Required for every message type any step of this saga dispatches — the engine throws
+    /// at dispatch time when a dispatched type has no mapping (instead of silently deriving
+    /// a topic from the CLR type name).
+    /// </summary>
+    public SagaConfigurator<TState> DispatchTo<TMessage>(string topic) where TMessage : class
+    {
+        _registration.DispatchTopics[typeof(TMessage)] = topic;
         return this;
     }
 
@@ -71,18 +87,29 @@ public class SagaConfigurator<TState> where TState : class, new()
             {
                 var state = stateObj as TState ?? throw new InvalidOperationException($"State is missing for non-starter message {typeof(TMessage).Name}");
                 var message = (TMessage)msgObj;
-                var context = new TypedSagaContextWrapper((ISagaContext<object>)rawContext);
-                
+                var context = new TypedSagaContextWrapper(rawContext);
+
                 var result = await handler(state, message, context);
 
-                return new SagaResult<object>(
-                    result.State!,
-                    result.IsCompleted,
-                    result.IsDeferred,
-                    result.OutboundMessages);
+                return ToObjectResult(result);
             }
         });
         return this;
+    }
+
+    private static SagaResult<object> ToObjectResult(SagaResult<TState> result)
+    {
+        if (result.IsCompleted)
+        {
+            return SagaResult<object>.Complete(result.OutboundMessages);
+        }
+
+        if (result.IsDeferred)
+        {
+            return SagaResult<object>.Defer();
+        }
+
+        return SagaResult<object>.Transition(result.State!, result.OutboundMessages);
     }
 
     private class TypedSagaContextWrapper : ISagaContext<TState>
@@ -97,13 +124,12 @@ public class SagaConfigurator<TState> where TState : class, new()
         public SagaResult<TState> Complete()
         {
             var res = _inner.Complete();
-            return new SagaResult<TState>(default, res.IsCompleted, res.IsDeferred, res.OutboundMessages);
+            return SagaResult<TState>.Complete(res.OutboundMessages);
         }
 
         public SagaResult<TState> Defer()
         {
-             var res = _inner.Defer();
-             return new SagaResult<TState>(default, res.IsCompleted, res.IsDeferred, res.OutboundMessages);
+            return SagaResult<TState>.Defer();
         }
 
         public ISagaContext<TState> Dispatch<TMessage>(TMessage message) where TMessage : class
@@ -115,7 +141,7 @@ public class SagaConfigurator<TState> where TState : class, new()
         public SagaResult<TState> Transition(TState newState)
         {
             var res = _inner.Transition(newState!);
-            return new SagaResult<TState>(newState, res.IsCompleted, res.IsDeferred, res.OutboundMessages);
+            return SagaResult<TState>.Transition(newState, res.OutboundMessages);
         }
     }
 }

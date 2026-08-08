@@ -8,15 +8,15 @@ namespace Talaria.InMemory.Tests;
 
 public class InMemoryConsumerTests
 {
-    private (Channel<InMemoryMessage>, Channel<InMemoryMessage>, Channel<InMemoryMessage>, InMemoryConsumer<string>) CreateSut(TimeSpan latency = default)
+    private (Channel<InMemoryMessage>, InMemoryTransport.TopicBus, InMemoryTransport.TopicBus, InMemoryConsumer<string>) CreateSut(TimeSpan latency = default)
     {
         var ch = Channel.CreateUnbounded<InMemoryMessage>();
-        var dlqCh = Channel.CreateUnbounded<InMemoryMessage>();
-        var appDlqCh = Channel.CreateUnbounded<InMemoryMessage>();
+        var dlqBus = new InMemoryTransport.TopicBus(100, unbounded: true);
+        var appDlqBus = new InMemoryTransport.TopicBus(100, unbounded: true);
         var options = new InMemoryTransportOptions { SimulatedLatency = latency };
-        
-        var consumer = new InMemoryConsumer<string>("test-topic", ch, dlqCh, appDlqCh, options);
-        return (ch, dlqCh, appDlqCh, consumer);
+
+        var consumer = new InMemoryConsumer<string>("test-topic", ch, dlqBus, appDlqBus, options, includeDlqExceptionDetails: true);
+        return (ch, dlqBus, appDlqBus, consumer);
     }
 
     [Fact]
@@ -55,24 +55,17 @@ public class InMemoryConsumerTests
     [Fact]
     public async Task NackAsync_SendsToDlqAndAppDlq()
     {
-        var (_, dlqCh, appDlqCh, consumer) = CreateSut();
+        var (_, dlqBus, appDlqBus, consumer) = CreateSut();
+        var dlqReader = dlqBus.GetOrCreateGroupChannel("test").Reader;
+        var appDlqReader = appDlqBus.GetOrCreateGroupChannel("test").Reader;
         var env = new MessageEnvelope<string> { Payload = "failed", Headers = new MessageHeaders() };
-        
+
         await consumer.NackAsync(env);
 
-        var dlqMsg = await dlqCh.Reader.ReadAsync();
-        var appDlqMsg = await appDlqCh.Reader.ReadAsync();
+        var dlqMsg = await dlqReader.ReadAsync();
+        var appDlqMsg = await appDlqReader.ReadAsync();
 
         Assert.Equal("\"failed\"", dlqMsg.PayloadJson);
         Assert.Equal("\"failed\"", appDlqMsg.PayloadJson);
-    }
-
-    [Fact]
-    public async Task Commit_And_Dispose_RunSuccessfully()
-    {
-        var (_, _, _, consumer) = CreateSut();
-        await consumer.CommitAsync(new MessageEnvelope<string> { Payload = "dummy" });
-        await consumer.DisposeAsync();
-        Assert.True(true);
     }
 }

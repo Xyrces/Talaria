@@ -10,6 +10,6 @@ internal sealed record InMemoryMessage
 {
     public required string PayloadJson { get; init; }
     public MessageHeaders Headers { get; init; } = new();
-    public long Offset { get; init; }
+    public long Offset { get; set; }
     public DateTimeOffset Timestamp { get; init; } = DateTimeOffset.UtcNow;
 }

@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
 using Talaria.Core.Hosting;
 
 namespace Talaria.Core.Registration;
@@ -17,6 +18,8 @@ public static class TalariaServiceExtensions
         services.TryAddSingleton<TopicRegistry>();
         services.TryAddSingleton<Talaria.Core.Sagas.SagaRegistry>();
         services.AddOptions<TalariaOptions>();
+        services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IValidateOptions<TalariaOptions>, TalariaOptionsValidator>());
         services.AddHostedService<TalariaHostedService>();
         services.AddHostedService<SagaHostedService>();
 

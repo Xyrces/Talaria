@@ -23,6 +23,7 @@ public interface ISagaContext<TState>
 
     /// <summary>
     /// Defers the processing of the current message (e.g. out of order message).
+    /// Any messages dispatched during this handler invocation are discarded.
     /// </summary>
     SagaResult<TState> Defer();
 }

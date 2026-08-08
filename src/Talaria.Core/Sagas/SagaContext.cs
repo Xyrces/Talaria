@@ -12,28 +12,17 @@ internal sealed class SagaContext<TState> : ISagaContext<TState>
 
     public SagaResult<TState> Complete()
     {
-        return new SagaResult<TState>(
-            State: default,
-            IsCompleted: true,
-            IsDeferred: false,
-            OutboundMessages: _outboundMessages.AsReadOnly());
+        // Snapshot: later Dispatch calls must not mutate an already-returned result.
+        return SagaResult<TState>.Complete(_outboundMessages.ToArray());
     }
 
     public SagaResult<TState> Transition(TState newState)
     {
-        return new SagaResult<TState>(
-            State: newState,
-            IsCompleted: false,
-            IsDeferred: false,
-            OutboundMessages: _outboundMessages.AsReadOnly());
+        return SagaResult<TState>.Transition(newState, _outboundMessages.ToArray());
     }
 
     public SagaResult<TState> Defer()
     {
-        return new SagaResult<TState>(
-            State: default,
-            IsCompleted: false,
-            IsDeferred: true,
-            OutboundMessages: Array.Empty<object>());
+        return SagaResult<TState>.Defer();
     }
 }

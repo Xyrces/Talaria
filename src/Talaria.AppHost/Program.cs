@@ -13,8 +13,11 @@ var tempo = builder.AddContainer("tempo", "grafana/tempo")
     .WithBindMount(Path.Combine(grafanaConfigDir, "tempo.yml"), "/etc/tempo.yaml", isReadOnly: true)
     .WithArgs("-config.file=/etc/tempo.yaml");
 
+var grafanaAdminPassword = builder.AddParameter("grafana-admin-password", secret: true);
+
 var grafana = builder.AddContainer("grafana", "grafana/grafana")
     .WithEndpoint(port: 3000, targetPort: 3000, name: "http")
+    .WithEnvironment("GF_SECURITY_ADMIN_PASSWORD", grafanaAdminPassword)
     .WithEnvironment("PROMETHEUS_URL", prometheus.GetEndpoint("http"))
     .WithEnvironment("TEMPO_URL", tempo.GetEndpoint("http"))
     .WithBindMount(Path.Combine(grafanaConfigDir, "datasources"), "/etc/grafana/provisioning/datasources", isReadOnly: true)

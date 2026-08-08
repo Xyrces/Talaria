@@ -34,15 +34,17 @@ public static class OnboardingSagaConfigurator
 {
     public static void ConfigureOnboardingSaga(IServiceProvider services)
     {
-        services.MapSaga<OnboardingState>(sagas => 
+        var logger = services.GetRequiredService<ILoggerFactory>().CreateLogger("OnboardingSaga");
+        var tracker = services.GetRequiredService<ProcessingTracker>();
+
+        services.MapSaga<OnboardingState>(sagas =>
         {
             sagas.StartedBy<CreateAccountCommand>(
                 "onboarding-commands",
-                async (msg, context) => 
+                async (msg, context) =>
                 {
-                    // Using console for simpler logging out of DI space within config, 
-                    // or could resolve ILoggerFactory from services if needed.
-                    Console.WriteLine($"[SAGA] Creating account {msg.AccountId} for {msg.Email}");
+                    logger.LogInformation("Creating account {AccountId}", msg.AccountId);
+                    tracker.Increment($"created:{msg.AccountId}");
 
                     var state = new OnboardingState
                     {
@@ -57,7 +59,6 @@ public static class OnboardingSagaConfigurator
                         Email = msg.Email
                     });
 
-                    Console.WriteLine($"[SAGA] Dispatched email for {msg.AccountId}. Waiting for verification.");
                     // Return transition to save the current state and wait for the next event.
                     return context.Transition(state);
                 },
@@ -65,15 +66,18 @@ public static class OnboardingSagaConfigurator
 
             sagas.On<AccountVerifiedEvent>(
                 "account-events",
-                async (state, msg, context) => 
+                async (state, msg, context) =>
                 {
-                    Console.WriteLine($"[SAGA] Received verification for {msg.AccountId}");
-                    
+                    logger.LogInformation("Received verification for {AccountId}", msg.AccountId);
+
                     state.VerificationReceived = true;
                     // Return complete to finalize the saga and clear its state.
                     return context.Complete();
                 },
                 correlateBy: msg => msg.AccountId);
+
+            // The email handler listens on "email-commands" (see Program.cs).
+            sagas.DispatchTo<SendVerificationEmailCommand>("email-commands");
         });
     }
 }

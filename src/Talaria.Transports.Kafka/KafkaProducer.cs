@@ -25,7 +25,8 @@ internal sealed class KafkaProducer<T> : IProducer<T>
         string? partitionKey = null,
         CancellationToken ct = default)
     {
-        var finalHeaders = headers ?? new MessageHeaders();
+        // Clone incoming headers: never mutate or store the caller's instance.
+        var finalHeaders = headers is null ? new MessageHeaders() : new MessageHeaders(headers);
 
         if (System.Diagnostics.Activity.Current != null && string.IsNullOrEmpty(finalHeaders.TraceParent))
         {
@@ -36,6 +37,17 @@ internal sealed class KafkaProducer<T> : IProducer<T>
         if (string.IsNullOrEmpty(finalHeaders.MessageId))
         {
             finalHeaders.MessageId = Guid.NewGuid().ToString("N");
+        }
+
+        // Engine-owned routing metadata: the CLR type of the payload, used by consumers
+        // that fan a topic out to multiple typed handlers.
+        finalHeaders[MessageHeaders.MessageTypeKey] = typeof(T).FullName ?? typeof(T).Name;
+
+        // Engine-owned hop counter: fresh messages start at 0; forwarded messages (already
+        // carrying a count) are incremented so cyclic flows trip the max-hop guard.
+        if (finalHeaders.ContainsKey(MessageHeaders.HopCountKey))
+        {
+            finalHeaders.HopCount = finalHeaders.HopCount + 1;
         }
 
         var payloadBytes = JsonSerializer.SerializeToUtf8Bytes(message);

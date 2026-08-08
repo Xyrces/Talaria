@@ -12,6 +12,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.AddServiceDefaults();
 
 var messagingProvider = builder.Configuration["Messaging:Provider"] ?? "Kafka";
+builder.Services.AddSingleton<Talaria.Client.Api.ProcessingTracker>();
 var talaria = builder.Services.AddTalaria();
 
 if (messagingProvider.Equals("InMemory", StringComparison.OrdinalIgnoreCase))
@@ -19,7 +20,8 @@ if (messagingProvider.Equals("InMemory", StringComparison.OrdinalIgnoreCase))
     talaria
         .UseInMemoryTransport()
         .UseInMemoryStateStore()
-        .UseInMemoryIdempotencyStore();
+        .UseInMemoryIdempotencyStore()
+        .UseInMemoryDeferralStore();
 }
 else
 {
@@ -33,7 +35,12 @@ else
             opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
             opts.KeyPrefix = "onboarding:";
         })
-        .UseRedisIdempotencyStore(opts => 
+        .UseRedisIdempotencyStore(opts =>
+        {
+            opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
+            opts.KeyPrefix = "onboarding:";
+        })
+        .UseRedisDeferralStore(opts =>
         {
             opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
             opts.KeyPrefix = "onboarding:";
@@ -48,35 +55,42 @@ OnboardingSagaConfigurator.ConfigureOnboardingSaga(app.Services);
 // Configure a stateless consumer mapping
 app.Services.MapTopic<SendVerificationEmailCommand>("email-commands", async (msg, ct) =>
 {
-    Console.WriteLine($"[STATELESS CONSUMER] Intercepted email command for {msg.AccountId} -> sending to {msg.Email}...");
+    var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("EmailConsumer");
+    logger.LogInformation("Intercepted email command for account {AccountId} — sending verification email...", msg.AccountId);
     await Task.Delay(500, ct); // simulate sending email
-    Console.WriteLine($"[STATELESS CONSUMER] Email sent successfully!");
+    app.Services.GetRequiredService<Talaria.Client.Api.ProcessingTracker>().Increment($"emails:{msg.AccountId}");
+    logger.LogInformation("Verification email for account {AccountId} sent.", msg.AccountId);
 });
+
+// Diagnostics endpoint used by the AppHost integration tests to assert exactly-once side effects.
+// Includes the replica id so multi-replica tests can sum counts across instances.
+app.MapGet("/api/diagnostics/count/{key}", (string key, [FromServices] Talaria.Client.Api.ProcessingTracker tracker) =>
+    Results.Ok(new { Key = key, Count = tracker.Get(key), Instance = Environment.MachineName }));
 
 app.MapDefaultEndpoints();
 
 // Simple API to trigger the saga
 app.MapPost("/api/accounts", async (
     [FromBody] CreateAccountRequest request,
-    [FromQuery] string? messageId,
     [FromQuery] string? accountId,
     [FromServices] ITransport transport) =>
 {
-    var determinedId = accountId ?? Guid.NewGuid().ToString("N");
-    var headers = new MessageHeaders();
-    
-    if (!string.IsNullOrEmpty(messageId))
+    if (string.IsNullOrWhiteSpace(request.Email) || request.Email.Length > 254 || !request.Email.Contains('@'))
     {
-        headers.MessageId = messageId;
+        return Results.BadRequest(new { Error = "A valid email address is required." });
     }
-    
+
+    var determinedId = accountId ?? Guid.NewGuid().ToString("N");
+
+    // The server always generates the message id — clients must not control dedup keys.
+
     // Simulate sending the command that the saga listens for
     var producer = await transport.CreateProducerAsync<CreateAccountCommand>("onboarding-commands", new ProducerOptions());
     await producer.ProduceAsync(new CreateAccountCommand
     {
         AccountId = determinedId,
         Email = request.Email
-    }, headers: headers);
+    });
 
     return Results.Accepted($"/api/accounts/{determinedId}", new { AccountId = determinedId });
 });
@@ -100,5 +114,7 @@ app.Run();
 
 public class CreateAccountRequest
 {
+    [System.ComponentModel.DataAnnotations.EmailAddress]
+    [System.ComponentModel.DataAnnotations.MaxLength(254)]
     public string Email { get; set; } = string.Empty;
 }

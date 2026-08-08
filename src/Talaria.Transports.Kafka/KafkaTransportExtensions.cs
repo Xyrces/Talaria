@@ -9,7 +9,8 @@ namespace Talaria.Transports.Kafka;
 public static class KafkaTransportExtensions
 {
     /// <summary>
-    /// Configures Talaria to use the Kafka transport.
+    /// Configures Talaria to use the Kafka transport. The transport is created by the DI
+    /// container (with logging wired in), which therefore owns its disposal on shutdown.
     /// </summary>
     public static TalariaBuilder UseKafkaTransport(
         this TalariaBuilder builder,
@@ -17,6 +18,13 @@ public static class KafkaTransportExtensions
     {
         var options = new KafkaTransportOptions();
         configure(options);
-        return builder.UseTransport(new KafkaTransport(options));
+
+        builder.Services.AddSingleton<Talaria.Core.Abstractions.ITransport>(sp =>
+            new KafkaTransport(
+                options,
+                sp.GetService<Microsoft.Extensions.Logging.ILoggerFactory>(),
+                sp.GetService<Microsoft.Extensions.Options.IOptions<Talaria.Core.TalariaOptions>>()?.Value.IncludeExceptionDetailsInDlq ?? false));
+
+        return builder;
     }
 }

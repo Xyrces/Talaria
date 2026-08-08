@@ -24,6 +24,7 @@ public sealed class TalariaSteps : IAsyncDisposable
     // Tracking
     private readonly List<object> _receivedMessages = new();
     private readonly Dictionary<string, List<object>> _receivedByTopic = new();
+    private readonly Dictionary<string, List<MessageEnvelope<OrderPlaced>>> _observedDlqMessages = new();
     private MessageHeaders? _receivedHeaders;
     private bool _handlerThrows;
     private string? _throwOnTopic;
@@ -126,6 +127,23 @@ public sealed class TalariaSteps : IAsyncDisposable
 
     // ─── WHEN ─────────────────────────────────────────────────────────
 
+    private async Task WaitUntilAsync(Func<Task<bool>> condition, string description)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (!await condition())
+        {
+            if (DateTime.UtcNow >= deadline)
+            {
+                throw new TimeoutException($"Timed out waiting for: {description}");
+            }
+
+            await Task.Delay(25);
+        }
+    }
+
+    private Task WaitUntilAsync(Func<bool> condition, string description)
+        => WaitUntilAsync(() => Task.FromResult(condition()), description);
+
     [When(@"a message of type OrderPlaced is published to ""(.*)""")]
     public async Task WhenAMessageOfTypeOrderPlacedIsPublishedTo(string topic)
     {
@@ -134,7 +152,7 @@ public sealed class TalariaSteps : IAsyncDisposable
             topic, new ProducerOptions());
         await producer.ProduceAsync(new OrderPlaced("ORD-001", 99.99m));
         await EnsureHostStarted();
-        await Task.Delay(300);
+        await WaitUntilAsync(() => _receivedMessages.Count >= 1, "handler to receive the message");
     }
 
     [When(@"a message with trace context is published to ""(.*)""")]
@@ -170,7 +188,7 @@ public sealed class TalariaSteps : IAsyncDisposable
 
         await producer.ProduceAsync(new OrderPlaced("ORD-002", 49.99m), headers);
         await EnsureHostStarted();
-        await Task.Delay(300);
+        await WaitUntilAsync(() => _receivedHeaders is not null, "handler to receive the traced message");
     }
 
     [When(@"a message is published to ""(.*)""")]
@@ -196,7 +214,44 @@ public sealed class TalariaSteps : IAsyncDisposable
     public async Task WhenTheHandlerHasAttemptedToProcess()
     {
         await EnsureHostStarted();
-        await Task.Delay(500);
+        await WaitUntilAsync(async () =>
+        {
+            if (_receivedMessages.Count >= 1)
+            {
+                return true;
+            }
+
+            // Drain DLQs into the observation cache — ReadAllFromTopicAsync consumes from
+            // the shared test-reader group, so the Then steps assert against this cache.
+            await DrainDlqObservationsAsync();
+            return _observedDlqMessages.Count > 0;
+        }, "handler to attempt processing the message");
+    }
+
+    private async Task DrainDlqObservationsAsync()
+    {
+        foreach (var topic in _receivedByTopic.Keys)
+        {
+            await DrainIntoCacheAsync(topic + ".dlq");
+        }
+
+        await DrainIntoCacheAsync("__app.dlq");
+    }
+
+    private async Task DrainIntoCacheAsync(string dlqTopic)
+    {
+        var drained = await _transport.ReadAllFromTopicAsync<OrderPlaced>(dlqTopic);
+        if (drained.Count == 0)
+        {
+            return;
+        }
+
+        if (!_observedDlqMessages.TryGetValue(dlqTopic, out var list))
+        {
+            _observedDlqMessages[dlqTopic] = list = new List<MessageEnvelope<OrderPlaced>>();
+        }
+
+        list.AddRange(drained);
     }
 
     // ─── THEN ─────────────────────────────────────────────────────────
@@ -223,12 +278,13 @@ public sealed class TalariaSteps : IAsyncDisposable
     public async Task ThenEachHandlerShouldProcessOnlyItsOwnTopicMessages()
     {
         await EnsureHostStarted();
-        await Task.Delay(300);
+        await WaitUntilAsync(
+            () => _receivedByTopic.Values.All(messages => messages.Count >= 1),
+            "each handler to receive its topic message");
 
         foreach (var (topic, messages) in _receivedByTopic)
         {
-            Assert.Single(messages);
-            var msg = Assert.IsType<OrderPlaced>(messages[0]);
+            var msg = Assert.IsType<OrderPlaced>(Assert.Single(messages));
             Assert.Equal($"ORD-{topic}", msg.OrderId);
         }
     }
@@ -236,6 +292,12 @@ public sealed class TalariaSteps : IAsyncDisposable
     [Then(@"the message should appear in ""(.*)""")]
     public async Task ThenTheMessageShouldAppearIn(string dlqTopic)
     {
+        if (_observedDlqMessages.TryGetValue(dlqTopic, out var observed))
+        {
+            Assert.NotEmpty(observed);
+            return;
+        }
+
         var dlqMessages = await _transport.ReadAllFromTopicAsync<OrderPlaced>(dlqTopic);
         Assert.NotEmpty(dlqMessages);
     }
@@ -243,6 +305,12 @@ public sealed class TalariaSteps : IAsyncDisposable
     [Then(@"the message should appear in the application-wide DLQ")]
     public async Task ThenTheMessageShouldAppearInAppDlq()
     {
+        if (_observedDlqMessages.TryGetValue("__app.dlq", out var observed))
+        {
+            Assert.NotEmpty(observed);
+            return;
+        }
+
         var dlqMessages = await _transport.ReadAllFromTopicAsync<OrderPlaced>("__app.dlq");
         Assert.NotEmpty(dlqMessages);
     }

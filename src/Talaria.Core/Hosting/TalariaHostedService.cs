@@ -1,4 +1,4 @@
-using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -9,8 +9,8 @@ namespace Talaria.Core.Hosting;
 
 /// <summary>
 /// Background service that manages the lifecycle of all topic consumers.
-/// On start: creates a consumer for each topic registration and dispatches messages to handlers.
-/// On stop: disposes all consumers gracefully.
+/// On start: creates a supervised consumer loop for each topic registration and dispatches messages to handlers.
+/// On stop: cancels the loops; each consumer is disposed as its loop unwinds.
 /// </summary>
 public sealed class TalariaHostedService : BackgroundService
 {
@@ -19,7 +19,7 @@ public sealed class TalariaHostedService : BackgroundService
     private readonly TalariaOptions _options;
     private readonly ILogger<TalariaHostedService> _logger;
     private readonly IServiceProvider _services;
-    private readonly List<IAsyncDisposable> _consumers = new();
+    private MessageProcessingPipeline? _pipeline;
 
     public TalariaHostedService(
         ITransport transport,
@@ -37,13 +37,22 @@ public sealed class TalariaHostedService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var tasks = new List<Task>();
+        // The idempotency store is a singleton — resolve it once, not per message.
+        var pipeline = new MessageProcessingPipeline(
+            _services.GetService<IIdempotencyStore>(),
+            _options,
+            _logger);
+        _pipeline = pipeline;
 
-        foreach (var registration in _registry.Registrations)
-        {
-            var task = ConsumeTopicAsync(registration, stoppingToken);
-            tasks.Add(task);
-        }
+        // Snapshot the registry before consumers spin up — late registrations are ignored.
+        var registrations = _registry.Registrations.ToList();
+
+        var tasks = registrations.Select(registration =>
+            ConsumerSupervision.RunSupervisedAsync(
+                $"topic:{registration.TopicName}",
+                ct => ConsumeTopicAsync(registration, ct),
+                _logger,
+                stoppingToken)).ToList();
 
         if (tasks.Count > 0)
         {
@@ -59,6 +68,7 @@ public sealed class TalariaHostedService : BackgroundService
             ?? _options.ConsumerGroupOverride
             ?? $"{_options.ApplicationName}.{registration.TopicName}";
 
+        // One-time generic dispatch per consumer (re)creation — not in the per-message hot path.
         var method = typeof(TalariaHostedService)
             .GetMethod(nameof(ConsumeTopicTypedAsync),
                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
@@ -72,36 +82,30 @@ public sealed class TalariaHostedService : BackgroundService
         string consumerGroup,
         CancellationToken ct)
     {
-        var consumer = await _transport.CreateConsumerAsync<T>(
+        await using var consumer = await _transport.CreateConsumerAsync<T>(
             registration.TopicName,
             new ConsumerOptions { ConsumerGroup = consumerGroup },
             ct);
-
-        _consumers.Add(consumer);
 
         _logger.LogInformation(
             "Talaria: consuming topic '{Topic}' (group: {Group}, transport: {Transport})",
             registration.TopicName, consumerGroup, _transport.Name);
 
-        try
+        var pipeline = _pipeline!;
+
+        await foreach (var envelope in consumer.ConsumeAsync(ct))
         {
-            await foreach (var envelope in consumer.ConsumeAsync(ct))
+            using var activity = Diagnostics.TalariaDiagnostics.StartConsumerActivity(
+                registration.TopicName, typeof(T).Name, envelope.Headers);
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+
+            try
             {
-                using var activity = Diagnostics.TalariaDiagnostics.StartConsumerActivity(
-                    registration.TopicName, typeof(T).Name, envelope.Headers);
-
-                var sw = System.Diagnostics.Stopwatch.StartNew();
-
                 // Hop count guard
-                if (envelope.Headers.HopCount >= _options.MaxHopCount)
+                if (pipeline.IsHopCountExceeded(envelope, registration.TopicName))
                 {
-                    _logger.LogWarning(
-                        "Message on '{Topic}' exceeded max hop count ({HopCount}/{Max}). Routing to DLQ.",
-                        registration.TopicName, envelope.Headers.HopCount, _options.MaxHopCount);
-
-                    envelope.Headers.DlqReason = "max_hops_exceeded";
-                    
-                    Diagnostics.TalariaDiagnostics.DlqRouted.Add(1, 
+                    Diagnostics.TalariaDiagnostics.DlqRouted.Add(1,
                         new KeyValuePair<string, object?>("messaging.destination.name", registration.TopicName),
                         new KeyValuePair<string, object?>("messaging.system", "talaria"));
 
@@ -109,83 +113,49 @@ public sealed class TalariaHostedService : BackgroundService
                     continue;
                 }
 
-                var idempotencyStore = (IIdempotencyStore?)_services.GetService(typeof(IIdempotencyStore));
-                var msgId = envelope.Headers.MessageId;
-                var hasLock = false;
+                var gate = await pipeline.AcquireAsync(envelope, consumerGroup, ct);
+                if (gate.IsDuplicate)
+                {
+                    _logger.LogDebug("Message {MessageId} skipped. Idempotency lock claimed by another worker or already completed.", envelope.Headers.MessageId);
+                    // We immediately commit the message to suppress further polling!
+                    await consumer.CommitAsync(envelope, ct);
+                    continue;
+                }
 
                 try
                 {
-                    if (idempotencyStore != null && !string.IsNullOrEmpty(msgId))
-                    {
-                        // Expiration is configurable via options to allow for slow processing without immediate concurrent retry overlaps
-                        hasLock = await idempotencyStore.TryAcquireLockAsync(msgId, consumerGroup, _options.IdempotencyLockTtl, ct);
-                        
-                        if (!hasLock)
-                        {
-                            _logger.LogDebug("Message {MessageId} skipped. Idempotency lock claimed by another worker or already completed.", msgId);
-                            // We immediately commit the message to suppress further polling!
-                            await consumer.CommitAsync(envelope, ct);
-                            continue;
-                        }
-                    }
-
                     await registration.Handler(envelope.Payload!, envelope.Headers, ct);
-                    
-                    if (hasLock && idempotencyStore != null)
-                    {
-                        await idempotencyStore.MarkCompleteAsync(msgId!, consumerGroup, ct);
-                    }
-
-                    await consumer.CommitAsync(envelope, ct);
-
-                    Diagnostics.TalariaDiagnostics.MessagesConsumed.Add(1, 
-                        new KeyValuePair<string, object?>("messaging.destination.name", registration.TopicName));
                 }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex,
                         "Handler for topic '{Topic}' failed. Routing to DLQ.",
                         registration.TopicName);
-                        
-                    if (hasLock && idempotencyStore != null)
-                    {
-                        await idempotencyStore.ReleaseLockAsync(msgId!, consumerGroup, ct);
-                    }
-                    
-                    envelope.Headers.DlqException = ex.Message;
+
                     activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, ex.Message);
-                    
-                    Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, 
+
+                    Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1,
                         new KeyValuePair<string, object?>("messaging.destination.name", registration.TopicName));
-                    Diagnostics.TalariaDiagnostics.DlqRouted.Add(1, 
+                    Diagnostics.TalariaDiagnostics.DlqRouted.Add(1,
                         new KeyValuePair<string, object?>("messaging.destination.name", registration.TopicName));
 
-                    await consumer.NackAsync(envelope, ct);
+                    await pipeline.FailAsync(gate.Lock, consumer, envelope, ex, null, ct);
+                    continue;
                 }
-                finally
-                {
-                    sw.Stop();
-                    Diagnostics.TalariaDiagnostics.ProcessingDuration.Record(sw.Elapsed.TotalMilliseconds, 
-                        new KeyValuePair<string, object?>("messaging.destination.name", registration.TopicName));
-                }
+
+                await pipeline.CompleteAsync(gate.Lock, consumer, envelope, ct);
+
+                Diagnostics.TalariaDiagnostics.MessagesConsumed.Add(1,
+                    new KeyValuePair<string, object?>("messaging.destination.name", registration.TopicName));
+            }
+            finally
+            {
+                sw.Stop();
+                Diagnostics.TalariaDiagnostics.ProcessingDuration.Record(sw.Elapsed.TotalMilliseconds,
+                    new KeyValuePair<string, object?>("messaging.destination.name", registration.TopicName));
             }
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            _logger.LogInformation("Talaria: consumer for '{Topic}' shutting down.", registration.TopicName);
-        }
-    }
 
-    public override async Task StopAsync(CancellationToken cancellationToken)
-    {
-        await base.StopAsync(cancellationToken);
-
-        foreach (var consumer in _consumers)
-        {
-            await consumer.DisposeAsync();
-        }
-
-        _consumers.Clear();
-        _logger.LogInformation("Talaria: all consumers disposed.");
+        _logger.LogInformation("Talaria: consumer for '{Topic}' shut down.", registration.TopicName);
     }
 }

@@ -20,4 +20,16 @@ public interface IStateStore<TState> where TState : class, new()
     /// Removes the state for the given correlation ID (saga completed).
     /// </summary>
     Task DeleteAsync(string correlationId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Atomically applies a saga state transition and stages its outbound messages in
+    /// the transactional outbox: either the state update and every outbox entry are
+    /// persisted together, or nothing is. A null <paramref name="newState"/> purges the
+    /// state (saga completed). Pass an empty outbox for transitions without dispatches.
+    /// </summary>
+    Task TransitionAsync(
+        string correlationId,
+        TState? newState,
+        IReadOnlyList<OutboxMessage> outbox,
+        CancellationToken ct = default);
 }

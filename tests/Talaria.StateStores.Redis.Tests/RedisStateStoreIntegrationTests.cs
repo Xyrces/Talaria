@@ -8,15 +8,14 @@ namespace Talaria.StateStores.Redis.Tests;
 
 public class RedisStateStoreIntegrationTests : IAsyncLifetime
 {
-    private RedisContainer _redisContainer;
-    private IServiceProvider _serviceProvider;
+    private RedisContainer? _redisContainer;
+    private IServiceProvider _serviceProvider = null!;
 
     public async Task InitializeAsync()
     {
         if (!DockerFactAttribute.IsDockerRunning()) return;
 
-        _redisContainer = new RedisBuilder()
-            .WithImage("redis:7.2")
+        _redisContainer = new RedisBuilder("redis:7.2")
             .Build();
 
         await _redisContainer.StartAsync();
@@ -25,7 +24,7 @@ public class RedisStateStoreIntegrationTests : IAsyncLifetime
         var builder = services.AddTalaria();
         builder.UseRedisStateStore(opts =>
         {
-            opts.Configuration = _redisContainer.GetConnectionString();
+            opts.Configuration = _redisContainer!.GetConnectionString();
             opts.KeyPrefix = "test-store:";
         });
 

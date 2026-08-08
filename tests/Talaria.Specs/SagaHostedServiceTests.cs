@@ -1,8 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Talaria.Core;
@@ -28,6 +28,7 @@ public class SagaHostedServiceTests
         var config = new SagaConfigurator<TestState>(registry);
         // Force no internal correlation resolver, so it falls back to CorrelationResolver which fails
         config.On<NoCorrelationMessage>("test-topic", async (state, msg, ctx) => ctx.Transition(state));
+        config.Complete();
 
         var services = new ServiceCollection()
             .AddSingleton<ITransport>(transport)
@@ -44,16 +45,12 @@ public class SagaHostedServiceTests
         var producer = await transport.CreateProducerAsync<NoCorrelationMessage>("test-topic", new ProducerOptions());
         await producer.ProduceAsync(new NoCorrelationMessage());
 
-        await Task.Delay(200);
+        // The message has no correlation ID — it must be nacked into the topic DLQ.
+        var dlq = await ReadUntilAsync<NoCorrelationMessage>(transport, "test-topic.dlq", 1);
 
-        // NackAsync on InMemoryConsumer writes to the DLQ channel
-        var consumer = await transport.CreateConsumerAsync<NoCorrelationMessage>("test-topic", new ConsumerOptions());
-        var nackedEnv = await ((InMemoryConsumer<NoCorrelationMessage>)consumer).ConsumeDlqAsync(cts.Token).GetAsyncEnumerator().MoveNextAsync();
-        
-        Assert.True(nackedEnv); // Successfully nacked
-        
-        // Wait, Is there a DLQ for SagaHostedService's nack?
-        // InMemoryConsumer.NackAsync writes to dlqChannel.
+        Assert.Single(dlq);
+        Assert.Equal("missing_correlation_id", dlq[0].Headers.DlqReason);
+
         await hostedService.StopAsync(cts.Token);
     }
 
@@ -65,6 +62,7 @@ public class SagaHostedServiceTests
         
         var config = new SagaConfigurator<TestState>(registry);
         config.On<NoCorrelationMessage>("defer-topic", async (state, msg, ctx) => ctx.Transition(state), correlateBy: m => "static-id");
+        config.Complete();
 
         var services = new ServiceCollection()
             .AddSingleton<ITransport>(transport)
@@ -80,17 +78,35 @@ public class SagaHostedServiceTests
 
         var producer = await transport.CreateProducerAsync<NoCorrelationMessage>("defer-topic", new ProducerOptions());
         var msg = new NoCorrelationMessage();
-        var fakeHeaders = new MessageHeaders { ["x-deferral-attempt"] = "1" };
+        var fakeHeaders = new MessageHeaders { [MessageHeaders.DeferralAttemptKey] = "1" };
         await producer.ProduceAsync(msg, fakeHeaders);
 
-        await Task.Delay(200);
+        // Attempt 1 already used (header) → next deferral exceeds MaxDeferralAttempts=1 → DLQ.
+        var dlq = await ReadUntilAsync<NoCorrelationMessage>(transport, "defer-topic.dlq", 1);
+
+        Assert.Single(dlq);
+        Assert.Equal("max_deferrals_exceeded", dlq[0].Headers.DlqReason);
 
         await hostedService.StopAsync(cts.Token);
-        
-        // At max attempt, it logs warning and drops/Nacks. Wait, it currently just returns and the message stays uncommitted.
-        // Actually, in the current design it drops it (logs warning, return) but the Consumer loop still Nacks or Commits?
-        // Wait, HandleDeferralAsync does not Nack or DLQ itself, it just returns. 
-        // The outer loop says `continue;` which leaves it uncommitted, but wait: 
-        // If it throws an exception it Nacks. If it just `continue;` the message is uncommitted and blocks.
+    }
+
+    private static async Task<List<MessageEnvelope<T>>> ReadUntilAsync<T>(
+        InMemoryTransport transport, string topic, int expectedCount)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        List<MessageEnvelope<T>> messages;
+        do
+        {
+            messages = await transport.ReadAllFromTopicAsync<T>(topic);
+            if (messages.Count >= expectedCount)
+            {
+                break;
+            }
+
+            await Task.Delay(50);
+        }
+        while (DateTime.UtcNow < deadline);
+
+        return messages;
     }
 }

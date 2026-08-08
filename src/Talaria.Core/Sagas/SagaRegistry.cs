@@ -1,13 +1,16 @@
-using Microsoft.Extensions.DependencyInjection;
-
 namespace Talaria.Core.Sagas;
 
+/// <summary>
+/// Registry of all sagas mapped via <c>MapSaga</c>.
+/// </summary>
 public class SagaRegistry
 {
-    public List<SagaRegistration> Registrations { get; } = new();
+    private readonly List<SagaRegistration> _registrations = new();
+
+    public IReadOnlyList<SagaRegistration> Registrations => _registrations;
 
     public void Add(SagaRegistration registration)
     {
-        Registrations.Add(registration);
+        _registrations.Add(registration);
     }
 }
