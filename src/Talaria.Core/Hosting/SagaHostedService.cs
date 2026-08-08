@@ -26,6 +26,10 @@ public sealed class SagaHostedService : BackgroundService
     // Durable deferral store; resolved at startup. Null means deferral is unavailable.
     private IDeferralStore? _deferralStore;
 
+    // Transactional outbox read side; resolved at startup. Null means saga dispatch
+    // falls back to direct transactional produce (state save and publish not atomic).
+    private IOutboxStore? _outboxStore;
+
     // Cached producers keyed by (topic, message type) — created once, reused per dispatch.
     private readonly ConcurrentDictionary<(string Topic, Type MessageType), ProducerInvoker> _producers = new();
 
@@ -54,6 +58,7 @@ public sealed class SagaHostedService : BackgroundService
         Task<object?> GetAsync(IServiceProvider scope, string correlationId, CancellationToken ct);
         Task SaveAsync(IServiceProvider scope, string correlationId, object state, CancellationToken ct);
         Task DeleteAsync(IServiceProvider scope, string correlationId, CancellationToken ct);
+        Task TransitionAsync(IServiceProvider scope, string correlationId, object? newState, IReadOnlyList<OutboxMessage> outbox, CancellationToken ct);
         object NewState();
     }
 
@@ -67,6 +72,9 @@ public sealed class SagaHostedService : BackgroundService
 
         public async Task DeleteAsync(IServiceProvider scope, string correlationId, CancellationToken ct)
             => await scope.GetRequiredService<IStateStore<TState>>().DeleteAsync(correlationId, ct);
+
+        public async Task TransitionAsync(IServiceProvider scope, string correlationId, object? newState, IReadOnlyList<OutboxMessage> outbox, CancellationToken ct)
+            => await scope.GetRequiredService<IStateStore<TState>>().TransitionAsync(correlationId, (TState?)newState, outbox, ct);
 
         public object NewState() => new TState();
     }
@@ -108,6 +116,16 @@ public sealed class SagaHostedService : BackgroundService
                 "Register one via UseRedisDeferralStore() or UseInMemoryDeferralStore().");
         }
 
+        _outboxStore = _serviceProvider.GetService<IOutboxStore>();
+        if (_outboxStore is null && _dispatchRoutes.Count > 0)
+        {
+            _logger.LogWarning(
+                "No IOutboxStore is registered. Saga dispatch falls back to direct transactional " +
+                "produce: the state save and the message publish are not atomic, so a crash " +
+                "between them can lose outbound messages. The outbox is registered automatically " +
+                "by UseRedisStateStore() and UseInMemoryStateStore().");
+        }
+
         // Pre-create producers for all step topics (used for deferral republishing) and
         // pre-build the session dispatchers for all declared dispatch routes (one-time
         // generic dispatch at startup — never in the per-message hot path).
@@ -132,6 +150,15 @@ public sealed class SagaHostedService : BackgroundService
             tasks.Add(ConsumerSupervision.RunSupervisedAsync(
                 "deferral-sweeper",
                 ct => SweepDeferralsLoopAsync(transport, ct),
+                _logger,
+                stoppingToken));
+        }
+
+        if (_outboxStore != null && _dispatchRoutes.Count > 0)
+        {
+            tasks.Add(ConsumerSupervision.RunSupervisedAsync(
+                "outbox-relay",
+                ct => OutboxRelayLoopAsync(transport, ct),
                 _logger,
                 stoppingToken));
         }
@@ -409,66 +436,129 @@ public sealed class SagaHostedService : BackgroundService
                 }
             }
 
-            // 8b. Transactional dispatch of outbound messages via explicit routes.
-            //     The consumed message's offset joins the transaction when the transport
-            //     supports it (Kafka exactly-once); InMemory buffers until commit.
-            var offsetSource = env.SourceTopic is not null && env.Partition is int partition
-                ? new TransactionOffsetSource(env.SourceTopic, partition, env.Offset)
-                : null;
-
-            await using var tx = await transport.BeginTransactionAsync(_options.ApplicationName, offsetSource, ct);
-
-            foreach (var outbound in result.OutboundMessages)
+            if (_outboxStore is not null)
             {
-                var outboundType = outbound.GetType();
-                var outboundTopic = _dispatchRoutes[outboundType];
-
-                var dispatcher = GetSessionDispatcher(outboundType);
-
-                // Propagate trace context
-                var headers = new MessageHeaders();
-                if (System.Diagnostics.Activity.Current != null)
+                // 8b. Transactional outbox: stage outbound messages atomically with the
+                //     state transition. Each staged message carries a freshly minted
+                //     MessageId so the relay's at-least-once publication is deduplicated
+                //     downstream by the idempotency gate.
+                var staged = new List<OutboxMessage>(result.OutboundMessages.Count);
+                foreach (var outbound in result.OutboundMessages)
                 {
-                    headers.TraceParent = System.Diagnostics.Activity.Current.Id;
-                    headers.TraceState = System.Diagnostics.Activity.Current.TraceStateString;
+                    var outboundType = outbound.GetType();
+                    var outboundTopic = _dispatchRoutes[outboundType];
+
+                    var headers = new MessageHeaders { MessageId = Guid.NewGuid().ToString("N") };
+                    if (System.Diagnostics.Activity.Current != null)
+                    {
+                        headers.TraceParent = System.Diagnostics.Activity.Current.Id;
+                        headers.TraceState = System.Diagnostics.Activity.Current.TraceStateString;
+                    }
+
+                    staged.Add(new OutboxMessage(
+                        Guid.NewGuid(),
+                        outboundTopic,
+                        outboundType.AssemblyQualifiedName ?? outboundType.FullName!,
+                        JsonSerializer.Serialize(outbound, outboundType),
+                        headers,
+                        DateTimeOffset.UtcNow));
                 }
 
-                await dispatcher(tx, outboundTopic, outbound, headers, ct);
-            }
+                // 9. Atomic transition: state save/purge + outbox staging in one store
+                //    operation. A crash after this point loses nothing — the relay
+                //    publishes whatever was staged.
+                await stateStore.TransitionAsync(
+                    scope.ServiceProvider,
+                    correlationId,
+                    result.IsCompleted ? null : result.State!,
+                    staged,
+                    ct);
+                activity?.SetTag("saga.status", result.IsCompleted ? "completed" : "transitioned");
 
-            // 9. Save or purge state.
-            if (result.IsCompleted)
-            {
-                await stateStore.DeleteAsync(scope.ServiceProvider, correlationId, ct);
-                activity?.SetTag("saga.status", "completed");
+                // 10. Mark idempotency and commit the offset. A crash before this commits
+                //     means redelivery: the replay hits transitioned state, so step handlers
+                //     must be idempotent (starters are safe by construction via the replay guard).
+                try
+                {
+                    await pipeline.CompleteAsync(gate.Lock, consumer, env, ct);
+
+                    Diagnostics.TalariaDiagnostics.MessagesConsumed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
+                }
+                catch (Exception ex)
+                {
+                    // Infrastructure failure — do NOT dead-letter a healthy message. The lock
+                    // is released and the offset stays uncommitted so the transport redelivers.
+                    _logger.LogError(ex, "Failed to complete saga transition; the message remains uncommitted for redelivery.");
+
+                    await ReleaseLockBestEffortAsync(pipeline, gate.Lock, ct);
+
+                    activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, ex.Message);
+                    Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
+                }
             }
             else
             {
-                await stateStore.SaveAsync(scope.ServiceProvider, correlationId, result.State!, ct);
-                activity?.SetTag("saga.status", "transitioned");
-            }
+                // Legacy fallback (no IOutboxStore registered): direct transactional dispatch.
+                //     The consumed message's offset joins the transaction when the transport
+                //     supports it (Kafka exactly-once); InMemory buffers until commit.
+                var offsetSource = env.SourceTopic is not null && env.Partition is int partition
+                    ? new TransactionOffsetSource(env.SourceTopic, partition, env.Offset)
+                    : null;
 
-            // 10. Commit the transition, the offset, and the idempotency marker.
-            try
-            {
-                await tx.CommitAsync(ct);
-                await pipeline.CompleteAsync(gate.Lock, consumer, env, ct);
+                await using var tx = await transport.BeginTransactionAsync(_options.ApplicationName, offsetSource, ct);
 
-                Diagnostics.TalariaDiagnostics.MessagesConsumed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
-            }
-            catch (Exception ex)
-            {
-                // Infrastructure failure — do NOT dead-letter a healthy message. The lock is
-                // released, the session's disposal aborts the transaction, and the offset stays
-                // uncommitted so the transport redelivers the message. Note the state save may
-                // already have happened: replay then hits transitioned state, so step handlers
-                // must be idempotent (starters are safe by construction via the replay guard).
-                _logger.LogError(ex, "Failed to commit saga transition; the message remains uncommitted for redelivery.");
+                foreach (var outbound in result.OutboundMessages)
+                {
+                    var outboundType = outbound.GetType();
+                    var outboundTopic = _dispatchRoutes[outboundType];
 
-                await ReleaseLockBestEffortAsync(pipeline, gate.Lock, ct);
+                    var dispatcher = GetSessionDispatcher(outboundType);
 
-                activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, ex.Message);
-                Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
+                    // Propagate trace context
+                    var headers = new MessageHeaders();
+                    if (System.Diagnostics.Activity.Current != null)
+                    {
+                        headers.TraceParent = System.Diagnostics.Activity.Current.Id;
+                        headers.TraceState = System.Diagnostics.Activity.Current.TraceStateString;
+                    }
+
+                    await dispatcher(tx, outboundTopic, outbound, headers, ct);
+                }
+
+                // 9. Save or purge state.
+                if (result.IsCompleted)
+                {
+                    await stateStore.DeleteAsync(scope.ServiceProvider, correlationId, ct);
+                    activity?.SetTag("saga.status", "completed");
+                }
+                else
+                {
+                    await stateStore.SaveAsync(scope.ServiceProvider, correlationId, result.State!, ct);
+                    activity?.SetTag("saga.status", "transitioned");
+                }
+
+                // 10. Commit the transition, the offset, and the idempotency marker.
+                try
+                {
+                    await tx.CommitAsync(ct);
+                    await pipeline.CompleteAsync(gate.Lock, consumer, env, ct);
+
+                    Diagnostics.TalariaDiagnostics.MessagesConsumed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
+                }
+                catch (Exception ex)
+                {
+                    // Infrastructure failure — do NOT dead-letter a healthy message. The lock is
+                    // released, the session's disposal aborts the transaction, and the offset stays
+                    // uncommitted so the transport redelivers the message. Note the state save may
+                    // already have happened: replay then hits transitioned state, so step handlers
+                    // must be idempotent (starters are safe by construction via the replay guard).
+                    _logger.LogError(ex, "Failed to commit saga transition; the message remains uncommitted for redelivery.");
+
+                    await ReleaseLockBestEffortAsync(pipeline, gate.Lock, ct);
+
+                    activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, ex.Message);
+                    Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
+                }
             }
         }
         finally
@@ -632,6 +722,93 @@ public sealed class SagaHostedService : BackgroundService
             {
                 // Not fatal: the lease expires on its own and the entry is retried then.
                 _logger.LogError(abandonEx, "Failed to abandon deferral lease for message {Id}; it will retry when the lease expires.", message.Id);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Publishes staged outbox entries to the transport. Entries are leased (hidden from
+    /// other relays) for <see cref="TalariaOptions.OutboxLeaseTimeout"/> rather than
+    /// removed, so a crash or shutdown mid-publish never loses a staged message — the
+    /// lease expires and a later relay re-acquires it. The duplicate publish that lease
+    /// expiry can produce carries the same minted MessageId and is deduplicated
+    /// downstream by the idempotency gate.
+    /// </summary>
+    private async Task OutboxRelayLoopAsync(ITransport transport, CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            IReadOnlyList<LeasedOutboxMessage> pending;
+            try
+            {
+                pending = await _outboxStore!.AcquirePendingAsync(
+                    DateTimeOffset.UtcNow,
+                    _options.OutboxLeaseTimeout,
+                    maxBatch: 64,
+                    ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Outbox relay failed to acquire pending messages; retrying next interval.");
+                pending = Array.Empty<LeasedOutboxMessage>();
+            }
+
+            foreach (var leased in pending)
+            {
+                await PublishOutboxAsync(transport, leased, ct);
+            }
+
+            // Drain continuously while work remains; poll gently when idle.
+            if (pending.Count == 0)
+            {
+                await Task.Delay(_options.OutboxRelayInterval, ct);
+            }
+        }
+    }
+
+    private async Task PublishOutboxAsync(ITransport transport, LeasedOutboxMessage leased, CancellationToken ct)
+    {
+        var message = leased.Message;
+        try
+        {
+            var type = Type.GetType(message.MessageType);
+            if (type is null)
+            {
+                // Poison entry — the type can never be resolved; drop it rather than retry forever.
+                _logger.LogError("Outbox message {Id} has unresolvable payload type '{MessageType}'; dropping.", message.Id, message.MessageType);
+                await _outboxStore!.CompleteAsync(leased.Lease, ct);
+                return;
+            }
+
+            var payload = JsonSerializer.Deserialize(message.PayloadJson, type)
+                ?? throw new JsonException($"Outbox payload deserialized to null for {type.Name}.");
+
+            var invoker = await GetOrCreateProducerAsync(transport, message.Topic, type, ct);
+            await invoker.Produce(payload, new MessageHeaders(message.Headers), ct);
+
+            await _outboxStore!.CompleteAsync(leased.Lease, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Host shutting down mid-publish — the lease simply expires and the entry is
+            // re-acquired on the next relay pass. Not an error.
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to publish outbox message {Id}; releasing the lease for retry.", message.Id);
+            try
+            {
+                await _outboxStore!.AbandonAsync(leased.Lease, DateTimeOffset.UtcNow + _options.OutboxRelayInterval, ct);
+            }
+            catch (Exception abandonEx)
+            {
+                // Not fatal: the lease expires on its own and the entry is retried then.
+                _logger.LogError(abandonEx, "Failed to abandon outbox lease for message {Id}; it will retry when the lease expires.", message.Id);
             }
         }
     }

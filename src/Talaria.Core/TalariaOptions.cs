@@ -33,6 +33,20 @@ public sealed class TalariaOptions
     public TimeSpan DeferralLeaseTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
+    /// How long an outbox entry stays leased (hidden from other relays) while it is
+    /// being published. If the relay crashes before completing, the entry becomes
+    /// acquirable again after this duration. Must be greater than zero.
+    /// </summary>
+    public TimeSpan OutboxLeaseTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Poll interval of the transactional outbox relay when no entries are pending.
+    /// Lower values reduce the latency the outbox adds to saga dispatches; higher
+    /// values reduce load on the store. Must be greater than zero.
+    /// </summary>
+    public TimeSpan OutboxRelayInterval { get; set; } = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
     /// Application name used for consumer group auto-generation and DLQ naming.
     /// Defaults to the entry assembly name.
     /// </summary>

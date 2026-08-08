@@ -183,7 +183,16 @@ public class TalariaSagaSteps : IAsyncDisposable
         if (messageType == "OrderCompleted")
         {
             var topic = typeof(OrderCompletedSaga).Name.ToLowerInvariant();
-            var envelopes = await _transport.ReadAllFromTopicAsync<OrderCompletedSaga>(topic);
+
+            // The outbox relay publishes asynchronously — poll until the message lands.
+            List<Core.Abstractions.MessageEnvelope<OrderCompletedSaga>> envelopes = [];
+            for (int i = 0; i < 50; i++)
+            {
+                envelopes.AddRange(await _transport.ReadAllFromTopicAsync<OrderCompletedSaga>(topic));
+                if (envelopes.Count > 0) break;
+                await Task.Delay(50);
+            }
+
             var envelope = Assert.Single(envelopes);
             
             var expectedTraceId = expectedParent.Split('-')[1];

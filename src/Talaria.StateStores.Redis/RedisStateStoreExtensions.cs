@@ -18,6 +18,9 @@ public static class RedisStateStoreExtensions
 {
     /// <summary>
     /// Configures Talaria to use the Redis state store (singleton, matching the InMemory store).
+    /// Also registers the Redis transactional outbox: saga state transitions then stage
+    /// their outbound messages atomically with the state write, and a background relay
+    /// publishes them.
     /// </summary>
     public static TalariaBuilder UseRedisStateStore(
         this TalariaBuilder builder,
@@ -26,6 +29,7 @@ public static class RedisStateStoreExtensions
         builder.ConfigureRedis(configure);
 
         builder.Services.TryAddSingleton(typeof(IStateStore<>), typeof(RedisStateStore<>));
+        builder.Services.TryAddSingleton<IOutboxStore, RedisOutboxStore>();
 
         return builder;
     }

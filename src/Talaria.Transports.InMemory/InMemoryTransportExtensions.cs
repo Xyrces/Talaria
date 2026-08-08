@@ -53,9 +53,19 @@ public static class InMemoryTransportExtensions
 
     /// <summary>
     /// Configures Talaria to use the in-memory saga state store.
+    /// Also registers the in-memory transactional outbox: saga state transitions stage
+    /// their outbound messages atomically (under one lock) with the state write.
     /// </summary>
     public static TalariaBuilder UseInMemoryStateStore(this TalariaBuilder builder)
     {
+        Microsoft.Extensions.DependencyInjection.Extensions.ServiceCollectionDescriptorExtensions.TryAddSingleton(
+            builder.Services,
+            typeof(InMemoryOutboxStore));
+        // Factory, not a second singleton: the state stores and the relay must share
+        // the same outbox instance.
+        Microsoft.Extensions.DependencyInjection.Extensions.ServiceCollectionDescriptorExtensions.TryAddSingleton<Talaria.Core.Abstractions.IOutboxStore>(
+            builder.Services,
+            sp => sp.GetRequiredService<InMemoryOutboxStore>());
         Microsoft.Extensions.DependencyInjection.Extensions.ServiceCollectionDescriptorExtensions.TryAddSingleton(
             builder.Services,
             typeof(Talaria.Core.Abstractions.IStateStore<>),

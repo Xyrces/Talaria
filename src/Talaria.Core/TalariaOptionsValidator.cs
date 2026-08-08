@@ -36,6 +36,16 @@ internal sealed class TalariaOptionsValidator : IValidateOptions<TalariaOptions>
             return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.DeferralLeaseTimeout)} must be greater than zero.");
         }
 
+        if (options.OutboxLeaseTimeout <= TimeSpan.Zero)
+        {
+            return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.OutboxLeaseTimeout)} must be greater than zero.");
+        }
+
+        if (options.OutboxRelayInterval <= TimeSpan.Zero)
+        {
+            return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.OutboxRelayInterval)} must be greater than zero.");
+        }
+
         return ValidateOptionsResult.Success;
     }
 }
