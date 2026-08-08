@@ -35,13 +35,9 @@ public class TalariaHostedServiceTests
         
         using var cts = new CancellationTokenSource();
         await hostedService.StartAsync(cts.Token);
-        
-        // Ensure starting and stopping covers the dispose paths
+
+        // Ensure starting and stopping covers the dispose paths; stopping twice must not throw.
         await hostedService.StopAsync(cts.Token);
-        
-        // Stopping again shouldn't throw
         await hostedService.StopAsync(cts.Token);
-        
-        Assert.True(true); // Reached gracefully
     }
 }

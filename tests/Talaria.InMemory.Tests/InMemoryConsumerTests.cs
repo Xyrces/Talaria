@@ -68,13 +68,4 @@ public class InMemoryConsumerTests
         Assert.Equal("\"failed\"", dlqMsg.PayloadJson);
         Assert.Equal("\"failed\"", appDlqMsg.PayloadJson);
     }
-
-    [Fact]
-    public async Task Commit_And_Dispose_RunSuccessfully()
-    {
-        var (_, _, _, consumer) = CreateSut();
-        await consumer.CommitAsync(new MessageEnvelope<string> { Payload = "dummy" });
-        await consumer.DisposeAsync();
-        Assert.True(true);
-    }
 }

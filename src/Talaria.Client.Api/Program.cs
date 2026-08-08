@@ -12,6 +12,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.AddServiceDefaults();
 
 var messagingProvider = builder.Configuration["Messaging:Provider"] ?? "Kafka";
+builder.Services.AddSingleton<Talaria.Client.Api.ProcessingTracker>();
 var talaria = builder.Services.AddTalaria();
 
 if (messagingProvider.Equals("InMemory", StringComparison.OrdinalIgnoreCase))
@@ -57,8 +58,14 @@ app.Services.MapTopic<SendVerificationEmailCommand>("email-commands", async (msg
     var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("EmailConsumer");
     logger.LogInformation("Intercepted email command for account {AccountId} — sending verification email...", msg.AccountId);
     await Task.Delay(500, ct); // simulate sending email
+    app.Services.GetRequiredService<Talaria.Client.Api.ProcessingTracker>().Increment($"emails:{msg.AccountId}");
     logger.LogInformation("Verification email for account {AccountId} sent.", msg.AccountId);
 });
+
+// Diagnostics endpoint used by the AppHost integration tests to assert exactly-once side effects.
+// Includes the replica id so multi-replica tests can sum counts across instances.
+app.MapGet("/api/diagnostics/count/{key}", (string key, [FromServices] Talaria.Client.Api.ProcessingTracker tracker) =>
+    Results.Ok(new { Key = key, Count = tracker.Get(key), Instance = Environment.MachineName }));
 
 app.MapDefaultEndpoints();
 

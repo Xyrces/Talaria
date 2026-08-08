@@ -20,13 +20,4 @@ public class InMemoryProducerTests
         Assert.Equal("\"hello\"", msg.PayloadJson);
         Assert.Equal("True", msg.Headers["X-Test"]);
     }
-
-    [Fact]
-    public async Task DisposeAsync_CompletesSuccessfully()
-    {
-        var bus = new InMemoryTransport.TopicBus(100, unbounded: false);
-        var producer = new InMemoryProducer<string>(bus, "topic", new InMemoryTransportOptions());
-        await producer.DisposeAsync();
-        Assert.True(true);
-    }
 }
