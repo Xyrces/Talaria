@@ -385,9 +385,33 @@ public sealed class SagaHostedService : BackgroundService
                 return;
             }
 
-            // 8. Transactional dispatch of outbound messages via explicit routes.
-            //    The consumed message's offset joins the transaction when the transport
-            //    supports it (Kafka exactly-once); InMemory buffers until commit.
+            // 8a. Validate dispatch routes BEFORE starting the transaction. An undeclared
+            //     dispatch type is a saga configuration bug: dead-letter the message like a
+            //     handler failure (releasing the idempotency lock) instead of letting the
+            //     exception escape the loop — which would drop the message silently and leak
+            //     the lock until TTL.
+            foreach (var outbound in result.OutboundMessages)
+            {
+                if (!_dispatchRoutes.ContainsKey(outbound.GetType()))
+                {
+                    var outboundType = outbound.GetType();
+                    var ex = new InvalidOperationException(
+                        $"Saga '{stateType.Name}' dispatched message type '{outboundType.Name}' with no DispatchTo mapping. " +
+                        $"Declare the route with saga.DispatchTo<{outboundType.Name}>(\"topic\").");
+
+                    _logger.LogError(ex, "Saga {Type} dispatched an unmapped message type.", stateType.Name);
+                    activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, ex.Message);
+                    Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
+                    Diagnostics.TalariaDiagnostics.DlqRouted.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
+
+                    await pipeline.FailAsync(gate.Lock, consumer, env, ex, "unmapped_dispatch", ct);
+                    return;
+                }
+            }
+
+            // 8b. Transactional dispatch of outbound messages via explicit routes.
+            //     The consumed message's offset joins the transaction when the transport
+            //     supports it (Kafka exactly-once); InMemory buffers until commit.
             var offsetSource = env.SourceTopic is not null && env.Partition is int partition
                 ? new TransactionOffsetSource(env.SourceTopic, partition, env.Offset)
                 : null;
@@ -397,12 +421,7 @@ public sealed class SagaHostedService : BackgroundService
             foreach (var outbound in result.OutboundMessages)
             {
                 var outboundType = outbound.GetType();
-                if (!_dispatchRoutes.TryGetValue(outboundType, out var outboundTopic))
-                {
-                    throw new InvalidOperationException(
-                        $"Saga '{stateType.Name}' dispatched message type '{outboundType.Name}' with no DispatchTo mapping. " +
-                        $"Declare the route with saga.DispatchTo<{outboundType.Name}>(\"topic\").");
-                }
+                var outboundTopic = _dispatchRoutes[outboundType];
 
                 var dispatcher = GetSessionDispatcher(outboundType);
 

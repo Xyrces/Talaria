@@ -28,6 +28,10 @@ public sealed class RedisDeferralStore : IDeferralStore
     private readonly IDatabase _db;
     private readonly string _key;
 
+    /// <summary>
+    /// Creates the store. The sorted-set key is namespaced by the configured key prefix
+    /// and the application's name (from <see cref="TalariaOptions.ApplicationName"/>).
+    /// </summary>
     public RedisDeferralStore(
         IConnectionMultiplexer redis,
         IOptions<TalariaRedisOptions> options,

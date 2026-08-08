@@ -24,6 +24,7 @@ public sealed class TalariaSteps : IAsyncDisposable
     // Tracking
     private readonly List<object> _receivedMessages = new();
     private readonly Dictionary<string, List<object>> _receivedByTopic = new();
+    private readonly Dictionary<string, List<MessageEnvelope<OrderPlaced>>> _observedDlqMessages = new();
     private MessageHeaders? _receivedHeaders;
     private bool _handlerThrows;
     private string? _throwOnTopic;
@@ -214,10 +215,43 @@ public sealed class TalariaSteps : IAsyncDisposable
     {
         await EnsureHostStarted();
         await WaitUntilAsync(async () =>
-            _receivedMessages.Count >= 1 ||
-            (_throwOnTopic is not null &&
-             (await _transport.ReadAllFromTopicAsync<OrderPlaced>(_throwOnTopic + ".dlq")).Count >= 1),
-            "handler to attempt processing the message");
+        {
+            if (_receivedMessages.Count >= 1)
+            {
+                return true;
+            }
+
+            // Drain DLQs into the observation cache — ReadAllFromTopicAsync consumes from
+            // the shared test-reader group, so the Then steps assert against this cache.
+            await DrainDlqObservationsAsync();
+            return _observedDlqMessages.Count > 0;
+        }, "handler to attempt processing the message");
+    }
+
+    private async Task DrainDlqObservationsAsync()
+    {
+        foreach (var topic in _receivedByTopic.Keys)
+        {
+            await DrainIntoCacheAsync(topic + ".dlq");
+        }
+
+        await DrainIntoCacheAsync("__app.dlq");
+    }
+
+    private async Task DrainIntoCacheAsync(string dlqTopic)
+    {
+        var drained = await _transport.ReadAllFromTopicAsync<OrderPlaced>(dlqTopic);
+        if (drained.Count == 0)
+        {
+            return;
+        }
+
+        if (!_observedDlqMessages.TryGetValue(dlqTopic, out var list))
+        {
+            _observedDlqMessages[dlqTopic] = list = new List<MessageEnvelope<OrderPlaced>>();
+        }
+
+        list.AddRange(drained);
     }
 
     // ─── THEN ─────────────────────────────────────────────────────────
@@ -258,6 +292,12 @@ public sealed class TalariaSteps : IAsyncDisposable
     [Then(@"the message should appear in ""(.*)""")]
     public async Task ThenTheMessageShouldAppearIn(string dlqTopic)
     {
+        if (_observedDlqMessages.TryGetValue(dlqTopic, out var observed))
+        {
+            Assert.NotEmpty(observed);
+            return;
+        }
+
         var dlqMessages = await _transport.ReadAllFromTopicAsync<OrderPlaced>(dlqTopic);
         Assert.NotEmpty(dlqMessages);
     }
@@ -265,6 +305,12 @@ public sealed class TalariaSteps : IAsyncDisposable
     [Then(@"the message should appear in the application-wide DLQ")]
     public async Task ThenTheMessageShouldAppearInAppDlq()
     {
+        if (_observedDlqMessages.TryGetValue("__app.dlq", out var observed))
+        {
+            Assert.NotEmpty(observed);
+            return;
+        }
+
         var dlqMessages = await _transport.ReadAllFromTopicAsync<OrderPlaced>("__app.dlq");
         Assert.NotEmpty(dlqMessages);
     }

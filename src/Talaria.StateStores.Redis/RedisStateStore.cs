@@ -17,6 +17,9 @@ public sealed class RedisStateStore<TState> : IStateStore<TState>
     // Type name is baked into the prefix to prevent key collision if the correlation IDs are identical across different sagas
     private readonly string _prefix;
 
+    /// <summary>
+    /// Creates the store. Options are shared across all UseRedis* registrations.
+    /// </summary>
     public RedisStateStore(IConnectionMultiplexer redis, Microsoft.Extensions.Options.IOptions<TalariaRedisOptions> options)
     {
         _redis = redis;

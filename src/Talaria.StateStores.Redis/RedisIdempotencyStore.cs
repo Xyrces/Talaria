@@ -23,6 +23,9 @@ public sealed class RedisIdempotencyStore : IIdempotencyStore
 
     private readonly string _prefix;
 
+    /// <summary>
+    /// Creates the store. Options are shared across all UseRedis* registrations.
+    /// </summary>
     public RedisIdempotencyStore(IConnectionMultiplexer redis, Microsoft.Extensions.Options.IOptions<TalariaRedisOptions> options)
     {
         _redis = redis;

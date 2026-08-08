@@ -5,7 +5,7 @@ namespace Talaria.Core.Registration;
 
 /// <summary>
 /// Fluent builder for configuring Talaria messaging services.
-/// Returned by <see cref="TalariaServiceExtensions.AddTalaria"/>.
+/// Returned by <see cref="TalariaServiceExtensions.AddTalaria(IServiceCollection)"/>.
 /// </summary>
 public sealed class TalariaBuilder
 {
