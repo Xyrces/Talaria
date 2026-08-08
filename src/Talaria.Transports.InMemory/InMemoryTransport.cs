@@ -8,18 +8,30 @@ namespace Talaria.Transports.InMemory;
 /// <summary>
 /// In-memory transport backed by System.Threading.Channels.
 /// Provides fully deterministic, container-free messaging for testing and development.
+/// <para>
+/// Kafka-parity semantics: every (topic, consumer-group) pair gets its own channel, so
+/// consumer groups are independent (a late-joining group replays the retained backlog);
+/// offsets are assigned per topic by the transport; malformed payloads are routed to the
+/// DLQ instead of killing the consumer loop. DLQ topics are unbounded.
+/// </para>
+/// <para>
+/// Remaining divergences from Kafka: the retained backlog is capped at ChannelCapacity
+/// (oldest dropped), there is no partition key ordering, and offsets are not transactional.
+/// </para>
 /// </summary>
 public sealed class InMemoryTransport : ITransport
 {
     public string Name => "InMemory";
 
-    private readonly ConcurrentDictionary<string, object> _channels = new();
+    private readonly ConcurrentDictionary<string, TopicBus> _topicBuses = new();
+    private readonly ConcurrentDictionary<string, TopicBus> _dlqBuses = new();
     private readonly InMemoryTransportOptions _options;
+    private readonly bool _includeDlqExceptionDetails;
     internal InMemoryTransportOptions Options => _options;
 
     public InMemoryTransport() : this(new InMemoryTransportOptions()) { }
 
-    public InMemoryTransport(InMemoryTransportOptions options)
+    public InMemoryTransport(InMemoryTransportOptions options, bool includeDlqExceptionDetails = false)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -36,32 +48,33 @@ public sealed class InMemoryTransport : ITransport
         }
 
         _options = options;
+        _includeDlqExceptionDetails = includeDlqExceptionDetails;
     }
 
     /// <summary>
-    /// Gets or creates a channel for the given topic.
+    /// Gets or creates the bus for a regular topic (bounded by ChannelCapacity).
     /// </summary>
-    internal Channel<InMemoryMessage> GetOrCreateChannel(string topic)
-    {
-        return (Channel<InMemoryMessage>)_channels.GetOrAdd(topic, _ =>
-            Channel.CreateBounded<InMemoryMessage>(
-                new BoundedChannelOptions(_options.ChannelCapacity)
-                {
-                    FullMode = BoundedChannelFullMode.Wait,
-                    SingleReader = false,
-                    SingleWriter = false,
-                }));
-    }
+    internal TopicBus GetOrCreateBus(string topic)
+        => _topicBuses.GetOrAdd(topic, _ => new TopicBus(_options.ChannelCapacity, unbounded: false));
+
+    /// <summary>
+    /// Gets or creates the bus for a DLQ topic (unbounded — dead letters must never be dropped
+    /// or block the consumer loop).
+    /// </summary>
+    internal TopicBus GetOrCreateDlqBus(string dlqTopic)
+        => _dlqBuses.GetOrAdd(dlqTopic, _ => new TopicBus(_options.ChannelCapacity, unbounded: true));
 
     public Task<IConsumer<T>> CreateConsumerAsync<T>(
         string topic,
         ConsumerOptions options,
         CancellationToken ct = default)
     {
-        var channel = GetOrCreateChannel(topic);
-        var dlqChannel = GetOrCreateChannel(topic + _options.DlqSuffix);
-        var appDlqChannel = GetOrCreateChannel("__app.dlq");
-        IConsumer<T> consumer = new InMemoryConsumer<T>(topic, channel, dlqChannel, appDlqChannel, _options);
+        var bus = GetOrCreateBus(topic);
+        var groupChannel = bus.GetOrCreateGroupChannel(options.ConsumerGroup ?? "default");
+        var dlqBus = GetOrCreateDlqBus(topic + _options.DlqSuffix);
+        var appDlqBus = GetOrCreateDlqBus("__app.dlq");
+        IConsumer<T> consumer = new InMemoryConsumer<T>(
+            topic, groupChannel, dlqBus, appDlqBus, _options, _includeDlqExceptionDetails);
         return Task.FromResult(consumer);
     }
 
@@ -70,8 +83,7 @@ public sealed class InMemoryTransport : ITransport
         ProducerOptions options,
         CancellationToken ct = default)
     {
-        var channel = GetOrCreateChannel(topic);
-        IProducer<T> producer = new InMemoryProducer<T>(channel, topic, _options);
+        IProducer<T> producer = new InMemoryProducer<T>(GetOrCreateBus(topic), topic, _options);
         return Task.FromResult(producer);
     }
 
@@ -86,14 +98,17 @@ public sealed class InMemoryTransport : ITransport
     }
 
     /// <summary>
-    /// Reads all messages currently pending on a topic. Useful for test assertions.
+    /// Reads all messages currently pending on a topic from a dedicated reader group.
+    /// Useful for test assertions. The first call replays the retained backlog.
     /// </summary>
     public async Task<List<MessageEnvelope<T>>> ReadAllFromTopicAsync<T>(
         string topic,
         CancellationToken ct = default)
     {
         var results = new List<MessageEnvelope<T>>();
-        var channel = GetOrCreateChannel(topic);
+        // DLQ topics live in the DLQ bus registry; everything else in the topic registry.
+        var bus = _dlqBuses.TryGetValue(topic, out var dlqBus) ? dlqBus : GetOrCreateBus(topic);
+        var channel = bus.GetOrCreateGroupChannel("__talaria.test-reader");
 
         while (channel.Reader.TryRead(out var raw))
         {
@@ -109,5 +124,87 @@ public sealed class InMemoryTransport : ITransport
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// A topic's message bus: retains a capped backlog and fans each published message
+    /// out to every consumer-group channel (Kafka group semantics). Assigns per-topic offsets.
+    /// </summary>
+    internal sealed class TopicBus
+    {
+        private readonly object _gate = new();
+        private readonly List<InMemoryMessage> _backlog = new();
+        private readonly Dictionary<string, Channel<InMemoryMessage>> _groups = new();
+        private readonly int _backlogCapacity;
+        private readonly bool _unbounded;
+        private long _offset;
+
+        public TopicBus(int backlogCapacity, bool unbounded)
+        {
+            _backlogCapacity = backlogCapacity;
+            _unbounded = unbounded;
+        }
+
+        /// <summary>
+        /// Returns the channel for a consumer group, creating it (and replaying the retained
+        /// backlog) on first use.
+        /// </summary>
+        public Channel<InMemoryMessage> GetOrCreateGroupChannel(string group)
+        {
+            lock (_gate)
+            {
+                if (_groups.TryGetValue(group, out var existing))
+                {
+                    return existing;
+                }
+
+                var channel = _unbounded
+                    ? Channel.CreateUnbounded<InMemoryMessage>(new UnboundedChannelOptions { SingleReader = false, SingleWriter = false })
+                    : Channel.CreateBounded<InMemoryMessage>(new BoundedChannelOptions(_backlogCapacity)
+                    {
+                        FullMode = BoundedChannelFullMode.Wait,
+                        SingleReader = false,
+                        SingleWriter = false,
+                    });
+
+                foreach (var message in _backlog)
+                {
+                    channel.Writer.TryWrite(CloneForGroup(message));
+                }
+
+                _groups[group] = channel;
+                return channel;
+            }
+        }
+
+        /// <summary>
+        /// Assigns the next offset, retains the message, and writes a per-group clone to
+        /// every subscribed group channel.
+        /// </summary>
+        public async Task PublishAsync(InMemoryMessage message, CancellationToken ct)
+        {
+            List<Channel<InMemoryMessage>> targets;
+            lock (_gate)
+            {
+                message.Offset = Interlocked.Increment(ref _offset);
+                _backlog.Add(message);
+                if (_backlog.Count > _backlogCapacity)
+                {
+                    _backlog.RemoveAt(0);
+                }
+
+                targets = _groups.Values.ToList();
+            }
+
+            foreach (var channel in targets)
+            {
+                await channel.Writer.WriteAsync(CloneForGroup(message), ct);
+            }
+        }
+
+        // Each group gets its own headers copy so engine mutations (DLQ reason, hop count)
+        // on one group's envelope never leak into another group's view of the same message.
+        private static InMemoryMessage CloneForGroup(InMemoryMessage message)
+            => message with { Headers = new MessageHeaders(message.Headers) };
     }
 }

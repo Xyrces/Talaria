@@ -30,11 +30,11 @@ public sealed class RedisDeferralStore : IDeferralStore
 
     public RedisDeferralStore(
         IConnectionMultiplexer redis,
-        TalariaRedisOptions options,
+        IOptions<TalariaRedisOptions> options,
         IOptions<TalariaOptions> talariaOptions)
     {
         _db = redis.GetDatabase();
-        _key = $"{options.KeyPrefix}defer:{talariaOptions.Value.ApplicationName}";
+        _key = $"{options.Value.KeyPrefix}defer:{talariaOptions.Value.ApplicationName}";
     }
 
     public async Task EnqueueAsync(DeferredMessage message, CancellationToken ct = default)

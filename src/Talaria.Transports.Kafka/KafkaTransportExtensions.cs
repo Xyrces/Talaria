@@ -20,7 +20,10 @@ public static class KafkaTransportExtensions
         configure(options);
 
         builder.Services.AddSingleton<Talaria.Core.Abstractions.ITransport>(sp =>
-            new KafkaTransport(options, sp.GetService<Microsoft.Extensions.Logging.ILoggerFactory>()));
+            new KafkaTransport(
+                options,
+                sp.GetService<Microsoft.Extensions.Logging.ILoggerFactory>(),
+                sp.GetService<Microsoft.Extensions.Options.IOptions<Talaria.Core.TalariaOptions>>()?.Value.IncludeExceptionDetailsInDlq ?? false));
 
         return builder;
     }

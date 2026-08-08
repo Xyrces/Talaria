@@ -23,10 +23,10 @@ public sealed class RedisIdempotencyStore : IIdempotencyStore
 
     private readonly string _prefix;
 
-    public RedisIdempotencyStore(IConnectionMultiplexer redis, TalariaRedisOptions options)
+    public RedisIdempotencyStore(IConnectionMultiplexer redis, Microsoft.Extensions.Options.IOptions<TalariaRedisOptions> options)
     {
         _redis = redis;
-        _options = options;
+        _options = options.Value;
         _db = _redis.GetDatabase();
         _prefix = $"{_options.KeyPrefix}idemp:";
     }

@@ -6,16 +6,19 @@ namespace Talaria.Specs;
 
 public class InMemoryConsumerTests
 {
+    private static InMemoryConsumer<string> CreateConsumer(Channel<InMemoryMessage> channel, InMemoryTransportOptions options)
+        => new(
+            "topic", channel,
+            new InMemoryTransport.TopicBus(100, unbounded: true),
+            new InMemoryTransport.TopicBus(100, unbounded: true),
+            options, includeDlqExceptionDetails: true);
+
     [Fact]
     public async Task ConsumeAsync_CompletesWhenChannelClosed()
     {
         var channel = Channel.CreateUnbounded<InMemoryMessage>();
-        var dlqChannel = Channel.CreateUnbounded<InMemoryMessage>();
-        var appDlqChannel = Channel.CreateUnbounded<InMemoryMessage>();
-        var options = new InMemoryTransportOptions();
+        var consumer = CreateConsumer(channel, new InMemoryTransportOptions());
 
-        var consumer = new InMemoryConsumer<string>("topic", channel, dlqChannel, appDlqChannel, options);
-        
         channel.Writer.Complete();
 
         var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
@@ -24,20 +27,16 @@ public class InMemoryConsumerTests
         {
             count++;
         }
-        
+
         Assert.Equal(0, count);
     }
-    
+
     [Fact]
     public async Task ConsumeAsync_AppliesSimulatedLatency()
     {
         var channel = Channel.CreateUnbounded<InMemoryMessage>();
-        var dlqChannel = Channel.CreateUnbounded<InMemoryMessage>();
-        var appDlqChannel = Channel.CreateUnbounded<InMemoryMessage>();
-        var options = new InMemoryTransportOptions { SimulatedLatency = TimeSpan.FromMilliseconds(50) };
+        var consumer = CreateConsumer(channel, new InMemoryTransportOptions { SimulatedLatency = TimeSpan.FromMilliseconds(50) });
 
-        var consumer = new InMemoryConsumer<string>("topic", channel, dlqChannel, appDlqChannel, options);
-        
         await channel.Writer.WriteAsync(new InMemoryMessage { PayloadJson = "\"test\"", Headers = new MessageHeaders() });
         channel.Writer.Complete();
 
@@ -49,7 +48,7 @@ public class InMemoryConsumerTests
             count++;
         }
         sw.Stop();
-        
+
         Assert.Equal(1, count);
         Assert.True(sw.ElapsedMilliseconds >= 30, "Should have awaited simulated latency");
     }

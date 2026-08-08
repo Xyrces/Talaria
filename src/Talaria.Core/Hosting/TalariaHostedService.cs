@@ -44,7 +44,10 @@ public sealed class TalariaHostedService : BackgroundService
             _logger);
         _pipeline = pipeline;
 
-        var tasks = _registry.Registrations.Select(registration =>
+        // Snapshot the registry before consumers spin up — late registrations are ignored.
+        var registrations = _registry.Registrations.ToList();
+
+        var tasks = registrations.Select(registration =>
             ConsumerSupervision.RunSupervisedAsync(
                 $"topic:{registration.TopicName}",
                 ct => ConsumeTopicAsync(registration, ct),

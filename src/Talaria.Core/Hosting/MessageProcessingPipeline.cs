@@ -130,7 +130,9 @@ internal sealed class MessageProcessingPipeline
             }
         }
 
-        envelope.Headers.DlqException = ex.Message;
+        envelope.Headers.DlqException = _options.IncludeExceptionDetailsInDlq
+            ? ex.Message
+            : "An exception occurred while processing the message. Enable IncludeExceptionDetailsInDlq for details.";
         if (dlqReason is not null)
         {
             envelope.Headers.DlqReason = dlqReason;

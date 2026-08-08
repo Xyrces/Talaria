@@ -1,4 +1,3 @@
-using System.Threading.Channels;
 using Talaria.Core.Abstractions;
 
 namespace Talaria.Transports.InMemory;
@@ -7,13 +6,13 @@ namespace Talaria.Transports.InMemory;
 /// Transactional session for the in-memory transport. Produces are buffered and only
 /// become visible to consumers on <see cref="CommitAsync"/>; <see cref="AbortAsync"/>
 /// (or disposing an open session) discards them — making the abort path observable in tests.
+/// Offsets are assigned by the topic bus in commit order.
 /// </summary>
 internal sealed class InMemoryTransactionalSession : ITransactionalSession
 {
-    private readonly List<(Channel<InMemoryMessage> Channel, InMemoryMessage Message)> _buffer = new();
+    private readonly List<(InMemoryTransport.TopicBus Bus, InMemoryMessage Message)> _buffer = new();
     private readonly object _gate = new();
     private readonly InMemoryTransport _transport;
-    private long _offset;
     private bool _completed;
 
     public InMemoryTransactionalSession(InMemoryTransport transport)
@@ -25,22 +24,22 @@ internal sealed class InMemoryTransactionalSession : ITransactionalSession
     {
         ThrowIfCompleted();
         return Task.FromResult<IProducer<T>>(
-            new InMemoryBufferedProducer<T>(this, _transport.GetOrCreateChannel(topic), topic));
+            new InMemoryBufferedProducer<T>(this, _transport.GetOrCreateBus(topic), topic));
     }
 
     public async Task CommitAsync(CancellationToken ct = default)
     {
         ThrowIfCompleted();
 
-        List<(Channel<InMemoryMessage> Channel, InMemoryMessage Message)> pending;
+        List<(InMemoryTransport.TopicBus Bus, InMemoryMessage Message)> pending;
         lock (_gate)
         {
-            pending = new List<(Channel<InMemoryMessage>, InMemoryMessage)>(_buffer);
+            pending = new List<(InMemoryTransport.TopicBus, InMemoryMessage)>(_buffer);
         }
 
-        foreach (var (channel, message) in pending)
+        foreach (var (bus, message) in pending)
         {
-            await channel.Writer.WriteAsync(message, ct);
+            await bus.PublishAsync(message, ct);
         }
 
         lock (_gate)
@@ -73,16 +72,14 @@ internal sealed class InMemoryTransactionalSession : ITransactionalSession
         return ValueTask.CompletedTask;
     }
 
-    internal void Buffer(Channel<InMemoryMessage> channel, InMemoryMessage message)
+    internal void Buffer(InMemoryTransport.TopicBus bus, InMemoryMessage message)
     {
         lock (_gate)
         {
             ThrowIfCompleted();
-            _buffer.Add((channel, message));
+            _buffer.Add((bus, message));
         }
     }
-
-    internal long NextOffset() => Interlocked.Increment(ref _offset);
 
     private void ThrowIfCompleted()
     {
@@ -100,16 +97,16 @@ internal sealed class InMemoryTransactionalSession : ITransactionalSession
 internal sealed class InMemoryBufferedProducer<T> : IProducer<T>
 {
     private readonly InMemoryTransactionalSession _session;
-    private readonly Channel<InMemoryMessage> _channel;
+    private readonly InMemoryTransport.TopicBus _bus;
     private readonly string _topic;
 
     public InMemoryBufferedProducer(
         InMemoryTransactionalSession session,
-        Channel<InMemoryMessage> channel,
+        InMemoryTransport.TopicBus bus,
         string topic)
     {
         _session = session;
-        _channel = channel;
+        _bus = bus;
         _topic = topic;
     }
 
@@ -119,7 +116,7 @@ internal sealed class InMemoryBufferedProducer<T> : IProducer<T>
         string? partitionKey = null,
         CancellationToken ct = default)
     {
-        var msg = InMemoryProducer<T>.CreateMessage(message, headers, _session.NextOffset());
+        var msg = InMemoryProducer<T>.CreateMessage(message, headers);
 
         if (System.Diagnostics.Activity.Current != null)
         {
@@ -127,7 +124,7 @@ internal sealed class InMemoryBufferedProducer<T> : IProducer<T>
             System.Diagnostics.Activity.Current.SetTag("messaging.system", "talaria");
         }
 
-        _session.Buffer(_channel, msg);
+        _session.Buffer(_bus, msg);
         return Task.CompletedTask;
     }
 

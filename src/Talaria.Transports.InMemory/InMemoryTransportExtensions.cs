@@ -10,14 +10,18 @@ public static class InMemoryTransportExtensions
 {
     /// <summary>
     /// Configures Talaria to use the in-memory transport.
+    /// Also registers the in-memory saga state store.
     /// </summary>
     public static TalariaBuilder UseInMemoryTransport(this TalariaBuilder builder)
     {
-        return builder.UseTransport(new InMemoryTransport());
+        return builder.UseInMemoryTransport(_ => { });
     }
 
     /// <summary>
     /// Configures Talaria to use the in-memory transport with options.
+    /// The transport is created by the DI container (which wires
+    /// TalariaOptions.IncludeExceptionDetailsInDlq through). Also registers the
+    /// in-memory saga state store.
     /// </summary>
     public static TalariaBuilder UseInMemoryTransport(
         this TalariaBuilder builder,
@@ -25,12 +29,19 @@ public static class InMemoryTransportExtensions
     {
         var options = new InMemoryTransportOptions();
         configure(options);
-        return builder.UseTransport(new InMemoryTransport(options));
+        builder.UseInMemoryStateStore();
+        builder.Services.AddSingleton<Talaria.Core.Abstractions.ITransport>(sp =>
+            new InMemoryTransport(
+                options,
+                sp.GetService<Microsoft.Extensions.Options.IOptions<Talaria.Core.TalariaOptions>>()?.Value.IncludeExceptionDetailsInDlq ?? false));
+        return builder;
     }
 
     /// <summary>
-    /// Configures Talaria to use the in-memory transport with a specific instance
-    /// (allows sharing the transport for test assertions).
+    /// Configures Talaria to use a specific in-memory transport instance
+    /// (allows sharing the transport for test assertions). Intended for tests:
+    /// the DI container does not own or dispose externally created instances.
+    /// Also registers the in-memory saga state store.
     /// </summary>
     public static TalariaBuilder UseInMemoryTransport(
         this TalariaBuilder builder,

@@ -16,6 +16,7 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
     private readonly KafkaTransportOptions _kafkaOptions;
     private readonly ILoggerFactory? _loggerFactory;
     private readonly ILogger? _logger;
+    private readonly bool _includeDlqExceptionDetails;
 
     // At most two shared raw producers: idempotent (default) and non-idempotent.
     private readonly ConcurrentDictionary<bool, IProducer<string, byte[]>> _sharedProducers = new();
@@ -35,11 +36,21 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
     /// <summary>
     /// Creates a KafkaTransport with the specified options.
     /// </summary>
-    public KafkaTransport(KafkaTransportOptions kafkaOptions, ILoggerFactory? loggerFactory = null)
+    /// <param name="kafkaOptions">Transport configuration.</param>
+    /// <param name="loggerFactory">Optional logger factory for transport and consumer logging.</param>
+    /// <param name="includeDlqExceptionDetails">
+    /// When true, raw exception messages are written to DLQ headers. Mirrors
+    /// <c>TalariaOptions.IncludeExceptionDetailsInDlq</c> — keep disabled in production.
+    /// </param>
+    public KafkaTransport(
+        KafkaTransportOptions kafkaOptions,
+        ILoggerFactory? loggerFactory = null,
+        bool includeDlqExceptionDetails = false)
     {
         _kafkaOptions = kafkaOptions ?? throw new ArgumentNullException(nameof(kafkaOptions));
         _loggerFactory = loggerFactory;
         _logger = loggerFactory?.CreateLogger<KafkaTransport>();
+        _includeDlqExceptionDetails = includeDlqExceptionDetails;
 
         if (string.IsNullOrWhiteSpace(_kafkaOptions.BootstrapServers))
         {
@@ -110,9 +121,10 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
         _groupMetadata[config.GroupId] = confluentConsumer.ConsumerGroupMetadata;
 
         var wrapper = new KafkaConsumer<T>(
-            confluentConsumer, dlqProducer, topic, _kafkaOptions, _kafkaOptions.DlqSuffix,
+            confluentConsumer, dlqProducer, topic, _kafkaOptions.DlqSuffix,
             _loggerFactory?.CreateLogger<KafkaConsumer<T>>(),
-            bufferCapacity: options.BufferCapacity > 0 ? options.BufferCapacity : 100);
+            bufferCapacity: options.BufferCapacity > 0 ? options.BufferCapacity : 100,
+            includeDlqExceptionDetails: _includeDlqExceptionDetails);
 
         _trackedConsumers.Add(wrapper);
         return Task.FromResult<IConsumer<T>>(wrapper);

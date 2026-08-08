@@ -17,7 +17,7 @@ public sealed class TalariaBuilder
     }
 
     /// <summary>
-    /// Registers a transport implementation.
+    /// Registers a transport implementation. The container creates and disposes it.
     /// </summary>
     public TalariaBuilder UseTransport<TTransport>() where TTransport : class, ITransport
     {
@@ -26,7 +26,19 @@ public sealed class TalariaBuilder
     }
 
     /// <summary>
-    /// Registers a transport instance directly.
+    /// Registers a transport via a factory. The container disposes the created instance
+    /// on shutdown. Prefer this over the instance overload.
+    /// </summary>
+    public TalariaBuilder UseTransport(Func<IServiceProvider, ITransport> factory)
+    {
+        Services.AddSingleton(factory);
+        return this;
+    }
+
+    /// <summary>
+    /// Registers a transport instance directly. Intended for tests that need to share
+    /// the instance for assertions — the DI container does NOT dispose externally
+    /// created instances; the caller owns their lifecycle.
     /// </summary>
     public TalariaBuilder UseTransport(ITransport transport)
     {

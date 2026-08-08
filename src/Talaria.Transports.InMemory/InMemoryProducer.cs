@@ -1,27 +1,23 @@
 using System.Text.Json;
-using System.Threading.Channels;
 using Talaria.Core.Abstractions;
 
 namespace Talaria.Transports.InMemory;
 
 /// <summary>
-/// In-memory producer that writes serialized messages to a Channel.
+/// In-memory producer that publishes serialized messages to a topic bus.
 /// </summary>
 internal sealed class InMemoryProducer<T> : IProducer<T>
 {
-    private readonly Channel<InMemoryMessage> _channel;
+    private readonly InMemoryTransport.TopicBus _bus;
     private readonly string _topic;
-    private readonly InMemoryTransportOptions _options;
-    private long _offset;
 
     public InMemoryProducer(
-        Channel<InMemoryMessage> channel,
+        InMemoryTransport.TopicBus bus,
         string topic,
         InMemoryTransportOptions options)
     {
-        _channel = channel;
+        _bus = bus;
         _topic = topic;
-        _options = options;
     }
 
     public async Task ProduceAsync(
@@ -30,7 +26,7 @@ internal sealed class InMemoryProducer<T> : IProducer<T>
         string? partitionKey = null,
         CancellationToken ct = default)
     {
-        var msg = CreateMessage(message, headers, Interlocked.Increment(ref _offset));
+        var msg = CreateMessage(message, headers);
 
         if (System.Diagnostics.Activity.Current != null)
         {
@@ -38,14 +34,15 @@ internal sealed class InMemoryProducer<T> : IProducer<T>
             System.Diagnostics.Activity.Current.SetTag("messaging.system", "talaria");
         }
 
-        await _channel.Writer.WriteAsync(msg, ct);
+        await _bus.PublishAsync(msg, ct);
     }
 
     /// <summary>
     /// Builds a wire message with all engine-owned headers stamped (message id, message type,
     /// hop counter, trace context). Shared with the transactional session's buffering producer.
+    /// The offset is assigned by the bus at publish time.
     /// </summary>
-    internal static InMemoryMessage CreateMessage(T message, MessageHeaders? headers, long offset)
+    internal static InMemoryMessage CreateMessage(T message, MessageHeaders? headers)
     {
         // Clone incoming headers: never mutate or store the caller's instance.
         var finalHeaders = headers is null ? new MessageHeaders() : new MessageHeaders(headers);
@@ -76,7 +73,6 @@ internal sealed class InMemoryProducer<T> : IProducer<T>
         {
             PayloadJson = JsonSerializer.Serialize(message),
             Headers = finalHeaders,
-            Offset = offset,
             Timestamp = DateTimeOffset.UtcNow,
         };
     }

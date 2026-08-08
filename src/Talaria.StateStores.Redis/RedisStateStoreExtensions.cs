@@ -1,4 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
 using StackExchange.Redis;
 using Talaria.Core.Abstractions;
 using Talaria.Core.Registration;
@@ -7,29 +9,23 @@ namespace Talaria.StateStores.Redis;
 
 /// <summary>
 /// Extensions for registering Redis state store with Talaria.
+/// All UseRedis* methods share a single <see cref="TalariaRedisOptions"/> registration —
+/// configure callbacks accumulate across calls instead of being silently discarded.
+/// For production deployments include TLS and auth in the configuration,
+/// e.g. "host:6379,ssl=true,password=...".
 /// </summary>
 public static class RedisStateStoreExtensions
 {
     /// <summary>
-    /// Configures Talaria to use the Redis state store.
+    /// Configures Talaria to use the Redis state store (singleton, matching the InMemory store).
     /// </summary>
     public static TalariaBuilder UseRedisStateStore(
         this TalariaBuilder builder,
         Action<TalariaRedisOptions>? configure = null)
     {
-        var options = new TalariaRedisOptions();
-        configure?.Invoke(options);
-        ValidateConfiguration(options);
+        builder.ConfigureRedis(configure);
 
-        // Register the options
-        builder.Services.AddSingleton(options);
-
-        // Register IConnectionMultiplexer lazily
-        builder.Services.AddSingleton<IConnectionMultiplexer>(sp => 
-            ConnectionMultiplexer.Connect(options.Configuration));
-
-        // Use the generic Redis State Store
-        builder.Services.AddTransient(typeof(IStateStore<>), typeof(RedisStateStore<>));
+        builder.Services.TryAddSingleton(typeof(IStateStore<>), typeof(RedisStateStore<>));
 
         return builder;
     }
@@ -41,64 +37,55 @@ public static class RedisStateStoreExtensions
         this TalariaBuilder builder,
         Action<TalariaRedisOptions>? configure = null)
     {
-        var options = new TalariaRedisOptions();
-        configure?.Invoke(options);
-        ValidateConfiguration(options);
+        builder.ConfigureRedis(configure);
 
-        // If not already registered via UseRedisStateStore
-        if (!builder.Services.Any(d => d.ServiceType == typeof(TalariaRedisOptions)))
-        {
-            builder.Services.AddSingleton(options);
-        }
-        
-        if (!builder.Services.Any(d => d.ServiceType == typeof(IConnectionMultiplexer)))
-        {
-            builder.Services.AddSingleton<IConnectionMultiplexer>(sp => 
-                ConnectionMultiplexer.Connect(options.Configuration));
-        }
-
-        builder.UseIdempotencyStore<RedisIdempotencyStore>();
+        builder.Services.TryAddSingleton<IIdempotencyStore, RedisIdempotencyStore>();
 
         return builder;
     }
 
     /// <summary>
     /// Configures Talaria to use the Redis deferral store for durable saga deferrals.
-    /// Shares the options and connection registered by UseRedisStateStore/UseRedisIdempotencyStore
-    /// when those were called first; otherwise registers its own from the configure callback.
     /// </summary>
     public static TalariaBuilder UseRedisDeferralStore(
         this TalariaBuilder builder,
         Action<TalariaRedisOptions>? configure = null)
     {
-        var options = new TalariaRedisOptions();
-        configure?.Invoke(options);
+        builder.ConfigureRedis(configure);
 
-        // If not already registered via UseRedisStateStore/UseRedisIdempotencyStore
-        if (!builder.Services.Any(d => d.ServiceType == typeof(TalariaRedisOptions)))
-        {
-            ValidateConfiguration(options);
-            builder.Services.AddSingleton(options);
-        }
-
-        if (!builder.Services.Any(d => d.ServiceType == typeof(IConnectionMultiplexer)))
-        {
-            builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
-                ConnectionMultiplexer.Connect(options.Configuration));
-        }
-
-        builder.Services.AddSingleton<Talaria.Core.Abstractions.IDeferralStore, RedisDeferralStore>();
+        builder.Services.TryAddSingleton<IDeferralStore, RedisDeferralStore>();
 
         return builder;
     }
 
-    private static void ValidateConfiguration(TalariaRedisOptions options)
+    /// <summary>
+    /// Registers the shared options (callbacks accumulate) and a lazily connecting
+    /// IConnectionMultiplexer. Connection happens on first resolve, so a missing
+    /// Configuration fails fast at host startup rather than at registration time.
+    /// </summary>
+    private static TalariaBuilder ConfigureRedis(
+        this TalariaBuilder builder,
+        Action<TalariaRedisOptions>? configure)
     {
-        if (string.IsNullOrWhiteSpace(options.Configuration))
+        builder.Services.AddOptions<TalariaRedisOptions>();
+        if (configure != null)
         {
-            throw new ArgumentException(
-                $"{nameof(TalariaRedisOptions.Configuration)} is required (e.g. \"localhost:6379\"). " +
-                "Set it via the configure callback.");
+            builder.Services.Configure(configure);
         }
+
+        builder.Services.TryAddSingleton<IConnectionMultiplexer>(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<TalariaRedisOptions>>().Value;
+            if (string.IsNullOrWhiteSpace(options.Configuration))
+            {
+                throw new InvalidOperationException(
+                    $"{nameof(TalariaRedisOptions.Configuration)} is required (e.g. \"localhost:6379\"). " +
+                    "Set it via the configure callback of a UseRedis* method.");
+            }
+
+            return ConnectionMultiplexer.Connect(options.Configuration);
+        });
+
+        return builder;
     }
 }

@@ -17,10 +17,10 @@ public sealed class RedisStateStore<TState> : IStateStore<TState>
     // Type name is baked into the prefix to prevent key collision if the correlation IDs are identical across different sagas
     private readonly string _prefix;
 
-    public RedisStateStore(IConnectionMultiplexer redis, TalariaRedisOptions options)
+    public RedisStateStore(IConnectionMultiplexer redis, Microsoft.Extensions.Options.IOptions<TalariaRedisOptions> options)
     {
         _redis = redis;
-        _options = options;
+        _options = options.Value;
         _db = _redis.GetDatabase();
         _prefix = $"{_options.KeyPrefix}{typeof(TState).Name.ToLowerInvariant()}:";
     }

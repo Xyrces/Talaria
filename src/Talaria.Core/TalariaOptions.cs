@@ -43,4 +43,11 @@ public sealed class TalariaOptions
     /// every acquire to fail and messages to be skipped without processing.
     /// </summary>
     public TimeSpan IdempotencyLockTtl { get; set; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// When false (default), DLQ messages carry a generic exception note instead of the
+    /// raw exception message, which may contain sensitive payload data. Enable in
+    /// non-production environments for easier debugging.
+    /// </summary>
+    public bool IncludeExceptionDetailsInDlq { get; set; }
 }

@@ -24,6 +24,7 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
     private readonly string _topic;
     private readonly string _dlqTopic;
     private readonly int _bufferCapacity;
+    private readonly bool _includeDlqExceptionDetails;
     private readonly ILogger? _logger;
 
     // Commit requests marshaled to the poll thread (the only thread touching _consumer).
@@ -42,10 +43,10 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
         IConsumer<string, byte[]> consumer,
         IProducer<string, byte[]> producer,
         string topic,
-        KafkaTransportOptions options,
         string dlqSuffix,
         ILogger? logger = null,
-        int bufferCapacity = 100)
+        int bufferCapacity = 100,
+        bool includeDlqExceptionDetails = false)
     {
         _consumer = consumer;
         _producer = producer;
@@ -53,6 +54,7 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
         _dlqTopic = _topic + dlqSuffix;
         _logger = logger;
         _bufferCapacity = bufferCapacity > 0 ? bufferCapacity : 100;
+        _includeDlqExceptionDetails = includeDlqExceptionDetails;
     }
 
     public async IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsync([EnumeratorCancellation] CancellationToken ct = default)
@@ -153,7 +155,9 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
                 catch (Exception ex)
                 {
                     talariaHeaders.DlqReason = "DeserializationFailed";
-                    talariaHeaders.DlqException = ex.Message;
+                    talariaHeaders.DlqException = _includeDlqExceptionDetails
+                        ? ex.Message
+                        : "Failed to deserialize the message payload. Enable IncludeExceptionDetailsInDlq for details.";
 
                     await RouteToDlqAsync(consumeResult, talariaHeaders, ct).ConfigureAwait(false);
                     _consumer.Commit(consumeResult);
