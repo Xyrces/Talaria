@@ -26,7 +26,6 @@ public sealed class MessageHeaders : IDictionary<string, string>
     public const string MessageIdKey = "talaria.message_id";
 
     // Engine-owned transport metadata (not part of the public contract)
-    public const string KafkaPartitionKey = "x-kafka-partition";
     public const string DeferralAttemptKey = "x-deferral-attempt";
     public const string MessageTypeKey = "talaria.message_type";
 

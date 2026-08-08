@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using Confluent.Kafka;
+using Microsoft.Extensions.Logging;
 using Talaria.Core;
 using Talaria.Core.Abstractions;
 
@@ -7,11 +8,20 @@ namespace Talaria.Transports.Kafka;
 
 /// <summary>
 /// Apache Kafka transport entry point. Configures and registers Kafka channels.
+/// Raw producers are shared across all topics (they are thread-safe and topic-agnostic);
+/// consumers created by this transport are tracked and disposed with it.
 /// </summary>
 public sealed class KafkaTransport : ITransport, IAsyncDisposable
 {
     private readonly KafkaTransportOptions _kafkaOptions;
-    private readonly ConcurrentDictionary<string, IProducer<string, byte[]>> _producers = new();
+    private readonly ILoggerFactory? _loggerFactory;
+    private readonly ILogger? _logger;
+
+    // At most two shared raw producers: idempotent (default) and non-idempotent.
+    private readonly ConcurrentDictionary<bool, IProducer<string, byte[]>> _sharedProducers = new();
+
+    // Consumers created by this transport — disposed with it (double-dispose is safe).
+    private readonly ConcurrentBag<IAsyncDisposable> _trackedConsumers = new();
 
     // Pool of transactional producers (each holds a stable TransactionalId for zombie fencing).
     private readonly ConcurrentBag<IProducer<string, byte[]>> _transactionalProducerPool = new();
@@ -25,9 +35,11 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
     /// <summary>
     /// Creates a KafkaTransport with the specified options.
     /// </summary>
-    public KafkaTransport(KafkaTransportOptions kafkaOptions)
+    public KafkaTransport(KafkaTransportOptions kafkaOptions, ILoggerFactory? loggerFactory = null)
     {
         _kafkaOptions = kafkaOptions ?? throw new ArgumentNullException(nameof(kafkaOptions));
+        _loggerFactory = loggerFactory;
+        _logger = loggerFactory?.CreateLogger<KafkaTransport>();
 
         if (string.IsNullOrWhiteSpace(_kafkaOptions.BootstrapServers))
         {
@@ -35,19 +47,41 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
                 $"{nameof(KafkaTransportOptions.BootstrapServers)} is required (e.g. \"localhost:9092\").",
                 nameof(kafkaOptions));
         }
+
+        WarnIfInsecure();
     }
 
     public string Name => "Kafka";
 
-    private IProducer<string, byte[]> GetOrCreateRawProducer(string topic, bool enableIdempotence = true)
+    private void WarnIfInsecure()
     {
-        return _producers.GetOrAdd($"{topic}|idempotent:{enableIdempotence}", _ =>
+        var protocol = _kafkaOptions.BaseProducerConfig.SecurityProtocol ?? SecurityProtocol.Plaintext;
+        if (protocol == SecurityProtocol.Plaintext && !IsLocalhostOnly(_kafkaOptions.BootstrapServers))
+        {
+            _logger?.LogWarning(
+                "Kafka transport connects to non-localhost brokers ({BootstrapServers}) over PLAINTEXT. " +
+                "Configure SASL/SSL via KafkaTransportOptions.BaseProducerConfig/BaseConsumerConfig for production use.",
+                _kafkaOptions.BootstrapServers);
+        }
+    }
+
+    private static bool IsLocalhostOnly(string bootstrapServers)
+        => bootstrapServers.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .All(host =>
+            {
+                var name = host.Split(':')[0];
+                return name is "localhost" or "127.0.0.1" or "::1";
+            });
+
+    private IProducer<string, byte[]> GetOrCreateSharedProducer(bool enableIdempotence)
+    {
+        return _sharedProducers.GetOrAdd(enableIdempotence, idempotent =>
         {
             var producerConfig = new ProducerConfig(_kafkaOptions.BaseProducerConfig)
             {
                 BootstrapServers = _kafkaOptions.BootstrapServers,
                 Acks = Acks.All,
-                EnableIdempotence = enableIdempotence
+                EnableIdempotence = idempotent
             };
             return new ProducerBuilder<string, byte[]>(producerConfig).Build();
         });
@@ -70,15 +104,18 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
         };
 
         var confluentConsumer = new ConsumerBuilder<string, byte[]>(config).Build();
-        var confluentDlqProducer = GetOrCreateRawProducer(topic + _kafkaOptions.DlqSuffix);
+        var dlqProducer = GetOrCreateSharedProducer(enableIdempotence: true);
 
         // Track the group's metadata so transactions can commit this group's offsets.
         _groupMetadata[config.GroupId] = confluentConsumer.ConsumerGroupMetadata;
 
-        IConsumer<T> wrapper = new KafkaConsumer<T>(
-            confluentConsumer, confluentDlqProducer, topic, _kafkaOptions, _kafkaOptions.DlqSuffix,
+        var wrapper = new KafkaConsumer<T>(
+            confluentConsumer, dlqProducer, topic, _kafkaOptions, _kafkaOptions.DlqSuffix,
+            _loggerFactory?.CreateLogger<KafkaConsumer<T>>(),
             bufferCapacity: options.BufferCapacity > 0 ? options.BufferCapacity : 100);
-        return Task.FromResult(wrapper);
+
+        _trackedConsumers.Add(wrapper);
+        return Task.FromResult<IConsumer<T>>(wrapper);
     }
 
     /// <summary>
@@ -89,7 +126,7 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
         ProducerOptions options,
         CancellationToken ct = default)
     {
-        var rawProducer = GetOrCreateRawProducer(topic, options.EnableIdempotence);
+        var rawProducer = GetOrCreateSharedProducer(options.EnableIdempotence);
         IProducer<T> wrapper = new KafkaProducer<T>(rawProducer, topic);
         return Task.FromResult(wrapper);
     }
@@ -135,9 +172,21 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
     internal IConsumerGroupMetadata? GetConsumerGroupMetadata(string consumerGroup)
         => _groupMetadata.TryGetValue(consumerGroup, out var metadata) ? metadata : null;
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        foreach (var producer in _producers.Values)
+        while (_trackedConsumers.TryTake(out var consumer))
+        {
+            try
+            {
+                await consumer.DisposeAsync();
+            }
+            catch
+            {
+                // Ignore cleanup errors during shutdown
+            }
+        }
+
+        foreach (var producer in _sharedProducers.Values)
         {
             try
             {
@@ -149,7 +198,7 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
                 // Ignore cleanup errors during shutdown
             }
         }
-        _producers.Clear();
+        _sharedProducers.Clear();
 
         while (_transactionalProducerPool.TryTake(out var transactional))
         {
@@ -163,7 +212,5 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
                 // Ignore cleanup errors during shutdown
             }
         }
-
-        return ValueTask.CompletedTask;
     }
 }
