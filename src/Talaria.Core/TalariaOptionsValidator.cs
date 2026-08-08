@@ -31,6 +31,11 @@ internal sealed class TalariaOptionsValidator : IValidateOptions<TalariaOptions>
             return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.DeferralBackoff)} must not be negative.");
         }
 
+        if (options.DeferralLeaseTimeout <= TimeSpan.Zero)
+        {
+            return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.DeferralLeaseTimeout)} must be greater than zero.");
+        }
+
         return ValidateOptionsResult.Success;
     }
 }

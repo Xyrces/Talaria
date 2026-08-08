@@ -96,9 +96,10 @@ public class RedisConcurrencyIntegrationTests : IAsyncLifetime
     }
 
     [DockerFact]
-    public async Task DeferralStore_Roundtrip_PopsOnceAndRequeuesUntilDue()
+    public async Task DeferralStore_Roundtrip_LeasesCompleteAndAbandon()
     {
         var store = _serviceProvider.GetRequiredService<IDeferralStore>();
+        var lease = TimeSpan.FromSeconds(30);
 
         var now = DateTimeOffset.UtcNow;
 
@@ -121,33 +122,40 @@ public class RedisConcurrencyIntegrationTests : IAsyncLifetime
 
         await store.EnqueueAsync(message);
 
-        // Due in the past: popped once, with all fields surviving the roundtrip.
-        var due = await store.PopDueAsync(now, 10);
-        var popped = Assert.Single(due);
-        Assert.Equal(message.Id, popped.Id);
-        Assert.Equal("orders-topic", popped.Topic);
-        Assert.Equal("System.String", popped.MessageType);
-        Assert.Equal("\"hello-deferred\"", popped.PayloadJson);
-        Assert.Equal("corr-123", popped.CorrelationId);
-        Assert.Equal(2, popped.Attempt);
-        Assert.Equal("defer-1", popped.Headers.MessageId);
-        Assert.Equal("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", popped.Headers.TraceParent);
-        Assert.Equal("corr-123", popped.Headers[MessageHeaders.CorrelationIdKey]);
+        // Due in the past: leased once, with all fields surviving the roundtrip.
+        var due = await store.AcquireDueAsync(now, lease, 10);
+        var acquired = Assert.Single(due);
+        Assert.Equal(message.Id, acquired.Message.Id);
+        Assert.Equal("orders-topic", acquired.Message.Topic);
+        Assert.Equal("System.String", acquired.Message.MessageType);
+        Assert.Equal("\"hello-deferred\"", acquired.Message.PayloadJson);
+        Assert.Equal("corr-123", acquired.Message.CorrelationId);
+        Assert.Equal(2, acquired.Message.Attempt);
+        Assert.Equal("defer-1", acquired.Message.Headers.MessageId);
+        Assert.Equal("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", acquired.Message.Headers.TraceParent);
+        Assert.Equal("corr-123", acquired.Message.Headers[MessageHeaders.CorrelationIdKey]);
 
-        // Popping is an atomic claim — a second pop sees nothing.
-        Assert.Empty(await store.PopDueAsync(now, 10));
+        // The lease hides the entry — a concurrent sweep sees nothing.
+        Assert.Empty(await store.AcquireDueAsync(now.AddSeconds(5), lease, 10));
 
-        // Requeued into the future: not popped before it is due.
+        // Abandoning into the future reschedules it: not acquirable before it is due.
         var futureDue = now.AddHours(1);
-        await store.RequeueAsync(popped, futureDue);
-        Assert.Empty(await store.PopDueAsync(now.AddMinutes(30), 10));
+        Assert.True(await store.AbandonAsync(acquired.Lease, futureDue));
+        Assert.Empty(await store.AcquireDueAsync(now.AddMinutes(30), lease, 10));
 
-        // Once due again, it pops with its fields intact.
-        var dueAgain = await store.PopDueAsync(futureDue.AddMinutes(1), 10);
-        var repopped = Assert.Single(dueAgain);
-        Assert.Equal(message.Id, repopped.Id);
-        Assert.Equal("defer-1", repopped.Headers.MessageId);
-        Assert.Equal("corr-123", repopped.CorrelationId);
-        Assert.Equal(2, repopped.Attempt);
+        // Once due again, it leases with its fields intact and a bumped fencing token.
+        var dueAgain = await store.AcquireDueAsync(futureDue.AddMinutes(1), lease, 10);
+        var reacquired = Assert.Single(dueAgain);
+        Assert.Equal(message.Id, reacquired.Message.Id);
+        Assert.Equal("defer-1", reacquired.Message.Headers.MessageId);
+        Assert.Equal("corr-123", reacquired.Message.CorrelationId);
+        Assert.Equal(2, reacquired.Message.Attempt);
+        Assert.True(reacquired.Lease.Token > acquired.Lease.Token);
+
+        // Completion is fenced: the stale holder fails, the current owner succeeds,
+        // and the entry is gone for good.
+        Assert.False(await store.CompleteAsync(acquired.Lease));
+        Assert.True(await store.CompleteAsync(reacquired.Lease));
+        Assert.Empty(await store.AcquireDueAsync(futureDue.AddMinutes(2), lease, 10));
     }
 }

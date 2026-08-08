@@ -90,9 +90,10 @@ public class DeferralStoreContractTests
     }
 
     [Fact]
-    public async Task PopDue_Claims_Atomicallly_And_Complete_Is_Confirmation()
+    public async Task Acquire_Leases_Without_Removing_And_Complete_Is_Fenced()
     {
         var store = new InMemoryDeferralStore();
+        var lease = TimeSpan.FromSeconds(30);
 
         var due = new DeferredMessage(
             Guid.NewGuid(), "topic-a", typeof(StepMessage).AssemblyQualifiedName!,
@@ -105,16 +106,24 @@ public class DeferralStoreContractTests
         await store.EnqueueAsync(notDue);
         Assert.Equal(2, store.Count);
 
-        // Only the due entry is claimed, and claiming removes it from subsequent pops.
-        var first = await store.PopDueAsync(DateTimeOffset.UtcNow, 64);
-        Assert.Single(first);
-        Assert.Equal(due.Id, first[0].Id);
+        var now = DateTimeOffset.UtcNow;
 
-        var second = await store.PopDueAsync(DateTimeOffset.UtcNow, 64);
-        Assert.Empty(second);
+        // Only the due entry is leased, and the lease hides it from other acquirers
+        // without removing it from the store.
+        var first = Assert.Single(await store.AcquireDueAsync(now, lease, 64));
+        Assert.Equal(due.Id, first.Message.Id);
+        Assert.Empty(await store.AcquireDueAsync(now.AddSeconds(5), lease, 64));
+        Assert.Equal(2, store.Count);
 
-        await store.CompleteAsync(first[0].Id);
-        Assert.Equal(1, store.Count); // the not-due entry remains
+        // After lease expiry the entry is acquirable again, with a bumped fencing token,
+        // and the stale holder can no longer complete it.
+        var reacquired = Assert.Single(await store.AcquireDueAsync(now.Add(lease).AddSeconds(1), lease, 64));
+        Assert.True(reacquired.Lease.Token > first.Lease.Token);
+        Assert.False(await store.CompleteAsync(first.Lease));
+
+        // The current owner completes; only the not-due entry remains.
+        Assert.True(await store.CompleteAsync(reacquired.Lease));
+        Assert.Equal(1, store.Count);
     }
 
     private static async Task<List<MessageEnvelope<T>>> ReadUntilAsync<T>(

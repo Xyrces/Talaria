@@ -26,6 +26,13 @@ public sealed class TalariaOptions
     public TimeSpan DeferralBackoff { get; set; } = TimeSpan.FromMilliseconds(100);
 
     /// <summary>
+    /// How long a swept deferral stays leased (hidden from other sweepers) while it is
+    /// being republished. If the sweeper crashes before completing, the entry becomes
+    /// acquirable again after this duration. Must be greater than zero.
+    /// </summary>
+    public TimeSpan DeferralLeaseTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
     /// Application name used for consumer group auto-generation and DLQ naming.
     /// Defaults to the entry assembly name.
     /// </summary>

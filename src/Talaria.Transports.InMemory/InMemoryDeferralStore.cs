@@ -3,63 +3,80 @@ using Talaria.Core.Abstractions;
 namespace Talaria.Transports.InMemory;
 
 /// <summary>
-/// In-memory deferral store backed by a locked list ordered by due time.
-/// Suitable for tests and local development — entries do not survive a process restart.
+/// In-memory deferral store with lease (visibility-timeout) semantics matching
+/// <see cref="IDeferralStore"/>: acquiring hides entries for the lease duration instead
+/// of removing them, and completion/abandonment are fenced by the lease token.
+/// Suitable for lightweight single-process deployments, prototyping, and tests —
+/// entries do not survive a process restart.
 /// </summary>
 public sealed class InMemoryDeferralStore : IDeferralStore
 {
+    private sealed record Entry(DeferredMessage Message, long LeaseToken, DateTimeOffset VisibleAt);
+
     private readonly object _gate = new();
-    private readonly List<DeferredMessage> _pending = [];
+    private readonly List<Entry> _entries = [];
 
     public Task EnqueueAsync(DeferredMessage message, CancellationToken ct = default)
     {
         lock (_gate)
         {
-            _pending.Add(message);
+            _entries.Add(new Entry(message, LeaseToken: 0, message.DueAt));
         }
 
         return Task.CompletedTask;
     }
 
-    public Task<IReadOnlyList<DeferredMessage>> PopDueAsync(DateTimeOffset now, int maxBatch, CancellationToken ct = default)
+    public Task<IReadOnlyList<LeasedDeferral>> AcquireDueAsync(
+        DateTimeOffset now,
+        TimeSpan leaseDuration,
+        int maxBatch,
+        CancellationToken ct = default)
     {
         lock (_gate)
         {
-            var due = _pending
-                .Where(m => m.DueAt <= now)
-                .OrderBy(m => m.DueAt)
+            var due = _entries
+                .Where(e => e.VisibleAt <= now)
+                .OrderBy(e => e.VisibleAt)
                 .Take(maxBatch)
                 .ToList();
 
-            foreach (var message in due)
+            var leased = new List<LeasedDeferral>(due.Count);
+            foreach (var entry in due)
             {
-                _pending.Remove(message);
+                var index = _entries.IndexOf(entry);
+                var token = entry.LeaseToken + 1;
+                _entries[index] = entry with { LeaseToken = token, VisibleAt = now.Add(leaseDuration) };
+                leased.Add(new LeasedDeferral(
+                    entry.Message,
+                    new DeferralLease(entry.Message.Id, token)));
             }
 
-            return Task.FromResult<IReadOnlyList<DeferredMessage>>(due);
+            return Task.FromResult<IReadOnlyList<LeasedDeferral>>(leased);
         }
     }
 
-    public Task CompleteAsync(Guid id, CancellationToken ct = default)
+    public Task<bool> CompleteAsync(DeferralLease lease, CancellationToken ct = default)
     {
-        // Entries are removed on pop, so completion is a confirmation no-op.
-        // Implemented for interface symmetry with stores that stage claims separately.
         lock (_gate)
         {
-            _pending.RemoveAll(m => m.Id == id);
+            var removed = _entries.RemoveAll(e => e.Message.Id == lease.Id && e.LeaseToken == lease.Token);
+            return Task.FromResult(removed > 0);
         }
-
-        return Task.CompletedTask;
     }
 
-    public Task RequeueAsync(DeferredMessage message, DateTimeOffset newDueAt, CancellationToken ct = default)
+    public Task<bool> AbandonAsync(DeferralLease lease, DateTimeOffset? visibleAt = null, CancellationToken ct = default)
     {
         lock (_gate)
         {
-            _pending.Add(message with { DueAt = newDueAt });
-        }
+            var index = _entries.FindIndex(e => e.Message.Id == lease.Id && e.LeaseToken == lease.Token);
+            if (index < 0)
+            {
+                return Task.FromResult(false);
+            }
 
-        return Task.CompletedTask;
+            _entries[index] = _entries[index] with { VisibleAt = visibleAt ?? DateTimeOffset.UtcNow };
+            return Task.FromResult(true);
+        }
     }
 
     /// <summary>Returns the number of currently scheduled messages (test/diagnostic use).</summary>
@@ -69,7 +86,7 @@ public sealed class InMemoryDeferralStore : IDeferralStore
         {
             lock (_gate)
             {
-                return _pending.Count;
+                return _entries.Count;
             }
         }
     }

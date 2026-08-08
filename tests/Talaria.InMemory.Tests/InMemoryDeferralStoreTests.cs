@@ -6,12 +6,14 @@ namespace Talaria.InMemory.Tests;
 
 public class InMemoryDeferralStoreTests
 {
+    private static readonly TimeSpan Lease = TimeSpan.FromSeconds(30);
+
     private static DeferredMessage Message(DateTimeOffset dueAt, string topic = "orders") =>
         new(Guid.NewGuid(), topic, typeof(object).AssemblyQualifiedName!, "{}",
             new MessageHeaders(), "corr-1", Attempt: 1, dueAt);
 
     [Fact]
-    public async Task PopDueAsync_ReturnsOnlyDueMessages_InDueOrder()
+    public async Task AcquireDueAsync_ReturnsOnlyDueMessages_InDueOrder()
     {
         var store = new InMemoryDeferralStore();
         var now = DateTimeOffset.UtcNow;
@@ -23,31 +25,47 @@ public class InMemoryDeferralStoreTests
         await store.EnqueueAsync(dueLater);
         await store.EnqueueAsync(dueFirst);
 
-        var due = await store.PopDueAsync(now, maxBatch: 10);
+        var due = await store.AcquireDueAsync(now, Lease, maxBatch: 10);
 
         Assert.Equal(2, due.Count);
-        Assert.Equal(dueFirst.Id, due[0].Id);
-        Assert.Equal(dueLater.Id, due[1].Id);
-        Assert.Equal(1, store.Count);
+        Assert.Equal(dueFirst.Id, due[0].Message.Id);
+        Assert.Equal(dueLater.Id, due[1].Message.Id);
+        Assert.Equal(3, store.Count); // leased entries stay in the store
     }
 
     [Fact]
-    public async Task PopDueAsync_ClaimsAtomically_SecondPopReturnsEmpty()
+    public async Task AcquireDueAsync_HidesLeasedEntries_UntilLeaseExpires()
     {
         var store = new InMemoryDeferralStore();
         var now = DateTimeOffset.UtcNow;
         await store.EnqueueAsync(Message(now.AddMinutes(-1)));
 
-        var first = await store.PopDueAsync(now, maxBatch: 10);
-        var second = await store.PopDueAsync(now, maxBatch: 10);
+        var first = await store.AcquireDueAsync(now, Lease, maxBatch: 10);
+        var second = await store.AcquireDueAsync(now.AddSeconds(10), Lease, maxBatch: 10);
 
         Assert.Single(first);
         Assert.Empty(second);
-        Assert.Equal(0, store.Count);
     }
 
     [Fact]
-    public async Task PopDueAsync_HonorsMaxBatch()
+    public async Task AcquireDueAsync_ExpiredLease_CanBeReacquired_WithBumpedToken()
+    {
+        var store = new InMemoryDeferralStore();
+        var now = DateTimeOffset.UtcNow;
+        var message = Message(now.AddMinutes(-1));
+        await store.EnqueueAsync(message);
+
+        var first = await store.AcquireDueAsync(now, Lease, maxBatch: 10);
+        var reacquired = await store.AcquireDueAsync(now.Add(Lease).AddSeconds(1), Lease, maxBatch: 10);
+
+        var original = Assert.Single(first);
+        var again = Assert.Single(reacquired);
+        Assert.Equal(message.Id, again.Message.Id);
+        Assert.True(again.Lease.Token > original.Lease.Token, "re-acquisition must bump the fencing token");
+    }
+
+    [Fact]
+    public async Task AcquireDueAsync_HonorsMaxBatch()
     {
         var store = new InMemoryDeferralStore();
         var now = DateTimeOffset.UtcNow;
@@ -56,31 +74,48 @@ public class InMemoryDeferralStoreTests
             await store.EnqueueAsync(Message(now.AddMinutes(-1)));
         }
 
-        var due = await store.PopDueAsync(now, maxBatch: 2);
+        var due = await store.AcquireDueAsync(now, Lease, maxBatch: 2);
 
         Assert.Equal(2, due.Count);
-        Assert.Equal(3, store.Count);
+        Assert.Equal(5, store.Count);
     }
 
     [Fact]
-    public async Task RequeueAsync_ReschedulesClaimedMessage()
+    public async Task CompleteAsync_RemovesEntry_OnlyWithCurrentToken()
     {
         var store = new InMemoryDeferralStore();
         var now = DateTimeOffset.UtcNow;
-        var message = Message(now.AddMinutes(-1));
-        await store.EnqueueAsync(message);
+        await store.EnqueueAsync(Message(now.AddMinutes(-1)));
 
-        var popped = await store.PopDueAsync(now, maxBatch: 10);
-        Assert.Single(popped);
+        var first = Assert.Single(await store.AcquireDueAsync(now, Lease, maxBatch: 10));
+        var second = Assert.Single(await store.AcquireDueAsync(now.Add(Lease).AddSeconds(1), Lease, maxBatch: 10));
 
-        var newDue = now.AddMinutes(10);
-        await store.RequeueAsync(popped[0], newDue);
+        // Stale holder (lease expired) cannot remove the entry.
+        Assert.False(await store.CompleteAsync(first.Lease));
+        Assert.Equal(1, store.Count);
 
-        Assert.Empty(await store.PopDueAsync(now, maxBatch: 10));
+        // The current owner can.
+        Assert.True(await store.CompleteAsync(second.Lease));
+        Assert.Equal(0, store.Count);
+    }
 
-        var rescheduled = await store.PopDueAsync(newDue, maxBatch: 10);
-        Assert.Single(rescheduled);
-        Assert.Equal(newDue, rescheduled[0].DueAt);
+    [Fact]
+    public async Task AbandonAsync_Reschedules_OnlyWithCurrentToken()
+    {
+        var store = new InMemoryDeferralStore();
+        var now = DateTimeOffset.UtcNow;
+        await store.EnqueueAsync(Message(now.AddMinutes(-1)));
+
+        var leased = Assert.Single(await store.AcquireDueAsync(now, Lease, maxBatch: 10));
+
+        Assert.False(await store.AbandonAsync(leased.Lease with { Token = leased.Lease.Token + 99 }));
+
+        var newVisible = now.AddMinutes(10);
+        Assert.True(await store.AbandonAsync(leased.Lease, newVisible));
+
+        // Not visible before the rescheduled time, acquirable afterwards.
+        Assert.Empty(await store.AcquireDueAsync(now.AddMinutes(5), Lease, maxBatch: 10));
+        Assert.Single(await store.AcquireDueAsync(newVisible, Lease, maxBatch: 10));
     }
 
     [Fact]
@@ -95,12 +130,12 @@ public class InMemoryDeferralStoreTests
 
         await store.EnqueueAsync(message);
 
-        var due = await store.PopDueAsync(DateTimeOffset.UtcNow, maxBatch: 10);
-        var popped = Assert.Single(due);
-        Assert.Equal(message.Id, popped.Id);
-        Assert.Equal("orders", popped.Topic);
-        Assert.Equal("corr-9", popped.CorrelationId);
-        Assert.Equal(2, popped.Attempt);
-        Assert.Equal("msg-1:defer:2", popped.Headers.MessageId);
+        var due = await store.AcquireDueAsync(DateTimeOffset.UtcNow, Lease, maxBatch: 10);
+        var acquired = Assert.Single(due);
+        Assert.Equal(message.Id, acquired.Message.Id);
+        Assert.Equal("orders", acquired.Message.Topic);
+        Assert.Equal("corr-9", acquired.Message.CorrelationId);
+        Assert.Equal(2, acquired.Message.Attempt);
+        Assert.Equal("msg-1:defer:2", acquired.Message.Headers.MessageId);
     }
 }

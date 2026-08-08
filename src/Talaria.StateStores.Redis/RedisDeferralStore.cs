@@ -7,30 +7,70 @@ using Talaria.Core.Abstractions;
 namespace Talaria.StateStores.Redis;
 
 /// <summary>
-/// Redis-backed deferral store. Deferred messages live in a sorted set keyed by
-/// application name, scored by their due time (unix milliseconds). Popping due
-/// messages is an atomic claim (Lua), so multiple nodes of the same application
-/// can sweep concurrently without double-publishing.
+/// Redis-backed deferral store with lease (visibility-timeout) semantics. Deferred
+/// messages live in a sorted set keyed by application name, with entry ids as members
+/// scored by their visibility time (unix milliseconds); payloads and monotonic lease
+/// counters live in a companion hash. Acquiring re-dates an entry into the future
+/// instead of removing it, so a sweeper crash never loses the message — the lease
+/// expires and another sweeper picks it up. All mutations are fenced Lua scripts.
 /// </summary>
 public sealed class RedisDeferralStore : IDeferralStore
 {
-    // Atomically fetch and remove up to ARGV[2] members scored at or before ARGV[1].
-    private const string PopDueScript = """
-        local members = redis.call('ZRANGEBYSCORE', KEYS[1], 0, ARGV[1], 'LIMIT', 0, ARGV[2])
-        for i, member in ipairs(members) do
-            redis.call('ZREM', KEYS[1], member)
+    // Atomically store the payload and schedule the entry.
+    // KEYS: 1=zset, 2=hash. ARGV: 1=entry id, 2=payload json, 3=visible-at ms.
+    private const string EnqueueScript = """
+        redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
+        redis.call('ZADD', KEYS[1], ARGV[3], ARGV[1])
+        return 1
+        """;
+
+    // Atomically lease up to ARGV[3] entries visible at or before ARGV[1]: bump each
+    // entry's fencing counter and hide it until ARGV[2] (lease expiry). Returns a flat
+    // array of [id, lease token, payload json] triples.
+    // KEYS: 1=zset, 2=hash. ARGV: 1=now ms, 2=lease-expiry ms, 3=max batch.
+    private const string AcquireScript = """
+        local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[3])
+        local out = {}
+        for i, id in ipairs(ids) do
+            local lease = redis.call('HINCRBY', KEYS[2], id .. ':lease', 1)
+            redis.call('ZADD', KEYS[1], ARGV[2], id)
+            out[#out + 1] = id
+            out[#out + 1] = tostring(lease)
+            out[#out + 1] = redis.call('HGET', KEYS[2], id)
         end
-        return members
+        return out
+        """;
+
+    // Remove the entry only when the caller's fencing token is current.
+    // KEYS: 1=zset, 2=hash. ARGV: 1=entry id, 2=lease token.
+    private const string CompleteScript = """
+        if redis.call('HGET', KEYS[2], ARGV[1] .. ':lease') == ARGV[2] then
+            redis.call('ZREM', KEYS[1], ARGV[1])
+            redis.call('HDEL', KEYS[2], ARGV[1], ARGV[1] .. ':lease')
+            return 1
+        end
+        return 0
+        """;
+
+    // Make the entry visible again at ARGV[3] only when the caller's token is current.
+    // KEYS: 1=zset, 2=hash. ARGV: 1=entry id, 2=lease token, 3=visible-at ms.
+    private const string AbandonScript = """
+        if redis.call('HGET', KEYS[2], ARGV[1] .. ':lease') == ARGV[2] then
+            redis.call('ZADD', KEYS[1], ARGV[3], ARGV[1])
+            return 1
+        end
+        return 0
         """;
 
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
 
     private readonly IDatabase _db;
     private readonly string _key;
+    private readonly string _entriesKey;
 
     /// <summary>
-    /// Creates the store. The sorted-set key is namespaced by the configured key prefix
-    /// and the application's name (from <see cref="TalariaOptions.ApplicationName"/>).
+    /// Creates the store. The sorted-set and hash keys are namespaced by the configured
+    /// key prefix and the application's name (from <see cref="TalariaOptions.ApplicationName"/>).
     /// </summary>
     public RedisDeferralStore(
         IConnectionMultiplexer redis,
@@ -39,36 +79,69 @@ public sealed class RedisDeferralStore : IDeferralStore
     {
         _db = redis.GetDatabase();
         _key = $"{options.Value.KeyPrefix}defer:{talariaOptions.Value.ApplicationName}";
+        _entriesKey = $"{_key}:entries";
     }
 
     public async Task EnqueueAsync(DeferredMessage message, CancellationToken ct = default)
     {
-        var member = Serialize(message);
-        await _db.SortedSetAddAsync(_key, member, message.DueAt.ToUnixTimeMilliseconds());
+        await _db.ScriptEvaluateAsync(
+            EnqueueScript,
+            new RedisKey[] { _key, _entriesKey },
+            new RedisValue[] { message.Id.ToString(), Serialize(message), message.DueAt.ToUnixTimeMilliseconds() });
     }
 
-    public async Task<IReadOnlyList<DeferredMessage>> PopDueAsync(DateTimeOffset now, int maxBatch, CancellationToken ct = default)
+    public async Task<IReadOnlyList<LeasedDeferral>> AcquireDueAsync(
+        DateTimeOffset now,
+        TimeSpan leaseDuration,
+        int maxBatch,
+        CancellationToken ct = default)
     {
         var result = await _db.ScriptEvaluateAsync(
-            PopDueScript,
-            new RedisKey[] { _key },
-            new RedisValue[] { now.ToUnixTimeMilliseconds(), maxBatch });
+            AcquireScript,
+            new RedisKey[] { _key, _entriesKey },
+            new RedisValue[]
+            {
+                now.ToUnixTimeMilliseconds(),
+                now.Add(leaseDuration).ToUnixTimeMilliseconds(),
+                maxBatch
+            });
 
-        return ((RedisValue[])result!)
-            .Select(v => Deserialize((string)v!))
-            .ToList();
+        var flat = (RedisValue[])result!;
+        var leased = new List<LeasedDeferral>(flat.Length / 3);
+        for (var i = 0; i < flat.Length; i += 3)
+        {
+            var message = Deserialize((string)flat[i + 2]!);
+            leased.Add(new LeasedDeferral(
+                message,
+                new DeferralLease(message.Id, long.Parse((string)flat[i + 1]!))));
+        }
+
+        return leased;
     }
 
-    public Task CompleteAsync(Guid id, CancellationToken ct = default)
+    public async Task<bool> CompleteAsync(DeferralLease lease, CancellationToken ct = default)
     {
-        // Pop atomically removes the member, so completion is a confirmation no-op.
-        return Task.CompletedTask;
+        var result = await _db.ScriptEvaluateAsync(
+            CompleteScript,
+            new RedisKey[] { _key, _entriesKey },
+            new RedisValue[] { lease.Id.ToString(), lease.Token.ToString() });
+
+        return (long)result! == 1;
     }
 
-    public async Task RequeueAsync(DeferredMessage message, DateTimeOffset newDueAt, CancellationToken ct = default)
+    public async Task<bool> AbandonAsync(DeferralLease lease, DateTimeOffset? visibleAt = null, CancellationToken ct = default)
     {
-        var member = Serialize(message);
-        await _db.SortedSetAddAsync(_key, member, newDueAt.ToUnixTimeMilliseconds());
+        var result = await _db.ScriptEvaluateAsync(
+            AbandonScript,
+            new RedisKey[] { _key, _entriesKey },
+            new RedisValue[]
+            {
+                lease.Id.ToString(),
+                lease.Token.ToString(),
+                (visibleAt ?? DateTimeOffset.UtcNow).ToUnixTimeMilliseconds()
+            });
+
+        return (long)result! == 1;
     }
 
     private static string Serialize(DeferredMessage message)

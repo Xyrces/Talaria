@@ -551,9 +551,11 @@ public sealed class SagaHostedService : BackgroundService
     }
 
     /// <summary>
-    /// Polls the deferral store and republishes due messages. Entries are claimed atomically
-    /// on pop, so concurrent sweepers across nodes cannot double-publish. A failed
-    /// republication is requeued with a fresh backoff.
+    /// Polls the deferral store and republishes due messages. Entries are leased (hidden
+    /// from other sweepers) for <see cref="TalariaOptions.DeferralLeaseTimeout"/> rather
+    /// than removed, so a crash or shutdown mid-sweep never loses a message — the lease
+    /// expires and a later sweep re-acquires it. A duplicate republication caused by
+    /// lease expiry is absorbed downstream by the idempotency store.
     /// </summary>
     private async Task SweepDeferralsLoopAsync(ITransport transport, CancellationToken ct)
     {
@@ -563,10 +565,14 @@ public sealed class SagaHostedService : BackgroundService
 
         while (!ct.IsCancellationRequested)
         {
-            IReadOnlyList<DeferredMessage> due;
+            IReadOnlyList<LeasedDeferral> due;
             try
             {
-                due = await _deferralStore!.PopDueAsync(DateTimeOffset.UtcNow, maxBatch: 64, ct);
+                due = await _deferralStore!.AcquireDueAsync(
+                    DateTimeOffset.UtcNow,
+                    _options.DeferralLeaseTimeout,
+                    maxBatch: 64,
+                    ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -574,29 +580,30 @@ public sealed class SagaHostedService : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Deferral sweep failed to pop due messages; retrying next interval.");
-                due = Array.Empty<DeferredMessage>();
+                _logger.LogError(ex, "Deferral sweep failed to acquire due messages; retrying next interval.");
+                due = Array.Empty<LeasedDeferral>();
             }
 
-            foreach (var message in due)
+            foreach (var leased in due)
             {
-                await RepublishDeferredAsync(transport, message, ct);
+                await RepublishDeferredAsync(transport, leased, ct);
             }
 
             await Task.Delay(interval, ct);
         }
     }
 
-    private async Task RepublishDeferredAsync(ITransport transport, DeferredMessage message, CancellationToken ct)
+    private async Task RepublishDeferredAsync(ITransport transport, LeasedDeferral leased, CancellationToken ct)
     {
+        var message = leased.Message;
         try
         {
             var type = Type.GetType(message.MessageType);
             if (type is null)
             {
-                // Poison entry — the type can never be resolved; drop it rather than requeue forever.
+                // Poison entry — the type can never be resolved; drop it rather than retry forever.
                 _logger.LogError("Deferred message {Id} has unresolvable payload type '{MessageType}'; dropping.", message.Id, message.MessageType);
-                await _deferralStore!.CompleteAsync(message.Id, ct);
+                await _deferralStore!.CompleteAsync(leased.Lease, ct);
                 return;
             }
 
@@ -606,24 +613,25 @@ public sealed class SagaHostedService : BackgroundService
             var invoker = await GetOrCreateProducerAsync(transport, message.Topic, type, ct);
             await invoker.Produce(payload, new MessageHeaders(message.Headers), ct);
 
-            await _deferralStore!.CompleteAsync(message.Id, ct);
+            await _deferralStore!.CompleteAsync(leased.Lease, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // Host shutting down mid-sweep — the entry stays claimed; it expires with the store
-            // or (InMemory) is discarded with the process. Not an error.
+            // Host shutting down mid-sweep — the lease simply expires and the entry is
+            // re-acquired on the next sweep. Not an error.
             throw;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to republish deferred message {Id}; requeueing.", message.Id);
+            _logger.LogError(ex, "Failed to republish deferred message {Id}; releasing the lease for retry.", message.Id);
             try
             {
-                await _deferralStore!.RequeueAsync(message, DateTimeOffset.UtcNow + _options.DeferralBackoff, ct);
+                await _deferralStore!.AbandonAsync(leased.Lease, DateTimeOffset.UtcNow + _options.DeferralBackoff, ct);
             }
-            catch (Exception requeueEx)
+            catch (Exception abandonEx)
             {
-                _logger.LogError(requeueEx, "Failed to requeue deferred message {Id}; it is lost.", message.Id);
+                // Not fatal: the lease expires on its own and the entry is retried then.
+                _logger.LogError(abandonEx, "Failed to abandon deferral lease for message {Id}; it will retry when the lease expires.", message.Id);
             }
         }
     }
