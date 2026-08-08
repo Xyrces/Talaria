@@ -28,7 +28,8 @@ public class TalariaSagaSteps : IAsyncDisposable
                 opts.ApplicationName = "test-saga-app";
                 opts.MaxDeferralAttempts = 10;
                 opts.DeferralBackoff = TimeSpan.FromMilliseconds(50);
-            }).UseInMemoryTransport(_transport);
+            }).UseInMemoryTransport(_transport)
+              .UseInMemoryDeferralStore();
 
         });
 

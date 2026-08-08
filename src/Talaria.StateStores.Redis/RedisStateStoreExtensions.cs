@@ -62,6 +62,36 @@ public static class RedisStateStoreExtensions
         return builder;
     }
 
+    /// <summary>
+    /// Configures Talaria to use the Redis deferral store for durable saga deferrals.
+    /// Shares the options and connection registered by UseRedisStateStore/UseRedisIdempotencyStore
+    /// when those were called first; otherwise registers its own from the configure callback.
+    /// </summary>
+    public static TalariaBuilder UseRedisDeferralStore(
+        this TalariaBuilder builder,
+        Action<TalariaRedisOptions>? configure = null)
+    {
+        var options = new TalariaRedisOptions();
+        configure?.Invoke(options);
+
+        // If not already registered via UseRedisStateStore/UseRedisIdempotencyStore
+        if (!builder.Services.Any(d => d.ServiceType == typeof(TalariaRedisOptions)))
+        {
+            ValidateConfiguration(options);
+            builder.Services.AddSingleton(options);
+        }
+
+        if (!builder.Services.Any(d => d.ServiceType == typeof(IConnectionMultiplexer)))
+        {
+            builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
+                ConnectionMultiplexer.Connect(options.Configuration));
+        }
+
+        builder.Services.AddSingleton<Talaria.Core.Abstractions.IDeferralStore, RedisDeferralStore>();
+
+        return builder;
+    }
+
     private static void ValidateConfiguration(TalariaRedisOptions options)
     {
         if (string.IsNullOrWhiteSpace(options.Configuration))

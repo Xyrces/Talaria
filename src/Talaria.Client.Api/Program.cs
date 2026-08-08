@@ -19,7 +19,8 @@ if (messagingProvider.Equals("InMemory", StringComparison.OrdinalIgnoreCase))
     talaria
         .UseInMemoryTransport()
         .UseInMemoryStateStore()
-        .UseInMemoryIdempotencyStore();
+        .UseInMemoryIdempotencyStore()
+        .UseInMemoryDeferralStore();
 }
 else
 {
@@ -33,7 +34,12 @@ else
             opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
             opts.KeyPrefix = "onboarding:";
         })
-        .UseRedisIdempotencyStore(opts => 
+        .UseRedisIdempotencyStore(opts =>
+        {
+            opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
+            opts.KeyPrefix = "onboarding:";
+        })
+        .UseRedisDeferralStore(opts =>
         {
             opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
             opts.KeyPrefix = "onboarding:";

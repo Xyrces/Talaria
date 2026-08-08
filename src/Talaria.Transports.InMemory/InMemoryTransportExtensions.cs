@@ -60,4 +60,15 @@ public static class InMemoryTransportExtensions
         builder.Services.AddSingleton<Talaria.Core.Abstractions.IIdempotencyStore, InMemoryIdempotencyStore>();
         return builder;
     }
+
+    /// <summary>
+    /// Configures Talaria to use the in-memory deferral store for saga deferrals.
+    /// Entries do not survive a process restart — use a durable store in production.
+    /// </summary>
+    public static TalariaBuilder UseInMemoryDeferralStore(this TalariaBuilder builder)
+    {
+        Microsoft.Extensions.DependencyInjection.Extensions.ServiceCollectionDescriptorExtensions.TryAddSingleton<
+            Talaria.Core.Abstractions.IDeferralStore, InMemoryDeferralStore>(builder.Services);
+        return builder;
+    }
 }

@@ -23,6 +23,9 @@ public sealed class SagaHostedService : BackgroundService
     private readonly TalariaOptions _options;
     private readonly ILogger<SagaHostedService> _logger;
 
+    // Durable deferral store; resolved at startup. Null means deferral is unavailable.
+    private IDeferralStore? _deferralStore;
+
     // Cached producers keyed by (topic, message type) — created once, reused per dispatch.
     private readonly ConcurrentDictionary<(string Topic, Type MessageType), ProducerInvoker> _producers = new();
 
@@ -89,6 +92,15 @@ public sealed class SagaHostedService : BackgroundService
 
         _dispatchRoutes = BuildAndValidateDispatchRoutes(stepsByTopic.Keys);
 
+        _deferralStore = _serviceProvider.GetService<IDeferralStore>();
+        if (_deferralStore is null && stepsByTopic.Count > 0)
+        {
+            _logger.LogWarning(
+                "No IDeferralStore is registered. Out-of-order saga messages and handler-initiated " +
+                "deferrals will be routed to the DLQ instead of being deferred. " +
+                "Register one via UseRedisDeferralStore() or UseInMemoryDeferralStore().");
+        }
+
         // Pre-create producers for all declared dispatch routes and step topics
         // (the latter are used for deferral republishing).
         foreach (var (type, topic) in _dispatchRoutes)
@@ -106,6 +118,15 @@ public sealed class SagaHostedService : BackgroundService
                 ct => ConsumeTopicLoopAsync(kvp.Key, kvp.Value, transport, pipeline, ct),
                 _logger,
                 stoppingToken)).ToList();
+
+        if (_deferralStore != null)
+        {
+            tasks.Add(ConsumerSupervision.RunSupervisedAsync(
+                "deferral-sweeper",
+                ct => SweepDeferralsLoopAsync(transport, ct),
+                _logger,
+                stoppingToken));
+        }
 
         _logger.LogInformation("Talaria Sagas: started {Count} topic consumers.", tasks.Count);
 
@@ -282,9 +303,9 @@ public sealed class SagaHostedService : BackgroundService
                 _logger.LogInformation("Received non-starter message for Saga {SagaType} but state {Id} not found. Deferring...", stateType.Name, correlationId);
                 try
                 {
-                    await HandleDeferralAsync(env, payload, step, transport, ct);
+                    await HandleDeferralAsync(env, payload, step, correlationId, ct);
 
-                    // The deferred copy is published — safe to commit the original and release the
+                    // The deferred copy is durably scheduled — safe to commit the original and release the
                     // idempotency lock so the deferred copy (new MessageId) is not skipped as a duplicate.
                     await ReleaseLockBestEffortAsync(pipeline, gate.Lock, ct);
                     await consumer.CommitAsync(env, ct);
@@ -296,7 +317,8 @@ public sealed class SagaHostedService : BackgroundService
                     Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
                     Diagnostics.TalariaDiagnostics.DlqRouted.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
 
-                    await pipeline.FailAsync(gate.Lock, consumer, env, ex, "max_deferrals_exceeded", ct);
+                    // The DLQ reason header was set by HandleDeferralAsync before throwing.
+                    await pipeline.FailAsync(gate.Lock, consumer, env, ex, null, ct);
                 }
                 return;
             }
@@ -337,7 +359,7 @@ public sealed class SagaHostedService : BackgroundService
                 try
                 {
                     activity?.SetTag("saga.status", "deferred");
-                    await HandleDeferralAsync(env, payload, step, transport, ct);
+                    await HandleDeferralAsync(env, payload, step, correlationId, ct);
 
                     await ReleaseLockBestEffortAsync(pipeline, gate.Lock, ct);
                     await consumer.CommitAsync(env, ct);
@@ -349,7 +371,8 @@ public sealed class SagaHostedService : BackgroundService
                     Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
                     Diagnostics.TalariaDiagnostics.DlqRouted.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
 
-                    await pipeline.FailAsync(gate.Lock, consumer, env, ex, "max_deferrals_exceeded", ct);
+                    // The DLQ reason header was set by HandleDeferralAsync before throwing.
+                    await pipeline.FailAsync(gate.Lock, consumer, env, ex, null, ct);
                 }
                 return;
             }
@@ -420,15 +443,23 @@ public sealed class SagaHostedService : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Durably schedules a deferred copy of the message in the <see cref="IDeferralStore"/>.
+    /// On return the caller commits the original delivery and releases the idempotency lock;
+    /// the sweeper republishes the deferred copy when it falls due. Sets the DLQ reason header
+    /// and throws <see cref="InvalidOperationException"/> when deferral is impossible
+    /// (no store registered, missing source topic, or max attempts exceeded).
+    /// </summary>
     private async Task HandleDeferralAsync(
         MessageEnvelope<JsonElement> env,
         object payload,
         SagaStepRegistration step,
-        ITransport transport,
+        string correlationId,
         CancellationToken ct)
     {
         if (string.IsNullOrEmpty(env.SourceTopic))
         {
+            env.Headers.DlqReason = "missing_source_topic";
             throw new InvalidOperationException($"Cannot defer saga message of type {step.MessageType.Name}: the envelope has no source topic.");
         }
 
@@ -440,54 +471,126 @@ public sealed class SagaHostedService : BackgroundService
 
         if (attempt > _options.MaxDeferralAttempts)
         {
+            env.Headers.DlqReason = "max_deferrals_exceeded";
             _logger.LogWarning("Message exceeded max deferral attempts ({Max}). Routing to DLQ.", _options.MaxDeferralAttempts);
             throw new InvalidOperationException($"Max deferral attempts ({_options.MaxDeferralAttempts}) exceeded for Saga message of type {step.MessageType.Name}");
         }
 
-        env.Headers[MessageHeaders.DeferralAttemptKey] = attempt.ToString();
+        if (_deferralStore is null)
+        {
+            env.Headers.DlqReason = "deferral_unavailable";
+            throw new InvalidOperationException(
+                $"Cannot defer saga message of type {step.MessageType.Name}: no IDeferralStore is registered. " +
+                "Register one via UseRedisDeferralStore() or UseInMemoryDeferralStore().");
+        }
+
+        // Clone the headers so the deferred copy never shares mutable state with the original delivery.
+        var headers = new MessageHeaders(env.Headers)
+        {
+            [MessageHeaders.DeferralAttemptKey] = attempt.ToString()
+        };
 
         // Mint a new MessageId per deferral attempt. The original delivery's idempotency lock is
         // released on commit; reusing the original MessageId would let a still-active lock (or a
         // COMPLETED marker) suppress the deferred copy as a false duplicate.
-        var originalMessageId = env.Headers.MessageId;
+        var originalMessageId = headers.MessageId;
         if (!string.IsNullOrEmpty(originalMessageId))
         {
-            env.Headers.MessageId = $"{originalMessageId}:defer:{attempt}";
+            headers.MessageId = $"{originalMessageId}:defer:{attempt}";
         }
 
         // Engine-owned hop counter so cyclic deferrals/forwards trip the max-hop guard.
-        env.Headers.HopCount = env.Headers.HopCount + 1;
+        headers.HopCount = headers.HopCount + 1;
 
-        var delay = TimeSpan.FromMilliseconds(_options.DeferralBackoff.TotalMilliseconds * attempt);
-        var headers = env.Headers;
-        var sourceTopic = env.SourceTopic!;
+        var deferred = new DeferredMessage(
+            Guid.NewGuid(),
+            env.SourceTopic!,
+            step.MessageType.AssemblyQualifiedName ?? step.MessageType.FullName!,
+            JsonSerializer.Serialize(payload, step.MessageType),
+            headers,
+            correlationId,
+            attempt,
+            DateTimeOffset.UtcNow + TimeSpan.FromMilliseconds(_options.DeferralBackoff.TotalMilliseconds * attempt));
 
-        // Run background task to delay and reproduce via the cached producer.
-        _ = Task.Run(async () =>
+        await _deferralStore.EnqueueAsync(deferred, ct);
+    }
+
+    /// <summary>
+    /// Polls the deferral store and republishes due messages. Entries are claimed atomically
+    /// on pop, so concurrent sweepers across nodes cannot double-publish. A failed
+    /// republication is requeued with a fresh backoff.
+    /// </summary>
+    private async Task SweepDeferralsLoopAsync(ITransport transport, CancellationToken ct)
+    {
+        var interval = _options.DeferralBackoff < TimeSpan.FromSeconds(5)
+            ? _options.DeferralBackoff
+            : TimeSpan.FromSeconds(5);
+
+        while (!ct.IsCancellationRequested)
         {
+            IReadOnlyList<DeferredMessage> due;
             try
             {
-                await Task.Delay(delay, ct);
-
-                var invoker = await GetOrCreateProducerAsync(transport, sourceTopic, step.MessageType, ct);
-
-                if (System.Diagnostics.Activity.Current != null)
-                {
-                    headers.TraceParent = System.Diagnostics.Activity.Current.Id;
-                    headers.TraceState = System.Diagnostics.Activity.Current.TraceStateString;
-                }
-
-                await invoker.Produce(payload, headers, ct);
+                due = await _deferralStore!.PopDueAsync(DateTimeOffset.UtcNow, maxBatch: 64, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                // Host shutting down mid-deferral — expected, not an error.
+                throw;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to execute deferred message dispatch");
+                _logger.LogError(ex, "Deferral sweep failed to pop due messages; retrying next interval.");
+                due = Array.Empty<DeferredMessage>();
             }
-        }, ct);
+
+            foreach (var message in due)
+            {
+                await RepublishDeferredAsync(transport, message, ct);
+            }
+
+            await Task.Delay(interval, ct);
+        }
+    }
+
+    private async Task RepublishDeferredAsync(ITransport transport, DeferredMessage message, CancellationToken ct)
+    {
+        try
+        {
+            var type = Type.GetType(message.MessageType);
+            if (type is null)
+            {
+                // Poison entry — the type can never be resolved; drop it rather than requeue forever.
+                _logger.LogError("Deferred message {Id} has unresolvable payload type '{MessageType}'; dropping.", message.Id, message.MessageType);
+                await _deferralStore!.CompleteAsync(message.Id, ct);
+                return;
+            }
+
+            var payload = JsonSerializer.Deserialize(message.PayloadJson, type)
+                ?? throw new JsonException($"Deferred payload deserialized to null for {type.Name}.");
+
+            var invoker = await GetOrCreateProducerAsync(transport, message.Topic, type, ct);
+            await invoker.Produce(payload, new MessageHeaders(message.Headers), ct);
+
+            await _deferralStore!.CompleteAsync(message.Id, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Host shutting down mid-sweep — the entry stays claimed; it expires with the store
+            // or (InMemory) is discarded with the process. Not an error.
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to republish deferred message {Id}; requeueing.", message.Id);
+            try
+            {
+                await _deferralStore!.RequeueAsync(message, DateTimeOffset.UtcNow + _options.DeferralBackoff, ct);
+            }
+            catch (Exception requeueEx)
+            {
+                _logger.LogError(requeueEx, "Failed to requeue deferred message {Id}; it is lost.", message.Id);
+            }
+        }
     }
 
     private async Task<ProducerInvoker> GetOrCreateProducerAsync(
