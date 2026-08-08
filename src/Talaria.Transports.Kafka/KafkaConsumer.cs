@@ -15,7 +15,12 @@ namespace Talaria.Transports.Kafka;
 /// through an internal channel and drained by the poll loop (Confluent consumers are not
 /// thread-safe). Commits are therefore asynchronous — <see cref="CommitAsync"/> returns
 /// once the request is queued; a crash before the next drain means redelivery, which the
-/// idempotency stores cover.
+/// idempotency stores cover. Any still-queued commits are flushed on dispose.
+/// <para>
+/// The subscription lives for the consumer's lifetime, not per enumeration: abandoning
+/// an enumeration and starting a new one resumes from the current fetch position instead
+/// of rejoining the group and replaying from the last committed offset.
+/// </para>
 /// </summary>
 internal sealed class KafkaConsumer<T> : IConsumer<T>
 {
@@ -38,6 +43,7 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
     private readonly CancellationTokenSource _disposeCts = new();
     private volatile Task? _pumpTask;
     private int _disposed;
+    private int _subscribed;
 
     public KafkaConsumer(
         IConsumer<string, byte[]> consumer,
@@ -103,7 +109,12 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
     {
         try
         {
-            _consumer.Subscribe(_topic);
+            // Subscribe once per consumer lifetime — a new enumeration after an abandoned
+            // one resumes from the current fetch position rather than rejoining the group.
+            if (Interlocked.CompareExchange(ref _subscribed, 1, 0) == 0)
+            {
+                _consumer.Subscribe(_topic);
+            }
 
             while (!ct.IsCancellationRequested)
             {
@@ -195,9 +206,9 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
         }
         finally
         {
-            // Best-effort flush of any commits queued just before shutdown.
+            // Best-effort flush of any commits queued just before the pump stops.
+            // The subscription itself survives — it is released in DisposeAsync (Close).
             DrainCommits();
-            try { _consumer.Unsubscribe(); } catch { }
             writer.TryComplete();
         }
     }
@@ -308,12 +319,17 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
             return;
         }
 
-        // Stop the pump (if running), then close and dispose the underlying consumer.
+        // Stop the pump (if running), flush any commits queued after the last drain
+        // (e.g. queued while no enumeration was active), then close and dispose the
+        // underlying consumer. Close releases the subscription and group membership.
         _disposeCts.Cancel();
         if (_pumpTask is not null)
         {
             try { await _pumpTask.ConfigureAwait(false); } catch { }
         }
+
+        // Safe to touch _consumer here: the pump (the only other accessor) has finished.
+        DrainCommits();
 
         try { _consumer.Close(); } catch { }
         _consumer.Dispose();

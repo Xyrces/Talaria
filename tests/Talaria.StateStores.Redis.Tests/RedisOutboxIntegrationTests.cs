@@ -67,6 +67,9 @@ public class RedisOutboxIntegrationTests : IAsyncLifetime
         // One atomic unit: state saved + entry staged.
         await stateStore.TransitionAsync("corr-1", new SagaState { Id = "corr-1", Step = 2 }, [entry]);
 
+        // Staging stamps visibility with the store-side clock — acquire with fresh time.
+        now = DateTimeOffset.UtcNow;
+
         var state = await stateStore.GetAsync("corr-1");
         Assert.NotNull(state);
         Assert.Equal(2, state!.Step);
@@ -90,7 +93,7 @@ public class RedisOutboxIntegrationTests : IAsyncLifetime
         // Completion transition: state purged atomically with staging the final dispatch.
         await stateStore.TransitionAsync("corr-1", null, [entry with { Id = Guid.NewGuid() }]);
         Assert.Null(await stateStore.GetAsync("corr-1"));
-        Assert.Single(await outbox.AcquirePendingAsync(now, lease, 10));
+        Assert.Single(await outbox.AcquirePendingAsync(DateTimeOffset.UtcNow, lease, 10));
     }
 
     [DockerFact]
@@ -104,6 +107,9 @@ public class RedisOutboxIntegrationTests : IAsyncLifetime
         await stateStore.TransitionAsync("corr-2", new SagaState { Id = "corr-2" }, [new OutboxMessage(
             Guid.NewGuid(), "orders-retry", "System.String", "\"retry\"",
             new MessageHeaders { MessageId = "minted-2" }, now)]);
+
+        // Staging stamps visibility with the store-side clock — acquire with fresh time.
+        now = DateTimeOffset.UtcNow;
 
         var first = Assert.Single(await outbox.AcquirePendingAsync(now, lease, 10));
 
