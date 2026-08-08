@@ -202,13 +202,12 @@ public class KafkaReliabilityIntegrationTests : IAsyncLifetime
             topic,
             new ConsumerOptions { ConsumerGroup = $"test-group-{Guid.NewGuid():N}" });
 
-        var first = await TryNextAsync(checkConsumer, TimeSpan.FromSeconds(15));
-        Assert.NotNull(first);
-        Assert.Equal("tx-a", first!.Payload);
-
-        var second = await TryNextAsync(checkConsumer, TimeSpan.FromSeconds(15));
-        Assert.NotNull(second);
-        Assert.Equal("tx-b", second!.Payload);
+        // Read both messages within ONE enumeration: abandoning an enumeration and
+        // starting a new one rejoins the group and replays uncommitted messages.
+        var both = await CollectAsync(checkConsumer, expectedCount: 2, TimeSpan.FromSeconds(15));
+        Assert.Equal(2, both.Count);
+        Assert.Equal("tx-a", both[0].Payload);
+        Assert.Equal("tx-b", both[1].Payload);
 
         // Consume one message with group G, then commit its offset inside a second transaction.
         string group = $"test-group-{Guid.NewGuid():N}";
@@ -277,6 +276,32 @@ public class KafkaReliabilityIntegrationTests : IAsyncLifetime
         catch (OperationCanceledException)
         {
             // Window elapsed — expected when draining.
+        }
+        return received;
+    }
+
+    /// <summary>
+    /// Collects envelopes within one enumeration until <paramref name="expectedCount"/>
+    /// is reached or the timeout elapses.
+    /// </summary>
+    private static async Task<List<MessageEnvelope<T>>> CollectAsync<T>(IConsumer<T> consumer, int expectedCount, TimeSpan timeout)
+    {
+        var received = new List<MessageEnvelope<T>>();
+        using var cts = new CancellationTokenSource(timeout);
+        try
+        {
+            await foreach (var env in consumer.ConsumeAsync(cts.Token))
+            {
+                received.Add(env);
+                if (received.Count >= expectedCount)
+                {
+                    return received;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Timeout elapsed — expected when asserting absence.
         }
         return received;
     }

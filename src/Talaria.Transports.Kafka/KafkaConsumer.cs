@@ -17,9 +17,11 @@ namespace Talaria.Transports.Kafka;
 /// once the request is queued; a crash before the next drain means redelivery, which the
 /// idempotency stores cover. Any still-queued commits are flushed on dispose.
 /// <para>
-/// The subscription lives for the consumer's lifetime, not per enumeration: abandoning
-/// an enumeration and starting a new one resumes from the current fetch position instead
-/// of rejoining the group and replaying from the last committed offset.
+/// Each enumeration is one consumer session: subscribe on start, unsubscribe when it
+/// ends. Abandoning an enumeration and starting a new one rejoins the group and resumes
+/// from the committed offsets — so messages consumed but never committed are redelivered,
+/// while buffered messages are never silently skipped. Callers that read sequentially
+/// should keep one enumeration open (or commit between enumerations).
 /// </para>
 /// </summary>
 internal sealed class KafkaConsumer<T> : IConsumer<T>
@@ -43,7 +45,6 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
     private readonly CancellationTokenSource _disposeCts = new();
     private volatile Task? _pumpTask;
     private int _disposed;
-    private int _subscribed;
 
     public KafkaConsumer(
         IConsumer<string, byte[]> consumer,
@@ -109,12 +110,7 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
     {
         try
         {
-            // Subscribe once per consumer lifetime — a new enumeration after an abandoned
-            // one resumes from the current fetch position rather than rejoining the group.
-            if (Interlocked.CompareExchange(ref _subscribed, 1, 0) == 0)
-            {
-                _consumer.Subscribe(_topic);
-            }
+            _consumer.Subscribe(_topic);
 
             while (!ct.IsCancellationRequested)
             {
@@ -206,9 +202,10 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
         }
         finally
         {
-            // Best-effort flush of any commits queued just before the pump stops.
-            // The subscription itself survives — it is released in DisposeAsync (Close).
+            // Best-effort flush of any commits queued just before the pump stops, then
+            // leave the group: the next enumeration rejoins and resumes from committed offsets.
             DrainCommits();
+            try { _consumer.Unsubscribe(); } catch { }
             writer.TryComplete();
         }
     }
