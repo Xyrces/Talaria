@@ -674,8 +674,15 @@ public sealed class SagaHostedService : BackgroundService
                 due = Array.Empty<LeasedDeferral>();
             }
 
+            Diagnostics.TalariaDiagnostics.DeferralActiveLeases.Add(due.Count);
             foreach (var leased in due)
             {
+                if (leased.Lease.Token > 1)
+                {
+                    // Re-acquisition: a previous sweeper crashed (lease expired) or abandoned.
+                    Diagnostics.TalariaDiagnostics.DeferralReacquired.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", leased.Message.Topic));
+                }
+
                 await RepublishDeferredAsync(transport, leased, ct);
             }
 
@@ -686,6 +693,7 @@ public sealed class SagaHostedService : BackgroundService
     private async Task RepublishDeferredAsync(ITransport transport, LeasedDeferral leased, CancellationToken ct)
     {
         var message = leased.Message;
+        var topicTag = new KeyValuePair<string, object?>("messaging.destination.name", message.Topic);
         try
         {
             var type = Type.GetType(message.MessageType);
@@ -694,6 +702,7 @@ public sealed class SagaHostedService : BackgroundService
                 // Poison entry — the type can never be resolved; drop it rather than retry forever.
                 _logger.LogError("Deferred message {Id} has unresolvable payload type '{MessageType}'; dropping.", message.Id, message.MessageType);
                 await _deferralStore!.CompleteAsync(leased.Lease, ct);
+                Diagnostics.TalariaDiagnostics.DeferralActiveLeases.Add(-1);
                 return;
             }
 
@@ -704,6 +713,11 @@ public sealed class SagaHostedService : BackgroundService
             await invoker.Produce(payload, new MessageHeaders(message.Headers), ct);
 
             await _deferralStore!.CompleteAsync(leased.Lease, ct);
+
+            Diagnostics.TalariaDiagnostics.DeferralRepublished.Add(1, topicTag);
+            Diagnostics.TalariaDiagnostics.DeferralLag.Record(
+                Math.Max(0, (DateTimeOffset.UtcNow - message.DueAt).TotalMilliseconds), topicTag);
+            Diagnostics.TalariaDiagnostics.DeferralActiveLeases.Add(-1);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -714,6 +728,8 @@ public sealed class SagaHostedService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to republish deferred message {Id}; releasing the lease for retry.", message.Id);
+            Diagnostics.TalariaDiagnostics.DeferralRepublishFailed.Add(1, topicTag);
+            Diagnostics.TalariaDiagnostics.DeferralActiveLeases.Add(-1);
             try
             {
                 await _deferralStore!.AbandonAsync(leased.Lease, DateTimeOffset.UtcNow + _options.DeferralBackoff, ct);
@@ -757,8 +773,15 @@ public sealed class SagaHostedService : BackgroundService
                 pending = Array.Empty<LeasedOutboxMessage>();
             }
 
+            Diagnostics.TalariaDiagnostics.OutboxActiveLeases.Add(pending.Count);
             foreach (var leased in pending)
             {
+                if (leased.Lease.Token > 1)
+                {
+                    // Re-acquisition: a previous relay crashed (lease expired) or abandoned.
+                    Diagnostics.TalariaDiagnostics.OutboxReacquired.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", leased.Message.Topic));
+                }
+
                 await PublishOutboxAsync(transport, leased, ct);
             }
 
@@ -773,6 +796,7 @@ public sealed class SagaHostedService : BackgroundService
     private async Task PublishOutboxAsync(ITransport transport, LeasedOutboxMessage leased, CancellationToken ct)
     {
         var message = leased.Message;
+        var topicTag = new KeyValuePair<string, object?>("messaging.destination.name", message.Topic);
         try
         {
             var type = Type.GetType(message.MessageType);
@@ -781,6 +805,7 @@ public sealed class SagaHostedService : BackgroundService
                 // Poison entry — the type can never be resolved; drop it rather than retry forever.
                 _logger.LogError("Outbox message {Id} has unresolvable payload type '{MessageType}'; dropping.", message.Id, message.MessageType);
                 await _outboxStore!.CompleteAsync(leased.Lease, ct);
+                Diagnostics.TalariaDiagnostics.OutboxActiveLeases.Add(-1);
                 return;
             }
 
@@ -791,6 +816,11 @@ public sealed class SagaHostedService : BackgroundService
             await invoker.Produce(payload, new MessageHeaders(message.Headers), ct);
 
             await _outboxStore!.CompleteAsync(leased.Lease, ct);
+
+            Diagnostics.TalariaDiagnostics.OutboxPublished.Add(1, topicTag);
+            Diagnostics.TalariaDiagnostics.OutboxLag.Record(
+                Math.Max(0, (DateTimeOffset.UtcNow - message.CreatedAt).TotalMilliseconds), topicTag);
+            Diagnostics.TalariaDiagnostics.OutboxActiveLeases.Add(-1);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -801,6 +831,8 @@ public sealed class SagaHostedService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to publish outbox message {Id}; releasing the lease for retry.", message.Id);
+            Diagnostics.TalariaDiagnostics.OutboxPublishFailed.Add(1, topicTag);
+            Diagnostics.TalariaDiagnostics.OutboxActiveLeases.Add(-1);
             try
             {
                 await _outboxStore!.AbandonAsync(leased.Lease, DateTimeOffset.UtcNow + _options.OutboxRelayInterval, ct);

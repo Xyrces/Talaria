@@ -19,7 +19,7 @@ Talaria provides **at-least-once delivery with idempotent processing**:
 - **Idempotency:** fencing-token locks (`SETNX` on Redis) filter duplicate `MessageId`s across a cluster; a stale lock holder can never release another worker's lock.
 - **Transactional outbox:** saga state transitions and their outbound messages are staged atomically (single Lua script on Redis, one lock in-memory); a background relay publishes staged messages with lease + fencing semantics. Registered automatically by `UseRedisStateStore()` / `UseInMemoryStateStore()`.
 - **Durable deferral:** out-of-order saga messages (a step arriving before the starter) are persisted in an `IDeferralStore` (Redis sorted set or in-memory) and republished by a background sweeper using visibility-timeout leases — they survive restarts and sweeper crashes, unlike an in-process timer.
-- **Observability:** OpenTelemetry-native traces and metrics with W3C trace-context propagation across produce/consume boundaries.
+- **Observability:** OpenTelemetry-native traces and metrics with W3C trace-context propagation across produce/consume boundaries. Includes relay monitoring: `talaria.outbox.*` / `talaria.deferral.*` counters and histograms for published/failed entries, re-acquisitions (lease expiry signal), active leases, and relay lag.
 - **Dead-letter resiliency:** automatic DLQ routing (suffix configurable via `DlqSuffix`, default `.dlq`) for handler exceptions, deserialization failures, missing correlation ids, unmapped dispatches, and exceeded hop/deferral thresholds. Exception detail in DLQ headers is gated behind `TalariaOptions.IncludeExceptionDetailsInDlq` (off by default).
 
 ---

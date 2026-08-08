@@ -40,6 +40,60 @@ public static class TalariaDiagnostics
         unit: "{message}",
         description: "Number of messages routed to the dead-letter queue.");
 
+    // ---- Transactional outbox relay ----
+
+    public static readonly Counter<long> OutboxPublished = Meter.CreateCounter<long>(
+        "talaria.outbox.published",
+        unit: "{message}",
+        description: "Number of outbox entries published to the transport by the relay.");
+
+    public static readonly Counter<long> OutboxPublishFailed = Meter.CreateCounter<long>(
+        "talaria.outbox.publish.failed",
+        unit: "{message}",
+        description: "Number of failed outbox publish attempts (lease abandoned for retry).");
+
+    public static readonly Counter<long> OutboxReacquired = Meter.CreateCounter<long>(
+        "talaria.outbox.reacquired",
+        unit: "{message}",
+        description: "Number of outbox entries acquired more than once — indicates a previous relay crashed (lease expired) or abandoned the entry. Track this: a rising rate means relay instability.");
+
+    public static readonly UpDownCounter<long> OutboxActiveLeases = Meter.CreateUpDownCounter<long>(
+        "talaria.outbox.active_leases",
+        unit: "{lease}",
+        description: "Number of outbox entries currently leased by this node's relay.");
+
+    public static readonly Histogram<double> OutboxLag = Meter.CreateHistogram<double>(
+        "talaria.outbox.lag",
+        unit: "ms",
+        description: "Time from outbox staging to successful publication (relay lag). A rising lag means the relay is falling behind.");
+
+    // ---- Deferral sweeper ----
+
+    public static readonly Counter<long> DeferralRepublished = Meter.CreateCounter<long>(
+        "talaria.deferral.republished",
+        unit: "{message}",
+        description: "Number of deferred messages republished by the sweeper.");
+
+    public static readonly Counter<long> DeferralRepublishFailed = Meter.CreateCounter<long>(
+        "talaria.deferral.republish.failed",
+        unit: "{message}",
+        description: "Number of failed deferral republication attempts (lease abandoned for retry).");
+
+    public static readonly Counter<long> DeferralReacquired = Meter.CreateCounter<long>(
+        "talaria.deferral.reacquired",
+        unit: "{message}",
+        description: "Number of deferred messages acquired more than once — indicates a previous sweeper crashed (lease expired) or abandoned the entry. Track this: a rising rate means sweeper instability.");
+
+    public static readonly UpDownCounter<long> DeferralActiveLeases = Meter.CreateUpDownCounter<long>(
+        "talaria.deferral.active_leases",
+        unit: "{lease}",
+        description: "Number of deferred messages currently leased by this node's sweeper.");
+
+    public static readonly Histogram<double> DeferralLag = Meter.CreateHistogram<double>(
+        "talaria.deferral.lag",
+        unit: "ms",
+        description: "Lateness past the scheduled due time when a deferred message is republished. A rising lag means the sweeper is falling behind.");
+
     /// <summary>
     /// Attempts to extract existing W3C context from headers to resume a trace,
     /// or starts a new trace if no headers exist.
