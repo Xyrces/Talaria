@@ -6,17 +6,22 @@ using Talaria.Core.Abstractions;
 namespace Talaria.Transports.InMemory;
 
 /// <summary>
-/// In-memory transport backed by System.Threading.Channels.
-/// Provides fully deterministic, container-free messaging for testing and development.
+/// In-memory transport backed by System.Threading.Channels. A fully functional
+/// lightweight transport for single-process deployments, prototyping, and tests —
+/// no backing message bus required.
 /// <para>
 /// Kafka-parity semantics: every (topic, consumer-group) pair gets its own channel, so
 /// consumer groups are independent (a late-joining group replays the retained backlog);
 /// offsets are assigned per topic by the transport; malformed payloads are routed to the
-/// DLQ instead of killing the consumer loop. DLQ topics are unbounded.
+/// DLQ instead of killing the consumer loop; unsettled (uncommitted) messages are
+/// requeued when a consumer is disposed, mirroring Kafka redelivery. DLQ topics are
+/// unbounded.
 /// </para>
 /// <para>
 /// Remaining divergences from Kafka: the retained backlog is capped at ChannelCapacity
-/// (oldest dropped), there is no partition key ordering, and offsets are not transactional.
+/// (oldest dropped, and requeue-on-dispose drops overflow on a full channel), there is
+/// no partition key ordering, and offsets do not join transactional sessions (produces
+/// are buffered until commit; the offset commit itself is per-consumer).
 /// </para>
 /// </summary>
 public sealed class InMemoryTransport : ITransport

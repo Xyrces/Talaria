@@ -9,6 +9,13 @@ namespace Talaria.Transports.InMemory;
 /// In-memory consumer backed by a Channel reader for a specific consumer group.
 /// Malformed or null payloads are routed to the DLQ (Kafka parity) instead of
 /// killing the consumer loop.
+/// <para>
+/// Acknowledgement semantics: yielded envelopes stay in a pending set until
+/// <see cref="CommitAsync"/> or <see cref="NackAsync"/> settles them. On dispose
+/// (host shutdown or a faulting consumer loop being restarted) every unsettled
+/// message is requeued to the group channel — the in-memory equivalent of Kafka
+/// redelivering uncommitted messages.
+/// </para>
 /// </summary>
 internal sealed class InMemoryConsumer<T> : IConsumer<T>
 {
@@ -18,6 +25,9 @@ internal sealed class InMemoryConsumer<T> : IConsumer<T>
     private readonly InMemoryTransportOptions _options;
     private readonly bool _includeDlqExceptionDetails;
     private readonly string _topic;
+
+    // Unsettled envelopes by offset, mirroring Kafka's uncommitted offsets.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, InMemoryMessage> _pending = new();
 
     public InMemoryConsumer(
         string topic,
@@ -63,6 +73,8 @@ internal sealed class InMemoryConsumer<T> : IConsumer<T>
                 continue;
             }
 
+            _pending[raw.Offset] = raw;
+
             yield return new MessageEnvelope<T>
             {
                 Payload = payload,
@@ -102,7 +114,7 @@ internal sealed class InMemoryConsumer<T> : IConsumer<T>
 
     public Task CommitAsync(MessageEnvelope<T> message, CancellationToken ct = default)
     {
-        // In-memory: commit is a no-op (message already consumed from channel)
+        _pending.TryRemove(message.Offset, out _);
         return Task.CompletedTask;
     }
 
@@ -118,10 +130,21 @@ internal sealed class InMemoryConsumer<T> : IConsumer<T>
 
         await _dlqBus.PublishAsync(dlqMessage, ct);
         await _appDlqBus.PublishAsync(dlqMessage, ct);
+
+        _pending.TryRemove(message.Offset, out _);
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        return ValueTask.CompletedTask;
+        // Kafka parity: unsettled (uncommitted) messages are redelivered. Requeue them
+        // to the group channel so the next consumer instance picks them up. A full
+        // bounded channel drops the overflow — accepted, documented transport divergence.
+        foreach (var raw in _pending.Values)
+        {
+            _groupChannel.Writer.TryWrite(raw);
+        }
+
+        _pending.Clear();
+        await ValueTask.CompletedTask;
     }
 }

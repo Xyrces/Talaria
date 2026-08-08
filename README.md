@@ -1,6 +1,6 @@
 # Talaria Saga Engine
 
-Talaria is a distributed messaging and saga orchestration library for **.NET** (multi-targeting `net8.0`, `net9.0`, `net10.0`) built on **Confluent Kafka** and **Redis**, with a zero-dependency in-memory provider for tests and local development.
+Talaria is a distributed messaging and saga orchestration library for **.NET** (multi-targeting `net8.0`, `net9.0`, `net10.0`) built on **Confluent Kafka** and **Redis**, with a zero-dependency in-memory provider for lightweight single-process deployments, prototyping, and tests.
 
 ## Delivery guarantees — stated precisely
 
@@ -8,17 +8,19 @@ Talaria provides **at-least-once delivery with idempotent processing**:
 
 - Consumers commit offsets only after successful processing, so failures redeliver.
 - A distributed idempotency store (`IIdempotencyStore`) deduplicates by `MessageId` using fencing-token locks, so redeliveries and duplicate publishes are processed exactly once per consumer group.
-- Saga outbound messages and the consumed message's offset commit in a **single Kafka transaction** (exactly-once semantics for the produce + offset boundary).
-- Saga state (Redis) **cannot** join that Kafka transaction: a crash between the state save and the transaction commit replays the message against transitioned state. Starter steps are protected by a built-in replay guard; custom step handlers should be idempotent.
+- Saga outbound messages go through a **transactional outbox**: the state transition and its outbound messages are staged in one atomic store operation (`IStateStore.TransitionAsync`), then a leased relay publishes them at-least-once. Each staged message carries a minted `MessageId`, so a duplicate publish after a relay crash is deduplicated by the downstream idempotency gate. A crash after the atomic transition loses nothing.
+- The replay window that remains is between the atomic transition and the offset commit: a crash there replays the message against transitioned state. Starter steps are protected by a built-in replay guard; custom step handlers should be idempotent.
+- Deferrals and outbox entries use **lease (visibility-timeout) semantics** — the Azure Service Bus peek-lock analogue: acquiring an entry hides it for the lease duration instead of removing it, so a sweeper/relay crash never loses a message; the lease expires and another worker re-acquires it. Completions are fenced by a monotonic lease token.
 
 ## Core Features
 
-- **Decoupled architecture:** provider-agnostic abstractions (`ITransport`, `IStateStore`, `IIdempotencyStore`, `IDeferralStore`) with Kafka/Redis and in-memory implementations.
+- **Decoupled architecture:** provider-agnostic abstractions (`ITransport`, `IStateStore`, `IIdempotencyStore`, `IDeferralStore`, `IOutboxStore`) with Kafka/Redis and in-memory implementations.
 - **Saga orchestration:** strongly typed state machines via `MapSaga<TState>` with explicit correlation and explicit dispatch routing (`DispatchTo`).
 - **Idempotency:** fencing-token locks (`SETNX` on Redis) filter duplicate `MessageId`s across a cluster; a stale lock holder can never release another worker's lock.
-- **Durable deferral:** out-of-order saga messages (a step arriving before the starter) are persisted in an `IDeferralStore` (Redis sorted set or in-memory) and republished by a background sweeper — they survive restarts, unlike an in-process timer.
+- **Transactional outbox:** saga state transitions and their outbound messages are staged atomically (single Lua script on Redis, one lock in-memory); a background relay publishes staged messages with lease + fencing semantics. Registered automatically by `UseRedisStateStore()` / `UseInMemoryStateStore()`.
+- **Durable deferral:** out-of-order saga messages (a step arriving before the starter) are persisted in an `IDeferralStore` (Redis sorted set or in-memory) and republished by a background sweeper using visibility-timeout leases — they survive restarts and sweeper crashes, unlike an in-process timer.
 - **Observability:** OpenTelemetry-native traces and metrics with W3C trace-context propagation across produce/consume boundaries.
-- **Dead-letter resiliency:** automatic DLQ routing (suffix configurable via `DlqSuffix`, default `.dlq`) for handler exceptions, deserialization failures, missing correlation ids, and exceeded hop/deferral thresholds. Exception detail in DLQ headers is gated behind `TalariaOptions.IncludeExceptionDetailsInDlq` (off by default).
+- **Dead-letter resiliency:** automatic DLQ routing (suffix configurable via `DlqSuffix`, default `.dlq`) for handler exceptions, deserialization failures, missing correlation ids, unmapped dispatches, and exceeded hop/deferral thresholds. Exception detail in DLQ headers is gated behind `TalariaOptions.IncludeExceptionDetailsInDlq` (off by default).
 
 ---
 
@@ -78,10 +80,14 @@ builder.Services.AddTalaria()
     });
 ```
 
-All `UseRedis*` calls share one options registration — configure callbacks accumulate, so `KeyPrefix` only needs to be set once.
+All `UseRedis*` calls share one options registration — configure callbacks accumulate, so `KeyPrefix` only needs to be set once. `UseRedisStateStore` also registers the Redis transactional outbox used for saga dispatch.
 
 ```csharp
-// Zero-dependency local & testing configuration (in-memory)
+// Zero-dependency configuration (in-memory): lightweight single-process
+// deployments, prototyping, and tests — no backing message bus required.
+// The in-memory transport mirrors Kafka semantics: consumer-group fan-out,
+// backlog replay for late-joining groups, transactional produce buffering,
+// and redelivery of uncommitted messages on consumer restart.
 builder.Services.AddTalaria()
     .UseInMemoryTransport()
     .UseInMemoryStateStore()
@@ -91,6 +97,10 @@ builder.Services.AddTalaria()
 
 > Without an `IDeferralStore`, out-of-order saga messages are routed to the DLQ
 > (`deferral_unavailable`) instead of being deferred.
+>
+> Without an `IOutboxStore` (registered automatically by both state stores above),
+> saga dispatch falls back to direct transactional produce — the state save and the
+> message publish are not atomic in that mode, and a startup warning is logged.
 
 ### Simple Stateless Handlers
 
@@ -140,8 +150,9 @@ services.MapSaga<OnboardingState>(saga =>
 
 Notes:
 
-- `context.Transition(state)` persists the state; `context.Complete()` deletes it; `context.Defer()` reschedules the current message via the deferral store.
-- Dispatching a message type with no `DispatchTo` mapping throws at processing time.
+- `context.Transition(state)` persists the state; `context.Complete()` deletes it; `context.Defer()` reschedules the current message via the deferral store (any dispatches queued in the same handler invocation are discarded).
+- Dispatches are staged in the transactional outbox atomically with the state transition and published asynchronously by the relay — expect a small relay-latency delay (poll interval configurable via `TalariaOptions.OutboxRelayInterval`, default 250ms).
+- Dispatching a message type with no `DispatchTo` mapping dead-letters the triggering message (`unmapped_dispatch`) without saving state.
 - Multiple saga steps (and stateless handlers) may share one topic — messages are fanned out by a `talaria.message_type` header.
 
 ---
