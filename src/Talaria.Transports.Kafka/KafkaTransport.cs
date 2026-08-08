@@ -13,6 +13,15 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
     private readonly KafkaTransportOptions _kafkaOptions;
     private readonly ConcurrentDictionary<string, IProducer<string, byte[]>> _producers = new();
 
+    // Pool of transactional producers (each holds a stable TransactionalId for zombie fencing).
+    private readonly ConcurrentBag<IProducer<string, byte[]>> _transactionalProducerPool = new();
+    private readonly string _transactionalIdPrefix = $"talaria-{Guid.NewGuid():N}";
+    private int _transactionalProducerCounter;
+
+    // Consumer group metadata by group id, registered when a consumer is created.
+    // Required to commit consumer offsets inside a transaction.
+    private readonly ConcurrentDictionary<string, IConsumerGroupMetadata> _groupMetadata = new();
+
     /// <summary>
     /// Creates a KafkaTransport with the specified options.
     /// </summary>
@@ -63,6 +72,9 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
         var confluentConsumer = new ConsumerBuilder<string, byte[]>(config).Build();
         var confluentDlqProducer = GetOrCreateRawProducer(topic + _kafkaOptions.DlqSuffix);
 
+        // Track the group's metadata so transactions can commit this group's offsets.
+        _groupMetadata[config.GroupId] = confluentConsumer.ConsumerGroupMetadata;
+
         IConsumer<T> wrapper = new KafkaConsumer<T>(
             confluentConsumer, confluentDlqProducer, topic, _kafkaOptions, _kafkaOptions.DlqSuffix,
             bufferCapacity: options.BufferCapacity > 0 ? options.BufferCapacity : 100);
@@ -83,15 +95,45 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
     }
 
     /// <summary>
-    /// Creates a transactional session (not purely supported by standard Kafka Producers without exactly-once config)
+    /// Begins a real Kafka transaction (exactly-once semantics). All produces obtained
+    /// from the session, plus the consumed message's offset when provided, commit atomically.
     /// </summary>
-    public Task<ITransactionalSession> BeginTransactionAsync(CancellationToken ct = default)
+    public Task<ITransactionalSession> BeginTransactionAsync(
+        string? consumerGroup = null,
+        TransactionOffsetSource? offsetSource = null,
+        CancellationToken ct = default)
     {
-        // For standard Kafka, we might just use a no-op session unless we configure Transactions in Kafka exactly-once semantics.
-        // For MVP, we'll return a NoOpSession.
-        ITransactionalSession session = new NoOpKafkaTransactionalSession();
+        var producer = CheckoutTransactionalProducer();
+        ITransactionalSession session = new KafkaTransactionalSession(this, producer, consumerGroup, offsetSource);
         return Task.FromResult(session);
     }
+
+    internal IProducer<string, byte[]> CheckoutTransactionalProducer()
+    {
+        if (_transactionalProducerPool.TryTake(out var pooled))
+        {
+            return pooled;
+        }
+
+        var id = Interlocked.Increment(ref _transactionalProducerCounter);
+        var config = new ProducerConfig(_kafkaOptions.BaseProducerConfig)
+        {
+            BootstrapServers = _kafkaOptions.BootstrapServers,
+            Acks = Acks.All,
+            EnableIdempotence = true, // required for transactions
+            TransactionalId = $"{_transactionalIdPrefix}-{id}"
+        };
+
+        var producer = new ProducerBuilder<string, byte[]>(config).Build();
+        producer.InitTransactions(TimeSpan.FromSeconds(30));
+        return producer;
+    }
+
+    internal void ReturnTransactionalProducer(IProducer<string, byte[]> producer)
+        => _transactionalProducerPool.Add(producer);
+
+    internal IConsumerGroupMetadata? GetConsumerGroupMetadata(string consumerGroup)
+        => _groupMetadata.TryGetValue(consumerGroup, out var metadata) ? metadata : null;
 
     public ValueTask DisposeAsync()
     {
@@ -108,13 +150,20 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
             }
         }
         _producers.Clear();
+
+        while (_transactionalProducerPool.TryTake(out var transactional))
+        {
+            try
+            {
+                transactional.Flush(_kafkaOptions.FlushTimeout);
+                transactional.Dispose();
+            }
+            catch
+            {
+                // Ignore cleanup errors during shutdown
+            }
+        }
+
         return ValueTask.CompletedTask;
     }
-}
-
-internal class NoOpKafkaTransactionalSession : ITransactionalSession
-{
-    public Task CommitAsync(CancellationToken ct = default) => Task.CompletedTask;
-    public Task AbortAsync(CancellationToken ct = default) => Task.CompletedTask;
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }

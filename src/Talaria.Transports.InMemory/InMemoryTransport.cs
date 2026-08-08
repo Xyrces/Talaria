@@ -75,9 +75,14 @@ public sealed class InMemoryTransport : ITransport
         return Task.FromResult(producer);
     }
 
-    public Task<ITransactionalSession> BeginTransactionAsync(CancellationToken ct = default)
+    public Task<ITransactionalSession> BeginTransactionAsync(
+        string? consumerGroup = null,
+        TransactionOffsetSource? offsetSource = null,
+        CancellationToken ct = default)
     {
-        return Task.FromResult<ITransactionalSession>(new InMemoryTransactionalSession());
+        // Offsets are not transactional in the in-memory transport; the session
+        // buffers produces so commit/abort visibility is testable.
+        return Task.FromResult<ITransactionalSession>(new InMemoryTransactionalSession(this));
     }
 
     /// <summary>

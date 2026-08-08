@@ -28,8 +28,13 @@ public interface ITransport
         CancellationToken ct = default);
 
     /// <summary>
-    /// Begins a transactional session. For transports that don't support transactions,
-    /// returns a no-op session that always commits successfully.
+    /// Begins a transactional session. When <paramref name="consumerGroup"/> and
+    /// <paramref name="offsetSource"/> are provided and the transport supports it,
+    /// the consumed message's offset is committed inside the same transaction as the
+    /// session's produces (Kafka exactly-once semantics). Disposing an open session aborts it.
     /// </summary>
-    Task<ITransactionalSession> BeginTransactionAsync(CancellationToken ct = default);
+    Task<ITransactionalSession> BeginTransactionAsync(
+        string? consumerGroup = null,
+        TransactionOffsetSource? offsetSource = null,
+        CancellationToken ct = default);
 }

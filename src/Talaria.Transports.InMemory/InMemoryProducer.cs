@@ -30,6 +30,23 @@ internal sealed class InMemoryProducer<T> : IProducer<T>
         string? partitionKey = null,
         CancellationToken ct = default)
     {
+        var msg = CreateMessage(message, headers, Interlocked.Increment(ref _offset));
+
+        if (System.Diagnostics.Activity.Current != null)
+        {
+            System.Diagnostics.Activity.Current.SetTag("messaging.destination.name", _topic);
+            System.Diagnostics.Activity.Current.SetTag("messaging.system", "talaria");
+        }
+
+        await _channel.Writer.WriteAsync(msg, ct);
+    }
+
+    /// <summary>
+    /// Builds a wire message with all engine-owned headers stamped (message id, message type,
+    /// hop counter, trace context). Shared with the transactional session's buffering producer.
+    /// </summary>
+    internal static InMemoryMessage CreateMessage(T message, MessageHeaders? headers, long offset)
+    {
         // Clone incoming headers: never mutate or store the caller's instance.
         var finalHeaders = headers is null ? new MessageHeaders() : new MessageHeaders(headers);
 
@@ -55,21 +72,13 @@ internal sealed class InMemoryProducer<T> : IProducer<T>
             finalHeaders.HopCount = finalHeaders.HopCount + 1;
         }
 
-        var msg = new InMemoryMessage
+        return new InMemoryMessage
         {
             PayloadJson = JsonSerializer.Serialize(message),
             Headers = finalHeaders,
-            Offset = Interlocked.Increment(ref _offset),
+            Offset = offset,
             Timestamp = DateTimeOffset.UtcNow,
         };
-
-        if (System.Diagnostics.Activity.Current != null)
-        {
-            System.Diagnostics.Activity.Current.SetTag("messaging.destination.name", _topic);
-            System.Diagnostics.Activity.Current.SetTag("messaging.system", "talaria");
-        }
-
-        await _channel.Writer.WriteAsync(msg, ct);
     }
 
     public ValueTask DisposeAsync()

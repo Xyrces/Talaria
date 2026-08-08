@@ -29,6 +29,13 @@ public sealed class SagaHostedService : BackgroundService
     // Cached producers keyed by (topic, message type) — created once, reused per dispatch.
     private readonly ConcurrentDictionary<(string Topic, Type MessageType), ProducerInvoker> _producers = new();
 
+    // Cached session dispatch delegates keyed by message type — built once at startup,
+    // used to produce through the per-message transactional session.
+    private readonly ConcurrentDictionary<Type, SessionDispatcher> _sessionDispatchers = new();
+
+    private delegate Task SessionDispatcher(
+        ITransactionalSession session, string topic, object message, MessageHeaders? headers, CancellationToken ct);
+
     // Merged dispatch routes across all sagas: message CLR type → topic.
     private IReadOnlyDictionary<Type, string> _dispatchRoutes = new Dictionary<Type, string>();
 
@@ -101,11 +108,12 @@ public sealed class SagaHostedService : BackgroundService
                 "Register one via UseRedisDeferralStore() or UseInMemoryDeferralStore().");
         }
 
-        // Pre-create producers for all declared dispatch routes and step topics
-        // (the latter are used for deferral republishing).
-        foreach (var (type, topic) in _dispatchRoutes)
+        // Pre-create producers for all step topics (used for deferral republishing) and
+        // pre-build the session dispatchers for all declared dispatch routes (one-time
+        // generic dispatch at startup — never in the per-message hot path).
+        foreach (var type in _dispatchRoutes.Keys)
         {
-            await GetOrCreateProducerAsync(transport, topic, type, stoppingToken);
+            GetSessionDispatcher(type);
         }
         foreach (var route in stepsByTopic.Values.SelectMany(x => x))
         {
@@ -378,7 +386,13 @@ public sealed class SagaHostedService : BackgroundService
             }
 
             // 8. Transactional dispatch of outbound messages via explicit routes.
-            await using var tx = await transport.BeginTransactionAsync(ct);
+            //    The consumed message's offset joins the transaction when the transport
+            //    supports it (Kafka exactly-once); InMemory buffers until commit.
+            var offsetSource = env.SourceTopic is not null && env.Partition is int partition
+                ? new TransactionOffsetSource(env.SourceTopic, partition, env.Offset)
+                : null;
+
+            await using var tx = await transport.BeginTransactionAsync(_options.ApplicationName, offsetSource, ct);
 
             foreach (var outbound in result.OutboundMessages)
             {
@@ -390,7 +404,7 @@ public sealed class SagaHostedService : BackgroundService
                         $"Declare the route with saga.DispatchTo<{outboundType.Name}>(\"topic\").");
                 }
 
-                var invoker = await GetOrCreateProducerAsync(transport, outboundTopic, outboundType, ct);
+                var dispatcher = GetSessionDispatcher(outboundType);
 
                 // Propagate trace context
                 var headers = new MessageHeaders();
@@ -400,7 +414,7 @@ public sealed class SagaHostedService : BackgroundService
                     headers.TraceState = System.Diagnostics.Activity.Current.TraceStateString;
                 }
 
-                await invoker.Produce(outbound, headers, ct);
+                await dispatcher(tx, outboundTopic, outbound, headers, ct);
             }
 
             // 9. Save or purge state.
@@ -425,15 +439,17 @@ public sealed class SagaHostedService : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to commit saga transition");
+                // Infrastructure failure — do NOT dead-letter a healthy message. The lock is
+                // released, the session's disposal aborts the transaction, and the offset stays
+                // uncommitted so the transport redelivers the message. Note the state save may
+                // already have happened: replay then hits transitioned state, so step handlers
+                // must be idempotent (starters are safe by construction via the replay guard).
+                _logger.LogError(ex, "Failed to commit saga transition; the message remains uncommitted for redelivery.");
 
                 await ReleaseLockBestEffortAsync(pipeline, gate.Lock, ct);
 
                 activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, ex.Message);
                 Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
-
-                await tx.AbortAsync(ct);
-                await consumer.NackAsync(env, ct);
             }
         }
         finally
@@ -621,6 +637,28 @@ public sealed class SagaHostedService : BackgroundService
             async (msg, headers, token) => await producer.ProduceAsync((T)msg, headers, null, token),
             producer);
     }
+
+    private SessionDispatcher GetSessionDispatcher(Type messageType)
+    {
+        if (_sessionDispatchers.TryGetValue(messageType, out var existing))
+        {
+            return existing;
+        }
+
+        // One-time generic dispatch per message type — never in the per-message hot path.
+        var method = typeof(SagaHostedService)
+            .GetMethod(nameof(CreateSessionDispatcher), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+            .MakeGenericMethod(messageType);
+
+        return _sessionDispatchers.GetOrAdd(messageType, (SessionDispatcher)method.Invoke(null, null)!);
+    }
+
+    private static SessionDispatcher CreateSessionDispatcher<T>() where T : class
+        => async (session, topic, message, headers, token) =>
+        {
+            var producer = await session.GetProducerAsync<T>(topic, token);
+            await producer.ProduceAsync((T)message, headers, null, token);
+        };
 
     private static IStateStoreAccessor CreateStateStoreAccessor(Type stateType)
     {
