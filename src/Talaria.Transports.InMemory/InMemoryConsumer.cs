@@ -47,28 +47,7 @@ internal sealed class InMemoryConsumer<T> : IConsumer<T>
                 Payload = payload,
                 Headers = raw.Headers,
                 SourceTopic = _topic,
-                Offset = raw.Offset,
-                Timestamp = raw.Timestamp,
-            };
-        }
-    }
-
-    public async IAsyncEnumerable<MessageEnvelope<T>> ConsumeDlqAsync([EnumeratorCancellation] CancellationToken ct = default)
-    {
-        await foreach (var raw in _dlqChannel.Reader.ReadAllAsync(ct))
-        {
-            if (_options.SimulatedLatency > TimeSpan.Zero)
-            {
-                await Task.Delay(_options.SimulatedLatency, ct);
-            }
-
-            var payload = JsonSerializer.Deserialize<T>(raw.PayloadJson)!;
-
-            yield return new MessageEnvelope<T>
-            {
-                Payload = payload,
-                Headers = raw.Headers,
-                SourceTopic = _topic + ".dlq",
+                CorrelationId = raw.Headers.TryGetValue(MessageHeaders.CorrelationIdKey, out var cid) ? cid : null,
                 Offset = raw.Offset,
                 Timestamp = raw.Timestamp,
             };

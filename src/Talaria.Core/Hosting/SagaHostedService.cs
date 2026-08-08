@@ -51,6 +51,13 @@ public sealed class SagaHostedService : BackgroundService
                 var messageType = step.MessageType;
                 var resolver = step.CorrelationResolver;
 
+                if (consumerTasksGroupedByTopic.ContainsKey(topic))
+                {
+                    throw new InvalidOperationException(
+                        $"Multiple saga steps are mapped to topic '{topic}' (saga state '{sagaReg.StateType.Name}', message '{messageType.Name}'). " +
+                        "Only one saga step per topic is currently supported; map each step to a distinct topic.");
+                }
+
                 var consumerOpts = new ConsumerOptions
                 {
                     ConsumerGroup = _options.ApplicationName,
@@ -138,14 +145,14 @@ public sealed class SagaHostedService : BackgroundService
 
             var idempotencyStore = (IIdempotencyStore?)_serviceProvider.GetService(typeof(IIdempotencyStore));
             var msgId = env.Headers.MessageId;
-            var hasLock = false;
+            IdempotencyLock? idempotencyLock = null;
 
             if (idempotencyStore != null && !string.IsNullOrEmpty(msgId))
             {
                 // Expiration is generous to allow for slow processing without immediate concurrent retry overlaps
-                hasLock = await idempotencyStore.TryAcquireLockAsync(msgId, _options.ApplicationName, _options.IdempotencyLockTtl, ct);
+                idempotencyLock = await idempotencyStore.TryAcquireLockAsync(msgId, _options.ApplicationName, _options.IdempotencyLockTtl, ct);
                 
-                if (!hasLock)
+                if (idempotencyLock is null)
                 {
                     _logger.LogDebug("Saga Message {MessageId} skipped. Idempotency lock claimed by another worker or already completed.", msgId);
                     // We immediately commit the message to suppress further polling!
@@ -165,12 +172,27 @@ public sealed class SagaHostedService : BackgroundService
                 try 
                 {
                     await HandleDeferralAsync(env, transport, ct);
+
+                    // The deferred copy is published — safe to commit the original and release the
+                    // idempotency lock so the deferred copy (new MessageId) is not skipped as a duplicate.
+                    if (idempotencyLock is not null && idempotencyStore != null)
+                    {
+                        await idempotencyStore.ReleaseLockAsync(idempotencyLock, ct);
+                    }
+                    await consumer.CommitAsync(env, ct);
+
                     Diagnostics.TalariaDiagnostics.MessagesDeferred.Add(1, new KeyValuePair<string, object?>("saga.type", typeof(TState).Name));
                 }
                 catch (InvalidOperationException ex)
                 {
                     env.Headers.DlqException = ex.Message;
                     env.Headers.DlqReason = "max_deferrals_exceeded";
+
+                    if (idempotencyLock is not null && idempotencyStore != null)
+                    {
+                        await idempotencyStore.ReleaseLockAsync(idempotencyLock, ct);
+                    }
+
                     Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
                     Diagnostics.TalariaDiagnostics.DlqRouted.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
 
@@ -185,9 +207,21 @@ public sealed class SagaHostedService : BackgroundService
             }
             if (state != null && step.IsStarter)
             {
-                // Starter message but state already exists (Idempotent replay or bug)
+                // Starter message but state already exists — idempotent replay (e.g. redelivery after a
+                // crash between state save and offset commit). Do not re-run the starter handler:
+                // acknowledge the message and move on.
+                _logger.LogWarning(
+                    "Saga {SagaType} starter message {MessageId} on topic {Topic} received, but state for correlation {CorrelationId} already exists. Skipping as an idempotent replay.",
+                    typeof(TState).Name, msgId, step.TopicName, correlationId);
+
+                if (idempotencyLock is not null && idempotencyStore != null)
+                {
+                    await idempotencyStore.MarkCompleteAsync(idempotencyLock, ct);
+                }
+                await consumer.CommitAsync(env, ct);
+                continue;
             }
-            
+
             var runState = state ?? new TState();
             
             // 4. Run pure function
@@ -203,9 +237,9 @@ public sealed class SagaHostedService : BackgroundService
                 env.Headers.DlqException = ex.Message;
                 activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, ex.Message);
                 
-                if (hasLock && idempotencyStore != null)
+                if (idempotencyLock is not null && idempotencyStore != null)
                 {
-                    await idempotencyStore.ReleaseLockAsync(msgId!, _options.ApplicationName, ct);
+                    await idempotencyStore.ReleaseLockAsync(idempotencyLock, ct);
                 }
 
                 Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
@@ -224,12 +258,27 @@ public sealed class SagaHostedService : BackgroundService
                 {
                     activity?.SetTag("saga.status", "deferred");
                     await HandleDeferralAsync(env, transport, ct);
+
+                    // The deferred copy is published — safe to commit the original and release the
+                    // idempotency lock so the deferred copy (new MessageId) is not skipped as a duplicate.
+                    if (idempotencyLock is not null && idempotencyStore != null)
+                    {
+                        await idempotencyStore.ReleaseLockAsync(idempotencyLock, ct);
+                    }
+                    await consumer.CommitAsync(env, ct);
+
                     Diagnostics.TalariaDiagnostics.MessagesDeferred.Add(1, new KeyValuePair<string, object?>("saga.type", typeof(TState).Name));
                 }
                 catch (InvalidOperationException ex)
                 {
                     env.Headers.DlqException = ex.Message;
                     env.Headers.DlqReason = "max_deferrals_exceeded";
+
+                    if (idempotencyLock is not null && idempotencyStore != null)
+                    {
+                        await idempotencyStore.ReleaseLockAsync(idempotencyLock, ct);
+                    }
+
                     Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
                     Diagnostics.TalariaDiagnostics.DlqRouted.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
 
@@ -288,9 +337,9 @@ public sealed class SagaHostedService : BackgroundService
                 await tx.CommitAsync(ct);
                 await consumer.CommitAsync(env, ct);
                 
-                if (hasLock && idempotencyStore != null)
+                if (idempotencyLock is not null && idempotencyStore != null)
                 {
-                    await idempotencyStore.MarkCompleteAsync(msgId!, _options.ApplicationName, ct);
+                    await idempotencyStore.MarkCompleteAsync(idempotencyLock, ct);
                 }
 
                 Diagnostics.TalariaDiagnostics.MessagesConsumed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
@@ -299,9 +348,9 @@ public sealed class SagaHostedService : BackgroundService
             {
                 _logger.LogError(ex, "Failed to commit saga transition");
                 
-                if (hasLock && idempotencyStore != null)
+                if (idempotencyLock is not null && idempotencyStore != null)
                 {
-                    await idempotencyStore.ReleaseLockAsync(msgId!, _options.ApplicationName, ct);
+                    await idempotencyStore.ReleaseLockAsync(idempotencyLock, ct);
                 }
 
                 activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, ex.Message);
@@ -320,8 +369,13 @@ public sealed class SagaHostedService : BackgroundService
 
     private async Task HandleDeferralAsync<TMessage>(MessageEnvelope<TMessage> env, ITransport transport, CancellationToken ct) where TMessage : class
     {
+        if (string.IsNullOrEmpty(env.SourceTopic))
+        {
+            throw new InvalidOperationException($"Cannot defer saga message of type {typeof(TMessage).Name}: the envelope has no source topic.");
+        }
+
         int attempt = 1;
-        if (env.Headers.TryGetValue("x-deferral-attempt", out var strVal) && int.TryParse(strVal, out var parsed))
+        if (env.Headers.TryGetValue(MessageHeaders.DeferralAttemptKey, out var strVal) && int.TryParse(strVal, out var parsed))
         {
             attempt = parsed + 1;
         }
@@ -332,7 +386,20 @@ public sealed class SagaHostedService : BackgroundService
             throw new InvalidOperationException($"Max deferral attempts ({_options.MaxDeferralAttempts}) exceeded for Saga message of type {typeof(TMessage).Name}");
         }
 
-        env.Headers["x-deferral-attempt"] = attempt.ToString();
+        env.Headers[MessageHeaders.DeferralAttemptKey] = attempt.ToString();
+
+        // Mint a new MessageId per deferral attempt. The original delivery's idempotency lock is
+        // released on commit; reusing the original MessageId would let a still-active lock (or a
+        // COMPLETED marker) suppress the deferred copy as a false duplicate.
+        var originalMessageId = env.Headers.MessageId;
+        if (!string.IsNullOrEmpty(originalMessageId))
+        {
+            env.Headers.MessageId = $"{originalMessageId}:defer:{attempt}";
+        }
+
+        // Engine-owned hop counter so cyclic deferrals/forwards trip the max-hop guard.
+        env.Headers.HopCount = env.Headers.HopCount + 1;
+
         var delay = TimeSpan.FromMilliseconds(_options.DeferralBackoff.TotalMilliseconds * attempt);
 
         // Run background task to delay and reproduce
@@ -346,7 +413,7 @@ public sealed class SagaHostedService : BackgroundService
                     .GetMethod(nameof(ITransport.CreateProducerAsync))!
                     .MakeGenericMethod(typeof(TMessage));
                 
-                var prodTask = (Task)producerMethod.Invoke(transport, new object?[] { env.SourceTopic ?? string.Empty, new ProducerOptions(), ct })!;
+                var prodTask = (Task)producerMethod.Invoke(transport, new object?[] { env.SourceTopic, new ProducerOptions(), ct })!;
                 await prodTask.ConfigureAwait(false);
                 var dynProducer = prodTask.GetType().GetProperty("Result")!.GetValue(prodTask)!;
                 
@@ -359,6 +426,10 @@ public sealed class SagaHostedService : BackgroundService
                 var produceMethod = dynProducer.GetType().GetMethod(nameof(IProducer<object>.ProduceAsync))!;
                 var produceTask = (Task)produceMethod.Invoke(dynProducer, new object?[] { env.Payload, env.Headers, null, ct })!;
                 await produceTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Host shutting down mid-deferral — expected, not an error.
             }
             catch (Exception ex)
             {

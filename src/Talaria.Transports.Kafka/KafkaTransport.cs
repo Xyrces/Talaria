@@ -19,18 +19,26 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
     public KafkaTransport(KafkaTransportOptions kafkaOptions)
     {
         _kafkaOptions = kafkaOptions ?? throw new ArgumentNullException(nameof(kafkaOptions));
+
+        if (string.IsNullOrWhiteSpace(_kafkaOptions.BootstrapServers))
+        {
+            throw new ArgumentException(
+                $"{nameof(KafkaTransportOptions.BootstrapServers)} is required (e.g. \"localhost:9092\").",
+                nameof(kafkaOptions));
+        }
     }
 
     public string Name => "Kafka";
 
-    private IProducer<string, byte[]> GetOrCreateRawProducer(string topic)
+    private IProducer<string, byte[]> GetOrCreateRawProducer(string topic, bool enableIdempotence = true)
     {
-        return _producers.GetOrAdd(topic, t =>
+        return _producers.GetOrAdd($"{topic}|idempotent:{enableIdempotence}", _ =>
         {
             var producerConfig = new ProducerConfig(_kafkaOptions.BaseProducerConfig)
             {
                 BootstrapServers = _kafkaOptions.BootstrapServers,
-                Acks = Acks.All
+                Acks = Acks.All,
+                EnableIdempotence = enableIdempotence
             };
             return new ProducerBuilder<string, byte[]>(producerConfig).Build();
         });
@@ -53,9 +61,11 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
         };
 
         var confluentConsumer = new ConsumerBuilder<string, byte[]>(config).Build();
-        var confluentDlqProducer = GetOrCreateRawProducer(topic + ".dlq");
+        var confluentDlqProducer = GetOrCreateRawProducer(topic + _kafkaOptions.DlqSuffix);
 
-        IConsumer<T> wrapper = new KafkaConsumer<T>(confluentConsumer, confluentDlqProducer, topic, _kafkaOptions, ".dlq");
+        IConsumer<T> wrapper = new KafkaConsumer<T>(
+            confluentConsumer, confluentDlqProducer, topic, _kafkaOptions, _kafkaOptions.DlqSuffix,
+            bufferCapacity: options.BufferCapacity > 0 ? options.BufferCapacity : 100);
         return Task.FromResult(wrapper);
     }
 
@@ -67,7 +77,7 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
         ProducerOptions options,
         CancellationToken ct = default)
     {
-        var rawProducer = GetOrCreateRawProducer(topic);
+        var rawProducer = GetOrCreateRawProducer(topic, options.EnableIdempotence);
         IProducer<T> wrapper = new KafkaProducer<T>(rawProducer, topic);
         return Task.FromResult(wrapper);
     }
@@ -89,7 +99,7 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
         {
             try
             {
-                producer.Flush(TimeSpan.FromSeconds(5));
+                producer.Flush(_kafkaOptions.FlushTimeout);
                 producer.Dispose();
             }
             catch

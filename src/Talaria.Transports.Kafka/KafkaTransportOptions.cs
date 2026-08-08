@@ -8,7 +8,8 @@ namespace Talaria.Transports.Kafka;
 public sealed class KafkaTransportOptions
 {
     /// <summary>
-    /// Broker connection string (e.g., "localhost:9092").
+    /// Broker connection string (e.g., "localhost:9092"). Required —
+    /// the transport throws at construction time when it is null or empty.
     /// </summary>
     public string BootstrapServers { get; set; } = string.Empty;
 
@@ -23,6 +24,11 @@ public sealed class KafkaTransportOptions
     /// Use this to configure SASL, security protocols, etc.
     /// </summary>
     public ProducerConfig BaseProducerConfig { get; set; } = new();
+
+    /// <summary>
+    /// Suffix appended to a topic name to form its dead-letter queue topic.
+    /// </summary>
+    public string DlqSuffix { get; set; } = ".dlq";
 
     /// <summary>
     /// Time to wait for producer flush on shutdown.

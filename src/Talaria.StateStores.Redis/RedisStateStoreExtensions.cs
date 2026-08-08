@@ -19,6 +19,7 @@ public static class RedisStateStoreExtensions
     {
         var options = new TalariaRedisOptions();
         configure?.Invoke(options);
+        ValidateConfiguration(options);
 
         // Register the options
         builder.Services.AddSingleton(options);
@@ -42,6 +43,7 @@ public static class RedisStateStoreExtensions
     {
         var options = new TalariaRedisOptions();
         configure?.Invoke(options);
+        ValidateConfiguration(options);
 
         // If not already registered via UseRedisStateStore
         if (!builder.Services.Any(d => d.ServiceType == typeof(TalariaRedisOptions)))
@@ -58,5 +60,15 @@ public static class RedisStateStoreExtensions
         builder.UseIdempotencyStore<RedisIdempotencyStore>();
 
         return builder;
+    }
+
+    private static void ValidateConfiguration(TalariaRedisOptions options)
+    {
+        if (string.IsNullOrWhiteSpace(options.Configuration))
+        {
+            throw new ArgumentException(
+                $"{nameof(TalariaRedisOptions.Configuration)} is required (e.g. \"localhost:6379\"). " +
+                "Set it via the configure callback.");
+        }
     }
 }

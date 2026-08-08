@@ -30,6 +30,28 @@ public static class TalariaEndpointExtensions
     }
 
     /// <summary>
+    /// Maps a handler delegate to a message topic with an explicit consumer group,
+    /// similar to app.MapGet() in Minimal APIs.
+    /// The handler receives the deserialized message payload.
+    /// </summary>
+    public static IServiceProvider MapTopic<T>(
+        this IServiceProvider services,
+        string topic,
+        string consumerGroup,
+        Func<T, CancellationToken, Task> handler)
+    {
+        var registry = services.GetRequiredService<TopicRegistry>();
+        registry.Add(new TopicRegistration
+        {
+            TopicName = topic,
+            MessageType = typeof(T),
+            ConsumerGroup = consumerGroup,
+            Handler = async (payload, _, ct) => await handler((T)payload, ct),
+        });
+        return services;
+    }
+
+    /// <summary>
     /// Maps an envelope-aware handler to a message topic.
     /// The handler receives the full envelope with headers, trace context, etc.
     /// </summary>
@@ -82,6 +104,7 @@ public static class TalariaEndpointExtensions
         var registry = services.GetRequiredService<SagaRegistry>();
         var configurator = new SagaConfigurator<TState>(registry);
         configure(configurator);
+        configurator.Complete();
         
         return services;
     }

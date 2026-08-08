@@ -101,7 +101,8 @@ public class InMemoryTransportTests
         await foreach (var envelope in consumer.ConsumeAsync(cts.Token))
         {
             Assert.Equal("00-abc123-def456-01", envelope.Headers.TraceParent);
-            Assert.Equal(5, envelope.Headers.HopCount);
+            // HopCount is engine-owned: producing with an existing count means "forward", so it increments.
+            Assert.Equal(6, envelope.Headers.HopCount);
             break;
         }
     }

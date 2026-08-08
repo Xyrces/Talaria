@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using Confluent.Kafka;
+using Microsoft.Extensions.Logging;
 using Talaria.Core.Abstractions;
 
 namespace Talaria.Transports.Kafka;
@@ -16,24 +17,30 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
     private readonly string _topic;
     private readonly KafkaTransportOptions _options;
     private readonly string _dlqTopic;
+    private readonly int _bufferCapacity;
+    private readonly ILogger<KafkaConsumer<T>>? _logger;
 
     public KafkaConsumer(
         IConsumer<string, byte[]> consumer,
         IProducer<string, byte[]> producer,
         string topic,
         KafkaTransportOptions options,
-        string dlqSuffix)
+        string dlqSuffix,
+        ILogger<KafkaConsumer<T>>? logger = null,
+        int bufferCapacity = 100)
     {
         _consumer = consumer;
         _producer = producer;
         _topic = topic;
         _options = options;
         _dlqTopic = _topic + dlqSuffix;
+        _logger = logger;
+        _bufferCapacity = bufferCapacity > 0 ? bufferCapacity : 100;
     }
 
     public async IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsync([EnumeratorCancellation] CancellationToken ct = default)
     {
-        var channel = System.Threading.Channels.Channel.CreateBounded<MessageEnvelope<T>>(new System.Threading.Channels.BoundedChannelOptions(100)
+        var channel = System.Threading.Channels.Channel.CreateBounded<MessageEnvelope<T>>(new System.Threading.Channels.BoundedChannelOptions(_bufferCapacity)
         {
             SingleWriter = true,
             SingleReader = true,
@@ -90,6 +97,8 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
 
                     if (payload == null)
                     {
+                        talariaHeaders.DlqReason = "null_payload";
+                        await RouteToDlqAsync(consumeResult, talariaHeaders, ct).ConfigureAwait(false);
                         _consumer.Commit(consumeResult);
                         continue;
                     }
@@ -100,10 +109,12 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
                         Headers = talariaHeaders,
                         SourceTopic = _topic,
                         PartitionKey = consumeResult.Message.Key,
+                        Partition = consumeResult.Partition.Value,
+                        CorrelationId = talariaHeaders.TryGetValue(MessageHeaders.CorrelationIdKey, out var cid) ? cid : null,
                         Timestamp = consumeResult.Message.Timestamp.UtcDateTime,
                         Offset = consumeResult.Offset.Value
                     };
-                    env.Headers["x-kafka-partition"] = consumeResult.Partition.Value.ToString();
+                    env.Headers[MessageHeaders.KafkaPartitionKey] = consumeResult.Partition.Value.ToString();
 
                     await channel.Writer.WriteAsync(env, ct).ConfigureAwait(false);
                 }
@@ -130,15 +141,20 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
     public Task CommitAsync(MessageEnvelope<T> message, CancellationToken ct = default)
     {
         if (!string.IsNullOrEmpty(message.SourceTopic) &&
-            message.Headers.TryGetValue("x-kafka-partition", out var pStr) &&
+            message.Headers.TryGetValue(MessageHeaders.KafkaPartitionKey, out var pStr) &&
             int.TryParse(pStr, out var partitionVal))
         {
-            var tpo = new TopicPartitionOffset(message.SourceTopic, new Partition(partitionVal), new Offset(message.Offset));
+            // Kafka committed offsets mean "the next offset to fetch", hence + 1.
+            var tpo = new TopicPartitionOffset(message.SourceTopic, new Partition(partitionVal), new Offset(message.Offset + 1));
             _consumer.Commit(new[] { tpo });
         }
         else
         {
-            _consumer.Commit();
+            // Never fall back to Commit() with no arguments — that commits the current position on
+            // ALL assigned partitions and can skip unprocessed messages. Leave uncommitted for redelivery.
+            _logger?.LogError(
+                "Cannot commit offset for message on topic {Topic}: missing partition metadata. Leaving the message uncommitted for redelivery.",
+                message.SourceTopic);
         }
         return Task.CompletedTask;
     }
@@ -163,15 +179,18 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
         await _producer.ProduceAsync(_dlqTopic, dlqMsg, ct);
 
         if (!string.IsNullOrEmpty(message.SourceTopic) &&
-            message.Headers.TryGetValue("x-kafka-partition", out var pStr) &&
+            message.Headers.TryGetValue(MessageHeaders.KafkaPartitionKey, out var pStr) &&
             int.TryParse(pStr, out var partitionVal))
         {
-            var tpo = new TopicPartitionOffset(message.SourceTopic, new Partition(partitionVal), new Offset(message.Offset));
+            // Kafka committed offsets mean "the next offset to fetch", hence + 1.
+            var tpo = new TopicPartitionOffset(message.SourceTopic, new Partition(partitionVal), new Offset(message.Offset + 1));
             _consumer.Commit(new[] { tpo });
         }
         else
         {
-            _consumer.Commit();
+            _logger?.LogError(
+                "Cannot commit offset for nacked message on topic {Topic}: missing partition metadata. Leaving the message uncommitted for redelivery.",
+                message.SourceTopic);
         }
     }
 
@@ -193,89 +212,6 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
         };
 
         await _producer.ProduceAsync(_dlqTopic, dlqMsg, ct);
-    }
-
-    public async IAsyncEnumerable<MessageEnvelope<T>> ConsumeDlqAsync([EnumeratorCancellation] CancellationToken ct = default)
-    {
-        var channel = System.Threading.Channels.Channel.CreateBounded<MessageEnvelope<T>>(new System.Threading.Channels.BoundedChannelOptions(100)
-        {
-            SingleWriter = true,
-            SingleReader = true,
-            FullMode = System.Threading.Channels.BoundedChannelFullMode.Wait
-        });
-
-        _ = Task.Factory.StartNew(async () =>
-        {
-            try
-            {
-                _consumer.Subscribe(_dlqTopic);
-
-                while (!ct.IsCancellationRequested)
-                {
-                    ConsumeResult<string, byte[]>? consumeResult = null;
-                    try
-                    {
-                        consumeResult = _consumer.Consume(TimeSpan.FromMilliseconds(100));
-                    }
-                    catch (ConsumeException)
-                    {
-                        try { await Task.Delay(100, ct).ConfigureAwait(false); } catch (OperationCanceledException) { break; }
-                        continue;
-                    }
-
-                    if (consumeResult == null || consumeResult.IsPartitionEOF)
-                    {
-                        continue;
-                    }
-
-                    var talariaHeaders = new MessageHeaders();
-                    if (consumeResult.Message.Headers != null)
-                    {
-                        foreach (var header in consumeResult.Message.Headers)
-                        {
-                            talariaHeaders[header.Key] = Encoding.UTF8.GetString(header.GetValueBytes());
-                        }
-                    }
-
-                    T? payload = JsonSerializer.Deserialize<T>(consumeResult.Message.Value);
-                    
-                    if (payload == null)
-                    {
-                        _consumer.Commit(consumeResult);
-                        continue;
-                    }
-
-                    var env = new MessageEnvelope<T>
-                    {
-                        Payload = payload,
-                        Headers = talariaHeaders,
-                        SourceTopic = _dlqTopic,
-                        PartitionKey = consumeResult.Message.Key,
-                        Timestamp = consumeResult.Message.Timestamp.UtcDateTime,
-                        Offset = consumeResult.Offset.Value
-                    };
-                    env.Headers["x-kafka-partition"] = consumeResult.Partition.Value.ToString();
-
-                    await channel.Writer.WriteAsync(env, ct).ConfigureAwait(false);
-                }
-            }
-            catch (OperationCanceledException) { }
-            catch (Exception ex)
-            {
-                channel.Writer.TryComplete(ex);
-                return;
-            }
-            finally
-            {
-                try { _consumer.Unsubscribe(); } catch { }
-                channel.Writer.TryComplete();
-            }
-        }, ct, TaskCreationOptions.LongRunning, TaskScheduler.Default);
-
-        await foreach (var env in channel.Reader.ReadAllAsync(ct))
-        {
-            yield return env;
-        }
     }
 
     public ValueTask DisposeAsync()

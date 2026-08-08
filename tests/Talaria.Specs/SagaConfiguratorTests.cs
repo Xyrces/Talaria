@@ -18,6 +18,11 @@ public class SagaConfiguratorTests
         
         config.On<TestMessage>("topic1", handler: (state, msg, ctx) => Task.FromResult(ctx.Transition(state)));
 
+        // Two-phase registration: nothing is published until Complete() runs.
+        Assert.Empty(reg.Registrations);
+
+        config.Complete();
+
         Assert.Single(reg.Registrations);
         Assert.Single(reg.Registrations[0].Steps);
         
@@ -31,6 +36,7 @@ public class SagaConfiguratorTests
         var reg = new SagaRegistry();
         var config = new SagaConfigurator<TestState>(reg);
         config.On<TestMessage>("test", (s, m, c) => Task.FromResult(c.Transition(s)));
+        config.Complete();
 
         var handler = reg.Registrations[0].Steps[0].Handler;
         await Assert.ThrowsAsync<InvalidOperationException>(() => handler(null!, new TestMessage(), new SagaContext<object>()));

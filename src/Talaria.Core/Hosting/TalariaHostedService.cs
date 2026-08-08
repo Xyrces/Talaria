@@ -111,16 +111,16 @@ public sealed class TalariaHostedService : BackgroundService
 
                 var idempotencyStore = (IIdempotencyStore?)_services.GetService(typeof(IIdempotencyStore));
                 var msgId = envelope.Headers.MessageId;
-                var hasLock = false;
+                IdempotencyLock? idempotencyLock = null;
 
                 try
                 {
                     if (idempotencyStore != null && !string.IsNullOrEmpty(msgId))
                     {
                         // Expiration is configurable via options to allow for slow processing without immediate concurrent retry overlaps
-                        hasLock = await idempotencyStore.TryAcquireLockAsync(msgId, consumerGroup, _options.IdempotencyLockTtl, ct);
-                        
-                        if (!hasLock)
+                        idempotencyLock = await idempotencyStore.TryAcquireLockAsync(msgId, consumerGroup, _options.IdempotencyLockTtl, ct);
+
+                        if (idempotencyLock is null)
                         {
                             _logger.LogDebug("Message {MessageId} skipped. Idempotency lock claimed by another worker or already completed.", msgId);
                             // We immediately commit the message to suppress further polling!
@@ -130,10 +130,10 @@ public sealed class TalariaHostedService : BackgroundService
                     }
 
                     await registration.Handler(envelope.Payload!, envelope.Headers, ct);
-                    
-                    if (hasLock && idempotencyStore != null)
+
+                    if (idempotencyLock is not null && idempotencyStore != null)
                     {
-                        await idempotencyStore.MarkCompleteAsync(msgId!, consumerGroup, ct);
+                        await idempotencyStore.MarkCompleteAsync(idempotencyLock, ct);
                     }
 
                     await consumer.CommitAsync(envelope, ct);
@@ -147,9 +147,9 @@ public sealed class TalariaHostedService : BackgroundService
                         "Handler for topic '{Topic}' failed. Routing to DLQ.",
                         registration.TopicName);
                         
-                    if (hasLock && idempotencyStore != null)
+                    if (idempotencyLock is not null && idempotencyStore != null)
                     {
-                        await idempotencyStore.ReleaseLockAsync(msgId!, consumerGroup, ct);
+                        await idempotencyStore.ReleaseLockAsync(idempotencyLock, ct);
                     }
                     
                     envelope.Headers.DlqException = ex.Message;

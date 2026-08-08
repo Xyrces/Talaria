@@ -21,6 +21,20 @@ public sealed class InMemoryTransport : ITransport
 
     public InMemoryTransport(InMemoryTransportOptions options)
     {
+        ArgumentNullException.ThrowIfNull(options);
+
+        if (options.ChannelCapacity <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options), $"{nameof(InMemoryTransportOptions.ChannelCapacity)} must be greater than zero.");
+        }
+
+        if (options.SimulatedLatency < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options), $"{nameof(InMemoryTransportOptions.SimulatedLatency)} must not be negative.");
+        }
+
         _options = options;
     }
 
@@ -45,7 +59,7 @@ public sealed class InMemoryTransport : ITransport
         CancellationToken ct = default)
     {
         var channel = GetOrCreateChannel(topic);
-        var dlqChannel = GetOrCreateChannel(topic + ".dlq");
+        var dlqChannel = GetOrCreateChannel(topic + _options.DlqSuffix);
         var appDlqChannel = GetOrCreateChannel("__app.dlq");
         IConsumer<T> consumer = new InMemoryConsumer<T>(topic, channel, dlqChannel, appDlqChannel, _options);
         return Task.FromResult(consumer);
