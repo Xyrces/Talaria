@@ -7,6 +7,8 @@ namespace Talaria.Core.Sagas;
 /// The registration is only added to the registry once configuration completes
 /// successfully (see <see cref="Registration.TalariaEndpointExtensions.MapSaga{TState}"/>).
 /// </summary>
+/// <typeparam name="TState">The CLR saga state type.</typeparam>
+/// <since>1.0.0</since>
 public class SagaConfigurator<TState> where TState : class, new()
 {
     private readonly SagaRegistry _registry;
@@ -32,6 +34,18 @@ public class SagaConfigurator<TState> where TState : class, new()
     /// <summary>
     /// Configures a message that starts a new saga instance.
     /// </summary>
+    /// <typeparam name="TMessage">The CLR message type that triggers this step.</typeparam>
+    /// <param name="topic">The topic the step listens on.</param>
+    /// <param name="handler">Async handler that returns the new saga state.</param>
+    /// <param name="correlateBy">Optional explicit correlation resolver. Defaults to <see cref="CorrelationResolver.Resolve{TMessage}(TMessage, MessageHeaders)"/>.</param>
+    /// <returns>The same configurator, for chaining.</returns>
+    /// <example>
+    /// <code>
+    /// services.MapSaga&lt;OrderState&gt;(s =&gt; s
+    ///     .StartedBy&lt;OrderPlaced&gt;("orders.placed",
+    ///         (msg, ctx) =&gt; ctx.Transition(new OrderState(msg.OrderId))));
+    /// </code>
+    /// </example>
     public SagaConfigurator<TState> StartedBy<TMessage>(
         string topic,
         Func<TMessage, ISagaContext<TState>, Task<SagaResult<TState>>> handler,
@@ -63,6 +77,9 @@ public class SagaConfigurator<TState> where TState : class, new()
     /// at dispatch time when a dispatched type has no mapping (instead of silently deriving
     /// a topic from the CLR type name).
     /// </summary>
+    /// <typeparam name="TMessage">The CLR message type.</typeparam>
+    /// <param name="topic">The topic dispatched messages of <typeparamref name="TMessage"/> are routed to.</param>
+    /// <returns>The same configurator, for chaining.</returns>
     public SagaConfigurator<TState> DispatchTo<TMessage>(string topic) where TMessage : class
     {
         _registration.DispatchTopics[typeof(TMessage)] = topic;
@@ -72,6 +89,15 @@ public class SagaConfigurator<TState> where TState : class, new()
     /// <summary>
     /// Configures an existing saga transition via a message.
     /// </summary>
+    /// <typeparam name="TMessage">The CLR message type that triggers this step.</typeparam>
+    /// <param name="topic">The topic the step listens on.</param>
+    /// <param name="handler">Async handler that receives the current state and returns the next state.</param>
+    /// <param name="correlateBy">Optional explicit correlation resolver.</param>
+    /// <returns>The same configurator, for chaining.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// Thrown by the engine at runtime when the state for the resolved correlation ID
+    /// is missing (no prior starter was processed).
+    /// </exception>
     public SagaConfigurator<TState> On<TMessage>(
         string topic,
         Func<TState, TMessage, ISagaContext<TState>, Task<SagaResult<TState>>> handler,

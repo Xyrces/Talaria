@@ -3,22 +3,54 @@ namespace Talaria.Core.Abstractions;
 /// <summary>
 /// Consumes messages of type <typeparamref name="T"/> from a topic.
 /// </summary>
+/// <typeparam name="T">The CLR message type the consumer deserializes each envelope into.</typeparam>
+/// <remarks>
+/// Created by <see cref="ITransport.CreateConsumerAsync{T}"/>. Each consumer belongs to a single
+/// topic + consumer-group pair; sharing consumers across groups is not supported. Consumers are
+/// <see cref="IAsyncDisposable"/> — disposing them stops iteration and releases the underlying
+/// transport resources.
+/// </remarks>
+/// <since>1.0.0</since>
 public interface IConsumer<T> : IAsyncDisposable
 {
     /// <summary>
     /// Yields messages as they become available. Respects cancellation.
     /// </summary>
+    /// <param name="ct">Cancellation token; stops iteration on cancel.</param>
+    /// <returns>
+    /// An async sequence of <see cref="MessageEnvelope{T}"/>. Offsets are NOT committed by
+    /// iteration alone — the caller must invoke <see cref="CommitAsync"/> after successful
+    /// handling or <see cref="NackAsync"/> to route to the DLQ.
+    /// </returns>
+    /// <remarks>
+    /// The returned sequence is single-consumer; concurrent iteration is not supported.
+    /// Transports may buffer ahead per <see cref="ConsumerOptions.BufferCapacity"/>.
+    /// </remarks>
     IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsync(CancellationToken ct = default);
 
     /// <summary>
     /// Commits the offset/acknowledgement for the given message.
     /// Called after successful handler execution.
     /// </summary>
+    /// <param name="message">The envelope whose offset should be marked processed.</param>
+    /// <param name="ct">Cancellation token; cancels the commit.</param>
+    /// <remarks>
+    /// On Kafka this advances the committed offset of the consumer group; on InMemory it
+    /// drops the message from the uncommitted-redelivery set. A commit failure leaves the
+    /// message eligible for redelivery on the next consumer session.
+    /// </remarks>
     Task CommitAsync(MessageEnvelope<T> message, CancellationToken ct = default);
 
     /// <summary>
     /// Negatively acknowledges a message, making it available for redelivery
     /// or routing it to the dead-letter queue based on transport policy.
     /// </summary>
+    /// <param name="message">The envelope to negatively acknowledge.</param>
+    /// <param name="ct">Cancellation token; cancels the nack.</param>
+    /// <remarks>
+    /// Talaria's hosted services use NackAsync to route handler exceptions, missing
+    /// correlation IDs, and deserialization failures to the configured DLQ topic
+    /// (<see cref="TalariaOptions.ApplicationName"/> suffixed with <c>DlqSuffix</c>).
+    /// </remarks>
     Task NackAsync(MessageEnvelope<T> message, CancellationToken ct = default);
 }

@@ -6,6 +6,7 @@ namespace Talaria.Core.Sagas;
 /// <summary>
 /// Resolves the correlation identity from an incoming message to look up a saga state.
 /// </summary>
+/// <since>1.0.0</since>
 public static class CorrelationResolver
 {
     /// <summary>
@@ -18,6 +19,10 @@ public static class CorrelationResolver
     ///    Beware: this broad fallback can bind an unintended property — prefer
     ///    [SagaCorrelation] or an explicit correlateBy when in doubt.
     /// </summary>
+    /// <typeparam name="TMessage">The CLR message type.</typeparam>
+    /// <param name="message">The message payload.</param>
+    /// <param name="headers">The message headers (used to read the correlation header).</param>
+    /// <returns>The resolved correlation ID, or null when no candidate was found.</returns>
     public static string? Resolve<TMessage>(TMessage message, MessageHeaders headers) where TMessage : class
     {
         // 1. Check Headers
