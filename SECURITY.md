@@ -1,0 +1,163 @@
+# Security Policy
+
+Talaria is a distributed messaging and saga orchestration library. Like any
+piece of infrastructure software that touches message brokers, state stores,
+and network services, it deserves a deliberate security disclosure process.
+
+This document explains:
+
+1. [Which versions of Talaria are supported](#supported-versions)
+2. [How to report a vulnerability](#reporting-a-vulnerability)
+3. [What to expect after you report](#what-to-expect)
+4. [Security-relevant project policies](#security-relevant-policies)
+5. [Commercial-license / security-fix channels](#commercial-channels)
+
+---
+
+## Supported versions
+
+Talaria is currently in pre-1.0 development. Until the first stable release,
+**only the latest commit on the `main` branch receives security fixes**.
+
+| Branch  | Supported                        |
+| ------- | -------------------------------- |
+| `main`  | ✅ — backported security fixes   |
+| `<other>` | ❌ — no backports; please upgrade |
+
+Once a stable `1.0` is released, this table will expand to cover the current
+major release and the previous major release for a minimum of 12 months.
+
+---
+
+## Reporting a vulnerability
+
+**Please do not file public GitHub issues for suspected vulnerabilities.**
+
+Use one of the following private channels instead:
+
+1. **GitHub Security Advisories (preferred)** — open a private advisory at
+   <https://github.com/Xyrces/Talaria/security/advisories/new>. This routes
+   directly to the maintainer team and keeps the report out of the public
+   issue tracker.
+2. **Direct email** — `security@xyrces.io`. Encrypt sensitive details with
+   the maintainer's PGP key (published on request); otherwise plain text is
+   acceptable for non-sensitive reports.
+
+A good report includes:
+
+- A clear description of the issue and its impact (confidentiality,
+  integrity, availability).
+- A reproducer — minimal code, config, or sequence of operations.
+- The version(s) affected (`git rev-parse HEAD` of your checkout, or the
+  NuGet package version if applicable).
+- Whether the issue is currently being exploited.
+
+We will acknowledge receipt within **2 business days** and aim to provide
+an initial triage within **5 business days**.
+
+---
+
+## What to expect
+
+1. **Acknowledgement.** We confirm receipt and assign a tracking ID.
+2. **Triage.** A maintainer investigates, confirms the report, and assigns
+   a severity (CVSS-style impact + exploitability).
+3. **Patch development.** We develop a fix privately. You will receive
+   draft notes and an opportunity to review the advisory text.
+4. **Coordinated disclosure.** We agree on a public disclosure date with
+   you. The default is **90 days** from acknowledgement, with a grace
+   period if a release train is imminent.
+5. **Public advisory.** At disclosure time we publish:
+   - A GitHub Security Advisory with full technical detail.
+   - A note in the release that contains the fix.
+   - A CVE request via GitHub (where applicable).
+
+We will credit reporters in the advisory unless you prefer to remain
+anonymous.
+
+---
+
+## Security-relevant policies
+
+These are the policies that shape how Talaria handles security-sensitive
+code paths. They are not exhaustive — they document the assumptions that
+security-sensitive changes should preserve.
+
+### Transport
+
+- Kafka connections default to **PLAINTEXT**. The transport logs a startup
+  warning when connecting to non-localhost brokers without TLS. Production
+  deployments must configure `BaseProducerConfig` / `BaseConsumerConfig`
+  with `SecurityProtocol=SaslSsl` and credentials; see `KafkaTransportOptions`.
+- The in-memory transport is **single-process only**; it does not provide
+  any authentication or authorization. It is intended for tests and
+  prototypes, not production multi-tenant deployments.
+
+### State stores
+
+- Redis connections default to **PLAINTEXT**. Production deployments must
+  configure TLS via `TalariaRedisOptions.Configuration`
+  (`ssl=true,password=...`).
+- The in-memory state store uses a `ConcurrentDictionary` keyed by saga id;
+  it does not encrypt at rest and does not isolate tenants. Treat it as
+  untrusted multi-tenant boundary code.
+
+### Outbox and deferral leases
+
+- The outbox relay and deferral sweeper use **lease + fencing-token**
+  semantics. A worker that holds a lease must re-present its fencing token
+  on commit; the store rejects commits from a stale lease holder. This is
+  the only correctness guarantee against double-publish on relay crash.
+- `TalariaOptions.IncludeExceptionDetailsInDlq` defaults to `false`.
+  Exception detail in DLQ headers can leak payload internals — leave it
+  off unless you control the consumer.
+
+### Idempotency
+
+- `IIdempotencyStore` deduplicates by `MessageId` using fencing-token
+  locks. A lock acquired by worker A cannot be released by worker B even
+  if B's `MessageId` matches; the fencing token prevents the classic
+  "stale lock holder releases the new owner's lock" mistake.
+- `MessageId` is generated by Talaria when staging outbox messages; do
+  not reuse one across messages. If you supply your own, ensure
+  uniqueness across the cluster.
+
+### Telemetry
+
+- OpenTelemetry traces and metrics propagate via W3C trace context. Trace
+  ids are sensitive in some environments (they can correlate requests
+  across services); consider sampling policies for production.
+
+### Licensing
+
+- Talaria is **AGPL-3.0-or-later**. The AGPL's network-source clause is a
+  *license* concern, not a *security* one, but it does mean any service
+  that exposes a modified Talaria to third parties over a network must
+  publish its source. Organizations that need proprietary relicensing
+  without that obligation should contact us (see below).
+
+---
+
+## Commercial channels
+
+A separate commercial offering is available for organizations that need:
+
+- **Commercial support** with SLAs, including security-fix backports to
+  older supported versions.
+- **Hosted or managed Talaria** deployments with hardening, monitoring,
+  and incident response.
+- **Proprietary relicensing** that removes the AGPL network-source
+  obligation, allowing modified Talaria to be embedded in closed-source
+  network services.
+
+The commercial offering is delivered under its own repository and license
+terms and is intentionally **out of scope for this repo**. Contact the
+maintainers at `security@xyrces.io` for details.
+
+---
+
+## Acknowledgements
+
+We are grateful to the security researchers and contributors who report
+issues responsibly. Reporters are credited in the corresponding advisory
+unless they prefer to remain anonymous.
