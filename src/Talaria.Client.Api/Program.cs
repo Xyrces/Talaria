@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 using Microsoft.AspNetCore.Mvc;
 using Talaria.Client.Api.Sagas;
 using Talaria.Core.Abstractions;
