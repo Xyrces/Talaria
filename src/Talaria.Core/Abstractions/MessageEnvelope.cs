@@ -6,6 +6,8 @@ namespace Talaria.Core.Abstractions;
 /// The wire-format wrapper for all messages flowing through Talaria.
 /// Carries the payload alongside headers (trace context, baggage) and routing metadata.
 /// </summary>
+/// <typeparam name="T">The deserialized message payload type.</typeparam>
+/// <since>1.0.0</since>
 public sealed record MessageEnvelope<T>
 {
     /// <summary>
@@ -16,6 +18,11 @@ public sealed record MessageEnvelope<T>
     /// <summary>
     /// Headers carrying W3C Trace Context, OTel Baggage, and Talaria metadata.
     /// </summary>
+    /// <remarks>
+    /// Headers are mutable on the envelope (they are populated by the consumer engine
+    /// with DLQ reason, hop count, etc.); producers that re-emit a message must clone
+    /// the headers to avoid sharing mutable state with the source delivery.
+    /// </remarks>
     public MessageHeaders Headers { get; init; } = new();
 
     /// <summary>
