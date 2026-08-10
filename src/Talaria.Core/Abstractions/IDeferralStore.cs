@@ -13,6 +13,7 @@ namespace Talaria.Core.Abstractions;
 /// <param name="CorrelationId">The saga correlation id, if one was resolved.</param>
 /// <param name="Attempt">The deferral attempt number (1-based).</param>
 /// <param name="DueAt">When the message becomes eligible for republishing.</param>
+/// <since>1.0.0</since>
 public sealed record DeferredMessage(
     Guid Id,
     string Topic,
@@ -30,12 +31,14 @@ public sealed record DeferredMessage(
 /// </summary>
 /// <param name="Id">Identifier of the leased <see cref="DeferredMessage"/>.</param>
 /// <param name="Token">Monotonic fencing token incremented on every acquisition.</param>
+/// <since>1.0.0</since>
 public sealed record DeferralLease(Guid Id, long Token);
 
 /// <summary>
 /// A deferred message together with the lease that grants exclusive republishing rights
 /// until the lease expires.
 /// </summary>
+/// <since>1.0.0</since>
 public sealed record LeasedDeferral(DeferredMessage Message, DeferralLease Lease);
 
 /// <summary>
@@ -54,9 +57,12 @@ public sealed record LeasedDeferral(DeferredMessage Message, DeferralLease Lease
 /// is what makes processing effectively once — the same model as Service Bus.
 /// </para>
 /// </summary>
+/// <since>1.0.0</since>
 public interface IDeferralStore
 {
     /// <summary>Schedules a message for delivery at <see cref="DeferredMessage.DueAt"/>.</summary>
+    /// <param name="message">The deferred message to schedule.</param>
+    /// <param name="ct">Cancellation token.</param>
     Task EnqueueAsync(DeferredMessage message, CancellationToken ct = default);
 
     /// <summary>
@@ -65,6 +71,11 @@ public interface IDeferralStore
     /// <paramref name="now"/> + <paramref name="leaseDuration"/>. Entries whose lease
     /// expires without completion become acquirable again.
     /// </summary>
+    /// <param name="now">The cutoff timestamp. Messages with <c>DueAt &lt;= now</c> are eligible.</param>
+    /// <param name="leaseDuration">How long the lease is granted for. Must be greater than zero.</param>
+    /// <param name="maxBatch">Upper bound on how many entries are leased in this call.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>The leased messages. Empty when nothing is due.</returns>
     Task<IReadOnlyList<LeasedDeferral>> AcquireDueAsync(
         DateTimeOffset now,
         TimeSpan leaseDuration,
@@ -75,6 +86,9 @@ public interface IDeferralStore
     /// Removes a leased message after successful republication. Only succeeds when the
     /// caller still holds the lease (fencing token match); returns false otherwise.
     /// </summary>
+    /// <param name="lease">The lease returned by <see cref="AcquireDueAsync"/>.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>True when the entry was removed; false when the lease was no longer valid.</returns>
     Task<bool> CompleteAsync(DeferralLease lease, CancellationToken ct = default);
 
     /// <summary>
@@ -82,5 +96,9 @@ public interface IDeferralStore
     /// <paramref name="visibleAt"/> (immediately when null). Only succeeds when the
     /// caller still holds the lease; returns false otherwise.
     /// </summary>
+    /// <param name="lease">The lease returned by <see cref="AcquireDueAsync"/>.</param>
+    /// <param name="visibleAt">When the entry becomes visible again. Null means immediately.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>True when the lease was released; false when the lease was no longer valid.</returns>
     Task<bool> AbandonAsync(DeferralLease lease, DateTimeOffset? visibleAt = null, CancellationToken ct = default);
 }

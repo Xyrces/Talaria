@@ -7,6 +7,7 @@ namespace Talaria.Transports.Kafka;
 /// <summary>
 /// Configuration for the Talaria Kafka transport.
 /// </summary>
+/// <since>1.0.0</since>
 public sealed class KafkaTransportOptions
 {
     /// <summary>

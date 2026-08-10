@@ -14,6 +14,7 @@ namespace Talaria.Core.Abstractions;
 /// <param name="PayloadJson">The message payload serialized as JSON.</param>
 /// <param name="Headers">Headers to publish with the message (minted message id, trace context).</param>
 /// <param name="CreatedAt">When the entry was staged.</param>
+/// <since>1.0.0</since>
 public sealed record OutboxMessage(
     Guid Id,
     string Topic,
@@ -29,12 +30,14 @@ public sealed record OutboxMessage(
 /// </summary>
 /// <param name="Id">Identifier of the leased <see cref="OutboxMessage"/>.</param>
 /// <param name="Token">Monotonic fencing token incremented on every acquisition.</param>
+/// <since>1.0.0</since>
 public sealed record OutboxLease(Guid Id, long Token);
 
 /// <summary>
 /// An outbox message together with the lease that grants exclusive publishing rights
 /// until the lease expires.
 /// </summary>
+/// <since>1.0.0</since>
 public sealed record LeasedOutboxMessage(OutboxMessage Message, OutboxLease Lease);
 
 /// <summary>
@@ -51,6 +54,7 @@ public sealed record LeasedOutboxMessage(OutboxMessage Message, OutboxLease Leas
 /// publishing, effectively-once processing.
 /// </para>
 /// </summary>
+/// <since>1.0.0</since>
 public interface IOutboxStore
 {
     /// <summary>
@@ -58,6 +62,11 @@ public interface IOutboxStore
     /// from other acquirers until <paramref name="now"/> + <paramref name="leaseDuration"/>.
     /// Entries whose lease expires without completion become acquirable again.
     /// </summary>
+    /// <param name="now">The cutoff timestamp. Entries created at or before now are eligible.</param>
+    /// <param name="leaseDuration">How long the lease is granted for. Must be greater than zero.</param>
+    /// <param name="maxBatch">Upper bound on how many entries are leased in this call.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>The leased entries. Empty when nothing is pending.</returns>
     Task<IReadOnlyList<LeasedOutboxMessage>> AcquirePendingAsync(
         DateTimeOffset now,
         TimeSpan leaseDuration,
@@ -68,6 +77,9 @@ public interface IOutboxStore
     /// Removes a leased entry after successful publication. Only succeeds when the
     /// caller still holds the lease (fencing token match); returns false otherwise.
     /// </summary>
+    /// <param name="lease">The lease returned by <see cref="AcquirePendingAsync"/>.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>True when the entry was removed; false when the lease was no longer valid.</returns>
     Task<bool> CompleteAsync(OutboxLease lease, CancellationToken ct = default);
 
     /// <summary>
@@ -75,5 +87,9 @@ public interface IOutboxStore
     /// <paramref name="visibleAt"/> (immediately when null). Only succeeds when the
     /// caller still holds the lease; returns false otherwise.
     /// </summary>
+    /// <param name="lease">The lease returned by <see cref="AcquirePendingAsync"/>.</param>
+    /// <param name="visibleAt">When the entry becomes visible again. Null means immediately.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>True when the lease was released; false when the lease was no longer valid.</returns>
     Task<bool> AbandonAsync(OutboxLease lease, DateTimeOffset? visibleAt = null, CancellationToken ct = default);
 }

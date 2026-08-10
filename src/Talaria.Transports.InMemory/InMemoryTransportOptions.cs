@@ -5,11 +5,16 @@ namespace Talaria.Transports.InMemory;
 /// <summary>
 /// Configuration options for the in-memory transport.
 /// </summary>
+/// <since>1.0.0</since>
 public sealed class InMemoryTransportOptions
 {
     /// <summary>
     /// Maximum number of messages buffered per topic channel. Must be greater than zero.
     /// </summary>
+    /// <remarks>
+    /// When the channel is full, the oldest message is dropped (newest is preserved)
+    /// for regular topics. DLQ topics are unbounded so dead letters are never lost.
+    /// </remarks>
     public int ChannelCapacity { get; set; } = 1000;
 
     /// <summary>
