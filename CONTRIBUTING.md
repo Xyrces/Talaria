@@ -7,7 +7,11 @@ project's coding conventions, and submit a pull request.
 Talaria is an open-source library distributed under the
 **GNU Affero General Public License, version 3 or later (AGPL-3.0-or-later)**
 (see [`LICENSE`](LICENSE)). By contributing, you agree that your contributions
-will be released under the same license.
+will be released under the same license. The rationale behind this choice and
+the commercial-licensing posture are documented in
+[`docs/LICENSE-RATIONALE.md`](docs/LICENSE-RATIONALE.md); the commercial
+offering itself is delivered under a separate repository and separate terms
+and is intentionally out of scope for this repo.
 
 ---
 
@@ -250,5 +254,5 @@ remarks, a README section, and a SpecFlow feature.
 
 - Open a discussion on the issue tracker.
 - For security-sensitive questions, follow [`SECURITY.md`](SECURITY.md).
-- For commercial licensing or support, see the **License** section of
-  the [README](README.md#-license).
+- For commercial licensing or support, see [`docs/LICENSE-RATIONALE.md`](docs/LICENSE-RATIONALE.md)
+  and the **License** section of the [README](README.md#-license).
