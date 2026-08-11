@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 using System.Reflection;
 
 namespace Talaria.Core;
@@ -5,6 +7,7 @@ namespace Talaria.Core;
 /// <summary>
 /// Global configuration for a Talaria messaging host.
 /// </summary>
+/// <since>1.0.0</since>
 public sealed class TalariaOptions
 {
     /// <summary>

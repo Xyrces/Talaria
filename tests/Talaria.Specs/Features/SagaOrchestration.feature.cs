@@ -25,8 +25,8 @@ namespace Talaria.Specs.Features
         private static string[] featureTags = ((string[])(null));
         
         private static global::Reqnroll.FeatureInfo featureInfo = new global::Reqnroll.FeatureInfo(new global::System.Globalization.CultureInfo("en-US"), "Features", "Saga Orchestration", "  In order to implement complex, long-running processes without stateful coupling" +
-                "\r\n  As a developer using Talaria\r\n  I want to configure sagas as pure functions " +
-                "that process messages and update state", global::Reqnroll.ProgrammingLanguage.CSharp, featureTags, InitializeCucumberMessages());
+                "\n  As a developer using Talaria\n  I want to configure sagas as pure functions th" +
+                "at process messages and update state", global::Reqnroll.ProgrammingLanguage.CSharp, featureTags, InitializeCucumberMessages());
         
         private global::Xunit.Abstractions.ITestOutputHelper _testOutputHelper;
         

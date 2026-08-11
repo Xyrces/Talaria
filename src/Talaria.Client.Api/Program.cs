@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 using Microsoft.AspNetCore.Mvc;
 using Talaria.Client.Api.Sagas;
 using Talaria.Core.Abstractions;
@@ -7,6 +9,14 @@ using Talaria.Transports.InMemory;
 using Talaria.Transports.Kafka;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Sample-API configuration. The literal defaults match the onboarding saga sample;
+// override via IConfiguration (env vars, appsettings.json, or Aspire service discovery)
+// when adapting the sample to a different tenant / environment.
+var redisKeyPrefix = builder.Configuration["Talaria:Redis:KeyPrefix"] ?? "onboarding:";
+var onboardingCommandsTopic = builder.Configuration["Talaria:Topics:OnboardingCommands"] ?? "onboarding-commands";
+var accountEventsTopic = builder.Configuration["Talaria:Topics:AccountEvents"] ?? "account-events";
+var emailCommandsTopic = builder.Configuration["Talaria:Topics:EmailCommands"] ?? "email-commands";
 
 // Add service defaults & Aspire components
 builder.AddServiceDefaults();
@@ -33,27 +43,29 @@ else
         .UseRedisStateStore(opts =>
         {
             opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
-            opts.KeyPrefix = "onboarding:";
+            opts.KeyPrefix = redisKeyPrefix;
         })
         .UseRedisIdempotencyStore(opts =>
         {
             opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
-            opts.KeyPrefix = "onboarding:";
+            opts.KeyPrefix = redisKeyPrefix;
         })
         .UseRedisDeferralStore(opts =>
         {
             opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
-            opts.KeyPrefix = "onboarding:";
+            opts.KeyPrefix = redisKeyPrefix;
         });
 }
 
 var app = builder.Build();
 
 // Configure the saga mappings
-OnboardingSagaConfigurator.ConfigureOnboardingSaga(app.Services);
+OnboardingSagaConfigurator.ConfigureOnboardingSaga(
+    app.Services,
+    OnboardingSagaTopics.FromConfiguration(builder.Configuration));
 
 // Configure a stateless consumer mapping
-app.Services.MapTopic<SendVerificationEmailCommand>("email-commands", async (msg, ct) =>
+app.Services.MapTopic<SendVerificationEmailCommand>(emailCommandsTopic, async (msg, ct) =>
 {
     var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("EmailConsumer");
     logger.LogInformation("Intercepted email command for account {AccountId} — sending verification email...", msg.AccountId);
@@ -85,7 +97,7 @@ app.MapPost("/api/accounts", async (
     // The server always generates the message id — clients must not control dedup keys.
 
     // Simulate sending the command that the saga listens for
-    var producer = await transport.CreateProducerAsync<CreateAccountCommand>("onboarding-commands", new ProducerOptions());
+    var producer = await transport.CreateProducerAsync<CreateAccountCommand>(onboardingCommandsTopic, new ProducerOptions());
     await producer.ProduceAsync(new CreateAccountCommand
     {
         AccountId = determinedId,
@@ -101,7 +113,7 @@ app.MapPost("/api/accounts/{accountId}/verify", async (
     [FromServices] ITransport transport) =>
 {
     // Simulate external system verifying the account
-    var producer = await transport.CreateProducerAsync<AccountVerifiedEvent>("account-events", new ProducerOptions());
+    var producer = await transport.CreateProducerAsync<AccountVerifiedEvent>(accountEventsTopic, new ProducerOptions());
     await producer.ProduceAsync(new AccountVerifiedEvent
     {
         AccountId = accountId
