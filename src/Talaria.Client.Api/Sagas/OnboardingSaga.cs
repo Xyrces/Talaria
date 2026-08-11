@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+using Microsoft.Extensions.Configuration;
 using Talaria.Core.Registration;
 using Talaria.Core.Sagas;
 using Talaria.Core.Abstractions;
@@ -30,9 +33,32 @@ public class SendVerificationEmailCommand
     public string Email { get; set; } = string.Empty;
 }
 
+/// <summary>
+/// Topic names consumed by the onboarding sample saga. Defaults match the sample;
+/// override per deployment via configuration keys (<c>Talaria:Topics:OnboardingCommands</c>,
+/// <c>Talaria:Topics:AccountEvents</c>, <c>Talaria:Topics:EmailCommands</c>).
+/// </summary>
+public sealed record OnboardingSagaTopics(
+    string OnboardingCommands,
+    string AccountEvents,
+    string EmailCommands)
+{
+    /// <summary>Resolves topic names from <see cref="IConfiguration"/> with sample defaults.</summary>
+    public static OnboardingSagaTopics FromConfiguration(IConfiguration configuration) => new(
+        configuration["Talaria:Topics:OnboardingCommands"] ?? "onboarding-commands",
+        configuration["Talaria:Topics:AccountEvents"] ?? "account-events",
+        configuration["Talaria:Topics:EmailCommands"] ?? "email-commands");
+
+    internal static readonly OnboardingSagaTopics Defaults = new(
+        "onboarding-commands", "account-events", "email-commands");
+}
+
 public static class OnboardingSagaConfigurator
 {
     public static void ConfigureOnboardingSaga(IServiceProvider services)
+        => ConfigureOnboardingSaga(services, OnboardingSagaTopics.Defaults);
+
+    public static void ConfigureOnboardingSaga(IServiceProvider services, OnboardingSagaTopics topics)
     {
         var logger = services.GetRequiredService<ILoggerFactory>().CreateLogger("OnboardingSaga");
         var tracker = services.GetRequiredService<ProcessingTracker>();
@@ -40,7 +66,7 @@ public static class OnboardingSagaConfigurator
         services.MapSaga<OnboardingState>(sagas =>
         {
             sagas.StartedBy<CreateAccountCommand>(
-                "onboarding-commands",
+                topics.OnboardingCommands,
                 async (msg, context) =>
                 {
                     logger.LogInformation("Creating account {AccountId}", msg.AccountId);
@@ -65,7 +91,7 @@ public static class OnboardingSagaConfigurator
                 correlateBy: msg => msg.AccountId);
 
             sagas.On<AccountVerifiedEvent>(
-                "account-events",
+                topics.AccountEvents,
                 async (state, msg, context) =>
                 {
                     logger.LogInformation("Received verification for {AccountId}", msg.AccountId);
@@ -76,8 +102,8 @@ public static class OnboardingSagaConfigurator
                 },
                 correlateBy: msg => msg.AccountId);
 
-            // The email handler listens on "email-commands" (see Program.cs).
-            sagas.DispatchTo<SendVerificationEmailCommand>("email-commands");
+            // The email handler listens on the email-commands topic (see Program.cs).
+            sagas.DispatchTo<SendVerificationEmailCommand>(topics.EmailCommands);
         });
     }
 }

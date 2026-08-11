@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 using System.Text;
 using System.Text.Json;
 using Confluent.Kafka;
