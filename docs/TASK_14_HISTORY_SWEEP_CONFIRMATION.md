@@ -41,16 +41,18 @@ The audit patterns were taken verbatim from `docs/TASK_11_AUDIT.md`
 section "Out-of-scope confirmations" and `docs/TASK_13_HISTORY_ATTRIBUTION_AUDIT.md`
 section "File-content personal/local scan", then re-run against the **full
 reachable history** visible from `agent/task-14` after the merge of
-`origin/main` (commit `7501b6b`, Merge pull request #12 from
-Xyrces/agent/task-13). The merge was a fast-forward: the audit reflects
-the committed state of `origin/main` plus the verification doc.
+`origin/main` (commit `a41d2fb`, Merge pull request #13 from
+Xyrces/agent/task-15, which itself includes PR #12). The branch was
+rebased/merged onto `origin/main` after the initial audit; the counts in
+sections 3 and 4 below reflect the post-merge state of 63 reachable
+commits.
 
 The repository under audit at the time of this run:
 
 ```
-HEAD:        7501b6b (Merge pull request #12 from Xyrces/agent/task-13)
-origin/main: 7501b6b
-local main:  7501b6b (after the fast-forward merge)
+HEAD:        8245821 (Merge remote-tracking branch 'origin/main' into agent/task-14)
+origin/main: a41d2fb (Merge pull request #13 from Xyrces/agent/task-15)
+base:        7501b6b (Merge pull request #12 from Xyrces/agent/task-13)
 ```
 
 The patterns were run as plain `git log` / `git rev-list` / `git cat-file`
@@ -75,15 +77,18 @@ queries; no `git filter-repo` or history-rewriting tool was invoked.
 
 | Identity | Count | Reach | Disposition |
 | --- | --- | --- | --- |
-| `jtn5016@gmail.com` | 57 | All reachable commits (excluding 1 reflog-style WIP) | Documented exception — task-13 target of `git filter-repo` rewrite. |
+| `jtn5016@gmail.com` | 60 | All reachable commits after the merge of PR #13 (LICENSE-RATIONALE, runtimeconfig re-rollforward) | Documented exception — task-13 target of `git filter-repo` rewrite. |
 | `agent@task-2` / `agent@task-11.local` | 3 | `a87d64d`, `feaaa34`, `1ccf904` | Documented exception — task-13 target of bot-identity rewrite. |
-| `noreply@github.com` (committer) | 12 | 11 GitHub web-flow merges + 1 squash-merge non-merge (`424ef8d`) | Generic bot; not a personal reference. |
-| `Jay Newman <jtn5016@gmail.com>` (committer on merges) | 2 | `bcc8119` (sync merge), `014181a` (WIP on agent/task-4) | Documented exception — same human identity, just appearing as the merge committer on agent-local ref-merges. |
+| `noreply@github.com` (committer) | 13 | 12 GitHub web-flow merges + 1 squash-merge non-merge (`424ef8d`) | Generic bot; not a personal reference. |
+| `Jay Newman <jtn5016@gmail.com>` (committer on merges) | 2 | `bcc8119` (sync merge), `014181a` (WIP on agent/task-4) | Documented exception — same human identity, just appearing as the merge committer on agent-local ref-merges. (Noreply @github.com as committer on PR merge `a41d2fb` after re-sync.) |
 | `GitHub <noreply@github.com>` (author) | 0 | n/a | No reach. |
 
-The 57 + 3 attribution lines are the rewrite target. Task-13 documented
-this finding and the operator gating. **No new attribution lines were
-introduced between the task-13 baseline and this run.**
+The 60 + 3 attribution lines are the rewrite target (3 lines added by the
+LICENSE-RATIONALE merge: ef58ea8, d9bbef7, a41d2fb — all jtn5016 author,
+matching the existing pattern). Task-13 documented this finding and the
+operator gating. **The 3 new attribution lines are consistent with the
+existing documented exception (single human originator); no new identity
+was introduced.**
 
 ### 3.2 Attribution trailers (`git log --pretty=format:"%B"`)
 
@@ -104,21 +109,22 @@ across a rewrite.
 $ for blob in $(git rev-list --all --objects | awk '{print $1}' | grep -E '^[0-9a-f]{40}$' | sort -u); do
     git cat-file -t $blob 2>/dev/null | grep -q blob && git cat-file -p $blob | grep -qE 'jtn5016' && echo $blob
   done | wc -l
-1
+2
 
 $ for blob in $(git rev-list --all --objects | awk '{print $1}' | grep -E '^[0-9a-f]{40}$' | sort -u); do
     git cat-file -t $blob 2>/dev/null | grep -q blob && git cat-file -p $blob | grep -qE 'Jay Newman' && echo $blob
   done | wc -l
-1
+2
 ```
 
-The single blob containing `jtn5016` or `Jay Newman`:
+The 2 blobs containing `jtn5016` or `Jay Newman`:
 
 | Blob | Path | Context |
 | --- | --- | --- |
 | `8d5d9094abd6315975e21168835710c481a433ca` | `docs/TASK_13_HISTORY_ATTRIBUTION_AUDIT.md` | Audit evidence — documents the personal/local info as the inventory of rewrite targets. |
+| `2a209ef3dc1dcc04e215db85b0a832ee7cd680bc` | `docs/TASK_14_HISTORY_SWEEP_CONFIRMATION.md` | Audit evidence (this file) — the re-run confirmation itself documents the same patterns as evidence. |
 
-This is **audit content, not a leak.** The same reasoning applies to the
+Both are **audit content, not leaks.** The same reasoning applies to the
 working-tree survey below.
 
 ### 3.4 Working-tree survey (excluding audit docs)
@@ -156,6 +162,7 @@ sweep, not a leak:
 | `docs/TASK_13_HISTORY_ATTRIBUTION_AUDIT.md` | 39, 40, 47, 64, 113, 114, 135 | `Jay Newman <jtn5016@gmail.com>` | Audit-table rows documenting the rewrite targets. |
 | `docs/TASK_13_HISTORY_ATTRIBUTION_AUDIT.md` | 95, 97 | `jtn5016`, `Jay Newman`, `/Users/` | `$ grep -rIE 'jtn5016\|Jay Newman\|/Users/' …` block showing the command output. |
 | `docs/TASK_13_HISTORY_ATTRIBUTION_AUDIT.md` | 98 | `/home/jtn5016/.local/share/forge/projects/talaria/.git/worktrees/task-13` | The literal `gitdir:` line of the worktree's `.git` file. Tracked by task-13 as a non-leak (gitlink pointer, not source). |
+| `docs/TASK_14_HISTORY_SWEEP_CONFIRMATION.md` (this file) | 78, 79, 80, 83, 87, 183, 187, 202, 215 | `jtn5016@gmail.com`, `Jay Newman <jtn5016@gmail.com>`, `noreply@github.com`, `agent@task-*` | Re-run summary tables and disposition boxes documenting the rewrite targets and exceptions. |
 
 These are the patterns documented as the absence-evidence. The audit
 docs contain the regex strings so a future maintainer can re-run the
@@ -177,11 +184,11 @@ Section 4) is reproduced here for cross-reference:
 
 | Reference | Location | Legally required? |
 | --- | --- | --- |
-| `Jay Newman <jtn5016@gmail.com>` | Author on 44 non-merge commits + 13 merges = 57 author lines; Committer on 44 non-merge commits + 2 merges = 46 committer lines (1 commit, `feaaa34`, has agent@task-2 as author with jtn5016 as committer) | NO — originator identity, single individual, no DCO obligation |
+| `Jay Newman <jtn5016@gmail.com>` | Author on 60 commits (44 non-merge + 16 merges after re-sync); Committer on 48 commits (46 non-merge + 2 merges). 1 commit (`feaaa34`) has agent@task-2 as author with jtn5016 as committer | NO — originator identity, single individual, no DCO obligation |
 | `jtn5016@gmail.com` | Author + Committer email throughout | NO — personal email |
 | `agent/task-2 <agent@task-2>` | `a87d64d`, `feaaa34` | NO — bot placeholder, leaks worktree host |
 | `agent/task-11 <agent@task-11.local>` | `1ccf904` | NO — bot placeholder, leaks worktree host |
-| `GitHub <noreply@github.com>` | Committer on 11 merge commits + 1 squash non-merge (`424ef8d`) = 12 committer lines | NO — already generic |
+| `GitHub <noreply@github.com>` | Committer on 12 merge commits + 1 squash non-merge (`424ef8d`) = 13 committer lines | NO — already generic |
 | `Signed-off-by` / `Co-authored-by` / `Reviewed-by` / `Acked-by` trailers | (none) | N/A |
 | File-content personal refs | (only the audit docs themselves + `gitdir:` pointer) | N/A — audit evidence, not leakage |
 | GitHub org refs (`Xyrces/Talaria`, `xyrces.io`) | `CHANGELOG.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `.github/workflows/ci.yml` | OUT OF SCOPE per sprint brief |
@@ -196,7 +203,7 @@ survive a rewrite.
 +-----------------------------------------------------------+
 |  RESULT: 0 hits outside documented exceptions            |
 |                                                           |
-|  - 57 attribution lines (jtn5016@gmail.com) -> task-13    |
+|  - 60 attribution lines (jtn5016@gmail.com) -> task-13    |
 |    rewrite target (HOLD pending operator authorization)   |
 |  - 3 agent-bot attribution lines -> task-13 rewrite      |
 |    target                                                |
@@ -209,7 +216,7 @@ survive a rewrite.
 ```
 
 **No iteration on the rewrite is required.** The only outstanding hits
-are the 57 + 3 attribution lines already enumerated in task-13's audit
+are the 60 + 3 attribution lines already enumerated in task-13's audit
 and confirmed HOLD-pending-operator. The audit docs themselves
 (`docs/TASK_11_AUDIT.md`, `docs/TASK_13_HISTORY_ATTRIBUTION_AUDIT.md`,
 and this file) contain the pattern strings as documented evidence and
@@ -242,7 +249,7 @@ After the merge of `origin/main` and the addition of this file:
   are not part of the local baseline.
 
 This task produced one new file (`docs/TASK_14_HISTORY_SWEEP_CONFIRMATION.md`)
-on top of the merged `origin/main` (commit `7501b6b`). No source, config,
+on top of the merged `origin/main` (commit `a41d2fb`). No source, config,
 license, or test files were modified. The baseline build/test results
 from the task-11 / task-13 audits still apply.
 
