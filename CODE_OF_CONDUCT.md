@@ -61,7 +61,7 @@ appointed representative at an online or offline event.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the community leaders responsible for enforcement at
-**talaria-conduct@xyrces.io** (placeholder — see `SECURITY.md` for the
+**talaria-conduct@example.com** (placeholder — see `SECURITY.md` for the
 current contact channel). All complaints will be reviewed and investigated
 promptly and fairly.
 

@@ -39,7 +39,7 @@ Use one of the following private channels instead:
    <https://github.com/Xyrces/Talaria/security/advisories/new>. This routes
    directly to the maintainer team and keeps the report out of the public
    issue tracker.
-2. **Direct email** — `security@xyrces.io`. Encrypt sensitive details with
+2. **Direct email** — `security@example.com`. Encrypt sensitive details with
    the maintainer's PGP key (published on request); otherwise plain text is
    acceptable for non-sensitive reports.
 
@@ -152,7 +152,7 @@ A separate commercial offering is available for organizations that need:
 
 The commercial offering is delivered under its own repository and license
 terms and is intentionally **out of scope for this repo**. Contact the
-maintainers at `security@xyrces.io` for details.
+maintainers at `security@example.com` for details.
 
 ---
 
