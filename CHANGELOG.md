@@ -15,7 +15,9 @@ leases, hardening*, PR #3).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Azure Service Bus deferral adapter (`Talaria.Transports.AzureServiceBus.Deferral.DeferralAdapter`)** — an `IDeferralStore` that splits saga deferrals between the broker's native `ScheduledEnqueueTime` (short/medium waits within `AzureServiceBusDeferralShortTermCutoff` and payload sizes within `AzureServiceBusDeferralMaxPayloadBytes`) and the existing lease-based `IDeferralStore` + sweeper (long/deadline). New `TalariaOptions.AzureServiceBusDeferralShortTermCutoff` (default 10 min) and `AzureServiceBusDeferralMaxPayloadBytes` (default 256 KB) gates the routing, both validated by `TalariaOptionsValidator`. Extension method `UseAzureServiceBusDeferral(...)` registers the adapter as the engine's `IDeferralStore`. Unit tests in `tests/Talaria.Transports.AzureServiceBus.Tests` cover the short/long/boundary/oversize/forward paths without needing the ASB emulator.
+
 
 ## [0.3.0] - 2026-08-08 - Architecture & security review remediation
 
