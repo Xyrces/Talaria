@@ -6,9 +6,10 @@ namespace Talaria.Tests.TransportContract;
 
 /// <summary>
 /// The behavioral contract every Talaria transport must satisfy. Each
-/// scenario is parameterized over the available <see cref="TransportContractRow"/>
-/// implementations; adding a new transport means adding one row, not
-/// duplicating <c>[Fact]</c> methods here.
+/// scenario is implemented as a pair of <c>[SkippableFact]</c> methods —
+/// one <c>InMemory_*</c> that always runs, one <c>Kafka_*</c> that skips
+/// when Docker is unavailable. Adding a new transport means adding another
+/// pair, not duplicating the scenario body.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -20,49 +21,121 @@ namespace Talaria.Tests.TransportContract;
 /// non-redelivery after consumer restart.
 /// </para>
 /// <para>
-/// The Kafka row is wired up only when Docker is available (via
-/// <see cref="DockerFactAttribute.IsDockerRunning"/>) and the
-/// <see cref="KafkaContainerFixture"/> has started its container.
+/// The matrix class is decorated with <c>[Collection(KafkaRowCollection.Name)]</c>
+/// so <see cref="KafkaContainerFixture"/> is instantiated once per collection
+/// and injected via the constructor. xUnit calls the fixture's
+/// <c>InitializeAsync</c> only when at least one test in the collection is
+/// about to run — so the Kafka container is not started on hosts where
+/// every <c>Kafka_*</c> test will skip. When Docker is unavailable,
+/// <see cref="KafkaContainerFixture.IsAvailable"/> is <c>false</c> and the
+/// Kafka <c>[SkippableFact]</c> bodies call <c>Skip.IfNot</c> with the same
+/// reason text as <see cref="DockerFactAttribute"/>.
+/// </para>
+/// <para>
+/// Why per-<c>[SkippableFact]</c> rather than a <c>[SkippableTheory]</c>
+/// over <c>[MemberData]</c>: xUnit evaluates <c>[MemberData]</c> arguments
+/// at test discovery time, which would force the Kafka container to start
+/// during discovery and hang on hosts that need to pull
+/// <c>confluentinc/cp-kafka:7.4.0</c>. <c>[SkippableFact]</c> defers
+/// evaluation to execution time, matching the pattern the existing
+/// <c>KafkaReliabilityIntegrationTests</c> uses via
+/// <c>IAsyncLifetime.InitializeAsync</c>.
 /// </para>
 /// </remarks>
 /// <since>1.0.0</since>
+[Collection(KafkaRowCollection.Name)]
 public class TransportContractMatrix
 {
+    private readonly KafkaContainerFixture _kafkaFixture;
+
     /// <summary>
     /// Shared message payload used by every scenario. Public so the
-    /// parameterised <c>[Theory]</c> methods can name it in assertions.
+    /// per-scenario <c>[SkippableFact]</c> methods can name it in
+    /// assertions.
     /// </summary>
     public sealed class Msg
     {
         public string Id { get; set; } = "";
     }
 
-    public static IEnumerable<object[]> Rows()
+    public TransportContractMatrix(KafkaContainerFixture kafkaFixture)
     {
-        // InMemory is always available.
-        yield return new object[] { new InMemoryTransportRow() };
-
-        // Kafka is conditional on Docker availability. The row's IsAvailable
-        // hook handles the per-test skip reason when the container fixture
-        // couldn't start.
-        if (DockerFactAttribute.IsDockerRunning())
-        {
-            var kafkaRow = new KafkaTransportRow();
-            kafkaRow.Fixture = KafkaFixtureBootstrapper.GetOrCreateFixtureAsync().GetAwaiter().GetResult();
-            if (kafkaRow.Fixture is { IsAvailable: true })
-            {
-                yield return new object[] { kafkaRow };
-            }
-        }
+        _kafkaFixture = kafkaFixture;
     }
 
-    [SkippableTheory]
-    [MemberData(nameof(Rows))]
-    public async Task TwoConsumerGroups_EachReceiveEveryMessage(TransportContractRow row)
+    // ---- per-transport scenario entry points ------------------------------------
+
+    [SkippableFact]
+    public async Task InMemory_TwoConsumerGroups_EachReceiveEveryMessage()
+        => await RunTwoConsumerGroupsAsync(new InMemoryTransportRow());
+
+    [SkippableFact]
+    public async Task InMemory_LateJoiningGroup_ReplaysRetainedBacklog()
+        => await RunLateJoiningGroupReplaysRetainedBacklogAsync(new InMemoryTransportRow());
+
+    [SkippableFact]
+    public async Task InMemory_TransactionalCommit_IsVisible_AbortDiscards()
+        => await RunTransactionalCommitIsVisibleAbortDiscardsAsync(new InMemoryTransportRow());
+
+    [SkippableFact]
+    public async Task InMemory_Nack_RoutesToTopicAndAppDlq()
+        => await RunNackRoutesToTopicAndAppDlqAsync(new InMemoryTransportRow());
+
+    [SkippableFact]
+    public async Task InMemory_Uncommitted_Message_Is_Redelivered_After_Consumer_Restart()
+        => await RunUncommittedMessageIsRedeliveredAfterConsumerRestartAsync(new InMemoryTransportRow());
+
+    [SkippableFact]
+    public async Task InMemory_Committed_Message_Is_Not_Redelivered_After_Consumer_Restart()
+        => await RunCommittedMessageIsNotRedeliveredAfterConsumerRestartAsync(new InMemoryTransportRow());
+
+    [SkippableFact]
+    public async Task Kafka_TwoConsumerGroups_EachReceiveEveryMessage()
+        => await RunTwoConsumerGroupsAsync(KafkaRowOrSkip());
+
+    [SkippableFact]
+    public async Task Kafka_LateJoiningGroup_ReplaysRetainedBacklog()
+        => await RunLateJoiningGroupReplaysRetainedBacklogAsync(KafkaRowOrSkip());
+
+    [SkippableFact]
+    public async Task Kafka_TransactionalCommit_IsVisible_AbortDiscards()
+        => await RunTransactionalCommitIsVisibleAbortDiscardsAsync(KafkaRowOrSkip());
+
+    [SkippableFact]
+    public async Task Kafka_Nack_RoutesToTopicAndAppDlq()
+        => await RunNackRoutesToTopicAndAppDlqAsync(KafkaRowOrSkip());
+
+    [SkippableFact]
+    public async Task Kafka_Uncommitted_Message_Is_Redelivered_After_Consumer_Restart()
+        => await RunUncommittedMessageIsRedeliveredAfterConsumerRestartAsync(KafkaRowOrSkip());
+
+    [SkippableFact]
+    public async Task Kafka_Committed_Message_Is_Not_Redelivered_After_Consumer_Restart()
+        => await RunCommittedMessageIsNotRedeliveredAfterConsumerRestartAsync(KafkaRowOrSkip());
+
+    // ---- shared scenario bodies --------------------------------------------------
+
+    private async Task<TransportHarness> CreateHarnessAsync(TransportContractRow row)
     {
         Skip.IfNot(row.IsAvailable, $"Transport row '{row.DisplayName}' is not available on this host.");
+        return await row.CreateAsync();
+    }
 
-        await using var harness = await row.CreateAsync();
+    /// <summary>
+    /// Resolves a Kafka row against the class-injected fixture, or skips
+    /// the test with the standard Docker-not-running message.
+    /// </summary>
+    private KafkaTransportRow KafkaRowOrSkip()
+    {
+        Skip.IfNot(
+            DockerFactAttribute.IsDockerRunning() && _kafkaFixture.IsAvailable,
+            "Docker daemon is not running on this host environment.");
+        return new KafkaTransportRow { Fixture = _kafkaFixture };
+    }
+
+    private async Task RunTwoConsumerGroupsAsync(TransportContractRow row)
+    {
+        await using var harness = await CreateHarnessAsync(row);
         using var cts = new CancellationTokenSource();
 
         var topic = $"c-fanout-{Guid.NewGuid():N}";
@@ -86,13 +159,9 @@ public class TransportContractMatrix
         Assert.Equal(a.Offset, b.Offset);
     }
 
-    [SkippableTheory]
-    [MemberData(nameof(Rows))]
-    public async Task LateJoiningGroup_ReplaysRetainedBacklog(TransportContractRow row)
+    private async Task RunLateJoiningGroupReplaysRetainedBacklogAsync(TransportContractRow row)
     {
-        Skip.IfNot(row.IsAvailable, $"Transport row '{row.DisplayName}' is not available on this host.");
-
-        await using var harness = await row.CreateAsync();
+        await using var harness = await CreateHarnessAsync(row);
         using var cts = new CancellationTokenSource();
 
         var topic = $"c-late-{Guid.NewGuid():N}";
@@ -108,13 +177,9 @@ public class TransportContractMatrix
         Assert.Equal("old", envelope.Payload.Id);
     }
 
-    [SkippableTheory]
-    [MemberData(nameof(Rows))]
-    public async Task TransactionalCommit_IsVisible_AbortDiscards(TransportContractRow row)
+    private async Task RunTransactionalCommitIsVisibleAbortDiscardsAsync(TransportContractRow row)
     {
-        Skip.IfNot(row.IsAvailable, $"Transport row '{row.DisplayName}' is not available on this host.");
-
-        await using var harness = await row.CreateAsync();
+        await using var harness = await CreateHarnessAsync(row);
 
         var topic = $"c-tx-{Guid.NewGuid():N}";
 
@@ -137,13 +202,9 @@ public class TransportContractMatrix
         Assert.Equal("committed", envelope.Payload.Id);
     }
 
-    [SkippableTheory]
-    [MemberData(nameof(Rows))]
-    public async Task Nack_RoutesToTopicAndAppDlq(TransportContractRow row)
+    private async Task RunNackRoutesToTopicAndAppDlqAsync(TransportContractRow row)
     {
-        Skip.IfNot(row.IsAvailable, $"Transport row '{row.DisplayName}' is not available on this host.");
-
-        await using var harness = await row.CreateAsync();
+        await using var harness = await CreateHarnessAsync(row);
         using var cts = new CancellationTokenSource();
 
         var topic = $"c-nack-{Guid.NewGuid():N}";
@@ -163,13 +224,9 @@ public class TransportContractMatrix
         Assert.Single(appDlq);
     }
 
-    [SkippableTheory]
-    [MemberData(nameof(Rows))]
-    public async Task Uncommitted_Message_Is_Redelivered_After_Consumer_Restart(TransportContractRow row)
+    private async Task RunUncommittedMessageIsRedeliveredAfterConsumerRestartAsync(TransportContractRow row)
     {
-        Skip.IfNot(row.IsAvailable, $"Transport row '{row.DisplayName}' is not available on this host.");
-
-        await using var harness = await row.CreateAsync();
+        await using var harness = await CreateHarnessAsync(row);
         using var cts = new CancellationTokenSource();
 
         var topic = $"c-redeliver-{Guid.NewGuid():N}";
@@ -185,7 +242,7 @@ public class TransportContractMatrix
             first = TransportHarness.Must(
                 TransportHarness.ReadOneAsync(consumer1, cts.Token),
                 "first consumer instance reads the message");
-        }
+        } // Dispose without commit → unsettled message is requeued.
 
         await using var consumer2 = await harness.Transport.CreateConsumerAsync<Msg>(
             topic, new ConsumerOptions { ConsumerGroup = group });
@@ -199,13 +256,9 @@ public class TransportContractMatrix
         await consumer2.CommitAsync(redelivered);
     }
 
-    [SkippableTheory]
-    [MemberData(nameof(Rows))]
-    public async Task Committed_Message_Is_Not_Redelivered_After_Consumer_Restart(TransportContractRow row)
+    private async Task RunCommittedMessageIsNotRedeliveredAfterConsumerRestartAsync(TransportContractRow row)
     {
-        Skip.IfNot(row.IsAvailable, $"Transport row '{row.DisplayName}' is not available on this host.");
-
-        await using var harness = await row.CreateAsync();
+        await using var harness = await CreateHarnessAsync(row);
         using var cts = new CancellationTokenSource();
 
         var topic = $"c-commit-{Guid.NewGuid():N}";
@@ -228,35 +281,5 @@ public class TransportContractMatrix
         var read = TransportHarness.ReadOneAsync(consumer2, cts.Token);
         var completed = await Task.WhenAny(read, Task.Delay(TimeSpan.FromMilliseconds(500), cts.Token));
         Assert.NotSame(read, completed);
-    }
-}
-
-/// <summary>
-/// Lazy one-shot bootstrapper for the shared Kafka container fixture. Used
-/// by <see cref="TransportContractMatrix.Rows"/> so the row's
-/// <see cref="KafkaTransportRow.Fixture"/> can be set without a separate
-/// xUnit class-fixture wiring step.
-/// </summary>
-internal static class KafkaFixtureBootstrapper
-{
-    private static KafkaContainerFixture? _fixture;
-    private static readonly object _gate = new();
-
-    public static async Task<KafkaContainerFixture> GetOrCreateFixtureAsync()
-    {
-        if (_fixture is not null)
-        {
-            return _fixture;
-        }
-        lock (_gate)
-        {
-            if (_fixture is not null)
-            {
-                return _fixture;
-            }
-            _fixture = new KafkaContainerFixture();
-        }
-        await _fixture.InitializeAsync();
-        return _fixture;
     }
 }
