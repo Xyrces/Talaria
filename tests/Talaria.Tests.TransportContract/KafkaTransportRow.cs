@@ -13,28 +13,31 @@ namespace Talaria.Tests.TransportContract;
 /// absent, the row's scenarios skip with the same message as
 /// <see cref="DockerFactAttribute"/>.
 /// <para>
-/// Container lifecycle is collection-scoped via
+/// Container lifecycle is held by the lazy-singleton
 /// <see cref="KafkaContainerFixture"/> — see
 /// <see cref="TransportContractMatrix"/>'s
-/// <see cref="KafkaRowCollection"/> — so the broker is spun up once per
-/// collection and reused across the matrix's scenarios. The transport
-/// instance is per-test (per <see cref="CreateAsync"/>) so consumer
-/// groups, transactions, and offsets never leak between cases.
+/// <c>KafkaRowOrSkipAsync</c> — so the broker is spun up once on the
+/// first <c>Kafka_*</c> test that runs and reused across every
+/// subsequent scenario. The transport instance is per-test (per
+/// <see cref="CreateAsync"/>) so consumer groups, transactions, and
+/// offsets never leak between cases.
 /// </para>
 /// </summary>
 /// <since>1.0.0</since>
 public sealed class KafkaTransportRow : TransportContractRow
 {
     /// <summary>
-    /// The collection fixture that owns the <c>KafkaContainer</c>. The
-    /// matrix passes it in so this row remains test-only and never
-    /// reaches into xUnit's internals directly.
+    /// The lazy-singleton fixture that owns the <c>KafkaContainer</c>.
+    /// Set by <c>TransportContractMatrix.KafkaRowOrSkipAsync</c> before
+    /// the first Kafka scenario runs; null for hosts where Docker is
+    /// absent.
     /// </summary>
     public KafkaContainerFixture? Fixture { get; set; }
 
     public override string DisplayName => "Kafka";
 
-    public override bool IsAvailable => DockerFactAttribute.IsDockerRunning() && Fixture is { IsAvailable: true };
+    public override bool IsAvailable =>
+        DockerFactAttribute.IsDockerRunning() && Fixture is { IsAvailable: true };
 
     public override Task<TransportHarness> CreateAsync(CancellationToken ct = default)
     {

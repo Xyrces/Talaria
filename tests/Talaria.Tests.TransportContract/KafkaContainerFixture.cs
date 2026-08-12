@@ -6,30 +6,42 @@ using Testcontainers.Kafka;
 namespace Talaria.Tests.TransportContract;
 
 /// <summary>
-/// xUnit class fixture that hosts one <c>KafkaContainer</c> for the
-/// lifetime of the test collection. Skipped automatically when Docker is
-/// absent or the container cannot start; the row's
-/// <see cref="TransportContractRow.IsAvailable"/> hook then suppresses the
-/// per-test skip reason.
+/// Lazy singleton holder for one <c>KafkaContainer</c> shared across the
+/// matrix's <c>Kafka_*</c> test methods. The container is started on the
+/// first call to <see cref="EnsureStartedAsync"/> from a running test;
+/// subsequent calls return the cached instance.
 /// </summary>
 /// <remarks>
 /// <para>
-/// The fixture is designed to fail soft: if Docker is unavailable OR the
-/// broker image pull + startup exceeds the configured wait timeout, the
-/// fixture sets <see cref="IsAvailable"/> to <c>false</c> instead of
-/// throwing. xUnit treats a thrown <c>InitializeAsync</c> as a fatal
-/// collection failure that fails the entire test run; soft-failing here
-/// mirrors the behaviour <see cref="DockerFactAttribute"/> provides to
-/// the per-class Kafka suite.
+/// This class deliberately does NOT implement <c>IAsyncLifetime</c> and
+/// the matrix class deliberately does NOT carry a <c>[Collection]</c>
+/// attribute. xUnit's collection-fixture machinery instantiates
+/// <c>IClassFixture&lt;T&gt;</c> implementations during test discovery
+/// for every test class in the collection — and some xUnit versions do so
+/// eagerly, before the first test runs. That would force the Kafka image
+/// pull + broker port wait to happen during discovery, hanging CI when
+/// Docker is present but the image is uncached.
 /// </para>
 /// <para>
-/// The container wait strategy uses a five-minute timeout to absorb the
-/// first-run image pull on a fresh CI runner. Once the image is cached
-/// locally subsequent runs reuse the cached layer and complete in seconds.
+/// By contrast, a static-lazy singleton is purely passive: it does nothing
+/// until <see cref="EnsureStartedAsync"/> is called from a running
+/// <c>Kafka_*</c> test method. xUnit discovery sees only the test class,
+/// its <c>[SkippableFact]</c> methods, and <c>[SkippableFact]</c>'s own
+/// skip-or-run decision — no Docker work happens until a test that
+/// actually needs it executes. On a host without Docker the lazy
+/// initializer returns an <c>IsAvailable=false</c> instance and every
+/// Kafka_* test skips cleanly.
+/// </para>
+/// <para>
+/// Thread safety: <see cref="EnsureStartedAsync"/> uses a
+/// <see cref="SemaphoreSlim"/> so concurrent test invocations cannot
+/// double-start the container. Once the singleton is initialized the
+/// lock is released; the <see cref="Task{KafkaContainerFixture}"/> is
+/// cached in <see cref="_initialization"/>.
 /// </para>
 /// </remarks>
 /// <since>1.0.0</since>
-public sealed class KafkaContainerFixture : IAsyncLifetime
+public sealed class KafkaContainerFixture
 {
     /// <summary>Default port the confluentinc/cp-kafka image exposes for PLAINTEXT listeners.</summary>
     private const int KafkaBrokerPort = 9092;
@@ -43,18 +55,75 @@ public sealed class KafkaContainerFixture : IAsyncLifetime
     /// </summary>
     private static readonly TimeSpan ContainerReadyTimeout = TimeSpan.FromMinutes(5);
 
+    private static readonly SemaphoreSlim _gate = new(1, 1);
+    private static Task<KafkaContainerFixture>? _initialization;
+
+    /// <summary>
+    /// True when the container start succeeded; false when Docker is
+    /// unavailable or the container failed to come up before
+    /// <see cref="ContainerReadyTimeout"/>. The matrix's per-test
+    /// <c>Skip.IfNot</c> reads this and skips the Kafka_* scenarios when
+    /// false.
+    /// </summary>
     public bool IsAvailable { get; private set; }
+
     private KafkaContainer? _container;
+
+    private KafkaContainerFixture() { }
 
     public string BootstrapAddress => _container?.GetBootstrapAddress()
         ?? throw new InvalidOperationException("Kafka container is not started.");
 
-    public async Task InitializeAsync()
+    /// <summary>
+    /// Idempotent lazy initializer. First call blocks on container start
+    /// (or returns an <c>IsAvailable=false</c> instance when Docker is
+    /// absent). Subsequent calls return the same instance.
+    /// </summary>
+    public static Task<KafkaContainerFixture> EnsureStartedAsync()
     {
+        // Fast path: the lazy initialization has already completed.
+        var cached = _initialization;
+        if (cached is { IsCompletedSuccessfully: true })
+        {
+            return cached;
+        }
+
+        return SlowInitializeAsync();
+    }
+
+    private static async Task<KafkaContainerFixture> SlowInitializeAsync()
+    {
+        await _gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (_initialization is not null)
+            {
+                return await _initialization.ConfigureAwait(false);
+            }
+
+            // Kick off the initialization outside the lock's critical
+            // section so we don't deadlock if the awaited
+            // StartAsync() does a sync-over-async hop on a thread-pool
+            // callback. The Task is the synchronization primitive
+            // other callers await on.
+            var task = InitializeCoreAsync();
+            _initialization = task;
+            return await task.ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private static async Task<KafkaContainerFixture> InitializeCoreAsync()
+    {
+        var fixture = new KafkaContainerFixture();
+
         if (!DockerFactAttribute.IsDockerRunning())
         {
-            IsAvailable = false;
-            return;
+            fixture.IsAvailable = false;
+            return fixture;
         }
 
         KafkaContainer container = new KafkaBuilder("confluentinc/cp-kafka:7.4.0")
@@ -72,27 +141,19 @@ public sealed class KafkaContainerFixture : IAsyncLifetime
             // bind failure, broker boot timeout) sets IsAvailable = false
             // so the matrix's per-test Skip.IfNot suppresses the Kafka
             // scenarios cleanly instead of failing the entire test run.
-            // We surface the reason on stderr so a CI log shows why the
+            // Surface the reason on stderr so a CI log shows why the
             // Kafka row was skipped rather than run.
             Console.Error.WriteLine(
                 $"[Talaria.Tests.TransportContract] Kafka container start failed; " +
                 $"Kafka row scenarios will be skipped. Reason: {ex.GetType().Name}: {ex.Message}");
             await SafeDisposeAsync(container).ConfigureAwait(false);
-            IsAvailable = false;
-            return;
+            fixture.IsAvailable = false;
+            return fixture;
         }
 
-        _container = container;
-        IsAvailable = true;
-    }
-
-    public async Task DisposeAsync()
-    {
-        if (_container is not null)
-        {
-            await _container.DisposeAsync().ConfigureAwait(false);
-            _container = null;
-        }
+        fixture._container = container;
+        fixture.IsAvailable = true;
+        return fixture;
     }
 
     private static async Task SafeDisposeAsync(KafkaContainer container)
@@ -103,19 +164,7 @@ public sealed class KafkaContainerFixture : IAsyncLifetime
         }
         catch
         {
-            // Best-effort cleanup; the fixture has already failed.
+            // Best-effort cleanup; the singleton has already failed.
         }
     }
-}
-
-/// <summary>
-/// Marker collection that pins the Kafka container to a single instance
-/// across every <see cref="TransportContractMatrix"/> scenario in the
-/// class. xUnit's <see cref="IClassFixture{T}"/> wires this in via the
-/// <see cref="ICollectionFixture{T}"/> interface below.
-/// </summary>
-[CollectionDefinition(Name)]
-public sealed class KafkaRowCollection : ICollectionFixture<KafkaContainerFixture>
-{
-    public const string Name = "KafkaRowCollection";
 }

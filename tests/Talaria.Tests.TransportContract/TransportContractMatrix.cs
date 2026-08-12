@@ -21,15 +21,19 @@ namespace Talaria.Tests.TransportContract;
 /// non-redelivery after consumer restart.
 /// </para>
 /// <para>
-/// The matrix class is decorated with <c>[Collection(KafkaRowCollection.Name)]</c>
-/// so <see cref="KafkaContainerFixture"/> is instantiated once per collection
-/// and injected via the constructor. xUnit calls the fixture's
-/// <c>InitializeAsync</c> only when at least one test in the collection is
-/// about to run — so the Kafka container is not started on hosts where
-/// every <c>Kafka_*</c> test will skip. When Docker is unavailable,
-/// <see cref="KafkaContainerFixture.IsAvailable"/> is <c>false</c> and the
-/// Kafka <c>[SkippableFact]</c> bodies call <c>Skip.IfNot</c> with the same
-/// reason text as <see cref="DockerFactAttribute"/>.
+/// The matrix class deliberately does NOT carry a <c>[Collection]</c>
+/// attribute and <see cref="KafkaContainerFixture"/> is NOT an
+/// <c>IAsyncLifetime</c> collection fixture. xUnit's
+/// collection-fixture machinery instantiates <c>IClassFixture&lt;T&gt;</c>
+/// implementations during test discovery for every class in the
+/// collection, which on a CI runner with Docker present forces the
+/// Kafka image pull + broker port wait to happen during discovery and
+/// hangs the run. Instead, the Kafka container is held by a static
+/// <see cref="KafkaContainerFixture.EnsureStartedAsync"/> lazy singleton:
+/// the container starts only when a <c>Kafka_*</c> test method actually
+/// executes; on Docker-less hosts the lazy initializer returns an
+/// <c>IsAvailable=false</c> instance and every Kafka_* test skips via
+/// <c>Skip.IfNot</c>.
 /// </para>
 /// <para>
 /// Why per-<c>[SkippableFact]</c> rather than a <c>[SkippableTheory]</c>
@@ -43,11 +47,8 @@ namespace Talaria.Tests.TransportContract;
 /// </para>
 /// </remarks>
 /// <since>1.0.0</since>
-[Collection(KafkaRowCollection.Name)]
 public class TransportContractMatrix
 {
-    private readonly KafkaContainerFixture _kafkaFixture;
-
     /// <summary>
     /// Shared message payload used by every scenario. Public so the
     /// per-scenario <c>[SkippableFact]</c> methods can name it in
@@ -56,11 +57,6 @@ public class TransportContractMatrix
     public sealed class Msg
     {
         public string Id { get; set; } = "";
-    }
-
-    public TransportContractMatrix(KafkaContainerFixture kafkaFixture)
-    {
-        _kafkaFixture = kafkaFixture;
     }
 
     // ---- per-transport scenario entry points ------------------------------------
@@ -91,27 +87,27 @@ public class TransportContractMatrix
 
     [SkippableFact]
     public async Task Kafka_TwoConsumerGroups_EachReceiveEveryMessage()
-        => await RunTwoConsumerGroupsAsync(KafkaRowOrSkip());
+        => await RunTwoConsumerGroupsAsync(await KafkaRowOrSkipAsync());
 
     [SkippableFact]
     public async Task Kafka_LateJoiningGroup_ReplaysRetainedBacklog()
-        => await RunLateJoiningGroupReplaysRetainedBacklogAsync(KafkaRowOrSkip());
+        => await RunLateJoiningGroupReplaysRetainedBacklogAsync(await KafkaRowOrSkipAsync());
 
     [SkippableFact]
     public async Task Kafka_TransactionalCommit_IsVisible_AbortDiscards()
-        => await RunTransactionalCommitIsVisibleAbortDiscardsAsync(KafkaRowOrSkip());
+        => await RunTransactionalCommitIsVisibleAbortDiscardsAsync(await KafkaRowOrSkipAsync());
 
     [SkippableFact]
     public async Task Kafka_Nack_RoutesToTopicAndAppDlq()
-        => await RunNackRoutesToTopicAndAppDlqAsync(KafkaRowOrSkip());
+        => await RunNackRoutesToTopicAndAppDlqAsync(await KafkaRowOrSkipAsync());
 
     [SkippableFact]
     public async Task Kafka_Uncommitted_Message_Is_Redelivered_After_Consumer_Restart()
-        => await RunUncommittedMessageIsRedeliveredAfterConsumerRestartAsync(KafkaRowOrSkip());
+        => await RunUncommittedMessageIsRedeliveredAfterConsumerRestartAsync(await KafkaRowOrSkipAsync());
 
     [SkippableFact]
     public async Task Kafka_Committed_Message_Is_Not_Redelivered_After_Consumer_Restart()
-        => await RunCommittedMessageIsNotRedeliveredAfterConsumerRestartAsync(KafkaRowOrSkip());
+        => await RunCommittedMessageIsNotRedeliveredAfterConsumerRestartAsync(await KafkaRowOrSkipAsync());
 
     // ---- shared scenario bodies --------------------------------------------------
 
@@ -122,15 +118,23 @@ public class TransportContractMatrix
     }
 
     /// <summary>
-    /// Resolves a Kafka row against the class-injected fixture, or skips
-    /// the test with the standard Docker-not-running message.
+    /// Resolves a Kafka row backed by the lazy-singleton Kafka container
+    /// fixture, or skips the test with the standard Docker-not-running
+    /// message. The fixture's <see cref="KafkaContainerFixture.IsAvailable"/>
+    /// is <c>false</c> when Docker is unavailable OR the container start
+    /// timed out, in which case the matrix's per-test <c>Skip.IfNot</c> in
+    /// <see cref="CreateHarnessAsync"/> suppresses the Kafka scenarios.
     /// </summary>
-    private KafkaTransportRow KafkaRowOrSkip()
+    private static async Task<KafkaTransportRow> KafkaRowOrSkipAsync()
     {
+        // Defer the fixture acquisition until execution time — that is
+        // the whole point of using [SkippableFact] + a static lazy
+        // singleton rather than [Collection] + IClassFixture.
+        var fixture = await KafkaContainerFixture.EnsureStartedAsync().ConfigureAwait(false);
         Skip.IfNot(
-            DockerFactAttribute.IsDockerRunning() && _kafkaFixture.IsAvailable,
+            fixture.IsAvailable,
             "Docker daemon is not running on this host environment.");
-        return new KafkaTransportRow { Fixture = _kafkaFixture };
+        return new KafkaTransportRow { Fixture = fixture };
     }
 
     private async Task RunTwoConsumerGroupsAsync(TransportContractRow row)
