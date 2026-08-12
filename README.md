@@ -163,6 +163,28 @@ Notes:
 
 ---
 
+## 🔎 Personal-refs guard
+
+The repository ships a vendored copy of the open-source release sweep at
+[`scripts/check-personal-refs.sh`](scripts/check-personal-refs.sh). Run it
+locally before pushing to catch accidental personal or host-local references
+that task-11 scrubbed from the codebase:
+
+```bash
+PERSONAL_REFS_GUARD=deny scripts/check-personal-refs.sh
+```
+
+`PERSONAL_REFS_GUARD` accepts `allow` (suppress), `warn` (default, emit
+GitHub-Actions-style `::warning::` annotations), or `deny` (fail the run).
+The script's `--self-test` flag plants known hits in a temp dir and asserts
+every pattern fires; `tests/Talaria.Ci.Tests` exercises the script end-to-end.
+
+Wiring the script into `.github/workflows/ci.yml` is owned by the devops
+agent and tracked as a follow-up; the script is callable from any CI step
+that can run `bash`.
+
+---
+
 ## 📄 License
 
 Talaria is released under the **GNU Affero General Public License, version 3 or later** ([`LICENSE`](LICENSE) at the repo root). In short: you are free to use, modify, and redistribute the source under the AGPL terms; if you run a modified version as a network service, you must release the complete corresponding source under the same license to its users.
