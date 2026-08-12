@@ -1,8 +1,11 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 namespace Talaria.StateStores.Redis;
 
 /// <summary>
 /// Configuration options for the Redis State Store.
 /// </summary>
+/// <since>1.0.0</since>
 public sealed class TalariaRedisOptions
 {
     /// <summary>
