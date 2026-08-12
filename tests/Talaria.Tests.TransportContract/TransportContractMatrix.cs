@@ -133,7 +133,7 @@ public class TransportContractMatrix
         var fixture = await KafkaContainerFixture.EnsureStartedAsync().ConfigureAwait(false);
         Skip.IfNot(
             fixture.IsAvailable,
-            "Docker daemon is not running on this host environment.");
+            "Kafka transport contract is opt-in; set TALARIA_RUN_KAFKA_TRANSPORT_CONTRACT=1 to enable, or ensure Docker is running.");
         return new KafkaTransportRow { Fixture = fixture };
     }
 

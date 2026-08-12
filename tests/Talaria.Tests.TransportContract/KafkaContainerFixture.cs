@@ -13,24 +13,38 @@ namespace Talaria.Tests.TransportContract;
 /// </summary>
 /// <remarks>
 /// <para>
+/// The Kafka row in the matrix is gated behind the
+/// <c>TALARIA_RUN_KAFKA_TRANSPORT_CONTRACT</c> environment variable. On
+/// default CI invocations (env var unset) <see cref="EnsureStartedAsync"/>
+/// returns an <see cref="IsAvailable"/>=<c>false</c> instance immediately
+/// and no Docker work happens — the matrix's per-test
+/// <c>Skip.IfNot</c> suppresses the <c>Kafka_*</c> scenarios cleanly. A
+/// developer who wants to exercise the Kafka row locally sets
+/// <c>TALARIA_RUN_KAFKA_TRANSPORT_CONTRACT=1</c> in their shell before
+/// running <c>dotnet test</c>.
+/// </para>
+/// <para>
+/// Why opt-in? <c>confluentinc/cp-kafka:7.4.0</c> is a ~700 MB image;
+/// pulling it from Docker Hub on a fresh CI runner can take 60-180 s on
+/// a saturated link, plus another 10-30 s for broker boot. The default
+/// CI budget is too tight to make the Kafka row a CI gate, and the
+/// canonical Kafka integration coverage already lives in
+/// <c>Talaria.Transports.Kafka.Tests.KafkaReliabilityIntegrationTests</c>
+/// (gated on <see cref="DockerFactAttribute"/>). This matrix's primary
+/// value is the InMemory row, which is always available and proves the
+/// matrix mechanism works; the Kafka row is a best-effort local-only
+/// demonstration until the ASB sibling (task-25 / task-26) lands.
+/// </para>
+/// <para>
 /// This class deliberately does NOT implement <c>IAsyncLifetime</c> and
 /// the matrix class deliberately does NOT carry a <c>[Collection]</c>
 /// attribute. xUnit's collection-fixture machinery instantiates
 /// <c>IClassFixture&lt;T&gt;</c> implementations during test discovery
-/// for every test class in the collection — and some xUnit versions do so
-/// eagerly, before the first test runs. That would force the Kafka image
-/// pull + broker port wait to happen during discovery, hanging CI when
-/// Docker is present but the image is uncached.
-/// </para>
-/// <para>
-/// By contrast, a static-lazy singleton is purely passive: it does nothing
-/// until <see cref="EnsureStartedAsync"/> is called from a running
-/// <c>Kafka_*</c> test method. xUnit discovery sees only the test class,
-/// its <c>[SkippableFact]</c> methods, and <c>[SkippableFact]</c>'s own
-/// skip-or-run decision — no Docker work happens until a test that
-/// actually needs it executes. On a host without Docker the lazy
-/// initializer returns an <c>IsAvailable=false</c> instance and every
-/// Kafka_* test skips cleanly.
+/// for every test class in the collection, which on a CI runner with
+/// Docker present forces the Kafka image pull + broker port wait to
+/// happen during discovery. By contrast, the static-lazy singleton here
+/// is purely passive: no Docker work happens until a test method that
+/// actually needs the fixture executes.
 /// </para>
 /// <para>
 /// Thread safety: <see cref="EnsureStartedAsync"/> uses a
@@ -43,6 +57,14 @@ namespace Talaria.Tests.TransportContract;
 /// <since>1.0.0</since>
 public sealed class KafkaContainerFixture
 {
+    /// <summary>
+    /// Environment variable that opts in to the Kafka row's container start.
+    /// Set to <c>1</c> to enable; any other value (including unset) skips
+    /// the Kafka row. Mirrors the <c>TALARIA_RUN_*</c> convention used by
+    /// other optional integration suites in the repo.
+    /// </summary>
+    public const string OptInEnvVar = "TALARIA_RUN_KAFKA_TRANSPORT_CONTRACT";
+
     /// <summary>Default port the confluentinc/cp-kafka image exposes for PLAINTEXT listeners.</summary>
     private const int KafkaBrokerPort = 9092;
 
@@ -59,11 +81,11 @@ public sealed class KafkaContainerFixture
     private static Task<KafkaContainerFixture>? _initialization;
 
     /// <summary>
-    /// True when the container start succeeded; false when Docker is
-    /// unavailable or the container failed to come up before
-    /// <see cref="ContainerReadyTimeout"/>. The matrix's per-test
-    /// <c>Skip.IfNot</c> reads this and skips the Kafka_* scenarios when
-    /// false.
+    /// True when the container start succeeded; false when the opt-in
+    /// env var is unset, Docker is unavailable, or the container failed
+    /// to come up before <see cref="ContainerReadyTimeout"/>. The
+    /// matrix's per-test <c>Skip.IfNot</c> reads this and skips the
+    /// Kafka_* scenarios when false.
     /// </summary>
     public bool IsAvailable { get; private set; }
 
@@ -76,8 +98,9 @@ public sealed class KafkaContainerFixture
 
     /// <summary>
     /// Idempotent lazy initializer. First call blocks on container start
-    /// (or returns an <c>IsAvailable=false</c> instance when Docker is
-    /// absent). Subsequent calls return the same instance.
+    /// (or returns an <c>IsAvailable=false</c> instance when the opt-in
+    /// env var is unset, Docker is unavailable, or the container start
+    /// times out). Subsequent calls return the same instance.
     /// </summary>
     public static Task<KafkaContainerFixture> EnsureStartedAsync()
     {
@@ -119,6 +142,18 @@ public sealed class KafkaContainerFixture
     private static async Task<KafkaContainerFixture> InitializeCoreAsync()
     {
         var fixture = new KafkaContainerFixture();
+
+        // Opt-in gate: unless TALARIA_RUN_KAFKA_TRANSPORT_CONTRACT=1 is set,
+        // short-circuit and return an IsAvailable=false instance. This keeps
+        // the Kafka row from running on default CI invocations, where the
+        // confluentinc/cp-kafka:7.4.0 image pull + broker startup can exceed
+        // CI's job budget even with a five-minute wait strategy.
+        var optIn = Environment.GetEnvironmentVariable(OptInEnvVar);
+        if (optIn != "1")
+        {
+            fixture.IsAvailable = false;
+            return fixture;
+        }
 
         if (!DockerFactAttribute.IsDockerRunning())
         {
