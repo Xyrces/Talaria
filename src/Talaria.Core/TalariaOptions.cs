@@ -74,4 +74,22 @@ public sealed class TalariaOptions
     /// non-production environments for easier debugging.
     /// </summary>
     public bool IncludeExceptionDetailsInDlq { get; set; }
+
+    /// <summary>
+    /// Maximum wait before <c>Talaria.Transports.AzureServiceBus.Deferral.DeferralAdapter</c>
+    /// schedules a deferral via the broker's native ScheduledEnqueueTime rather than
+    /// the durable <see cref="Abstractions.IDeferralStore"/>. Defaults to ten minutes,
+    /// comfortably within Azure Service Bus's scheduled-message envelope. Must not be
+    /// negative.
+    /// </summary>
+    public TimeSpan AzureServiceBusDeferralShortTermCutoff { get; set; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// Maximum payload size (in bytes) the Azure Service Bus deferral adapter is
+    /// willing to schedule as a short-term deferral. Larger payloads fall through to
+    /// the durable <see cref="Abstractions.IDeferralStore"/> + sweeper path so the
+    /// ASB Standard tier's 256 KB per-message limit is never exceeded by the
+    /// broker-side scheduling path. Must be greater than zero.
+    /// </summary>
+    public int AzureServiceBusDeferralMaxPayloadBytes { get; set; } = 256 * 1024;
 }
