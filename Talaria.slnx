@@ -7,6 +7,7 @@
     <Project Path="src/Talaria.StateStores.Redis/Talaria.StateStores.Redis.csproj" />
     <Project Path="src/Talaria.Transports.InMemory/Talaria.Transports.InMemory.csproj" />
     <Project Path="src/Talaria.Transports.Kafka/Talaria.Transports.Kafka.csproj" />
+    <Project Path="src/Talaria.Transports.AzureServiceBus/Talaria.Transports.AzureServiceBus.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Talaria.AppHost.Tests/Talaria.AppHost.Tests.csproj" />
