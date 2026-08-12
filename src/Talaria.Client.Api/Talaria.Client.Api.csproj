@@ -17,6 +17,7 @@
     <ProjectReference Include="..\Talaria.Transports.Kafka\Talaria.Transports.Kafka.csproj" />
     <ProjectReference Include="..\Talaria.Transports.InMemory\Talaria.Transports.InMemory.csproj" />
     <ProjectReference Include="..\Talaria.StateStores.Redis\Talaria.StateStores.Redis.csproj" />
+    <ProjectReference Include="..\Talaria.Transports.AzureServiceBus\Talaria.Transports.AzureServiceBus.csproj" />
   </ItemGroup>
 
 </Project>
