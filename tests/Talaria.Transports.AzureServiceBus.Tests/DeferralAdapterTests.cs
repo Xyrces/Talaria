@@ -4,8 +4,6 @@ using System;
 using System.Linq;
 using System.Threading.Tasks;
 using Azure;
-using Microsoft.Extensions.Options;
-using Talaria.Core;
 using Talaria.Core.Abstractions;
 using Talaria.Transports.AzureServiceBus.Deferral;
 using Talaria.Transports.InMemory;
@@ -33,17 +31,11 @@ public class DeferralAdapterTests
             ShortTermCutoff = Cutoff,
             MaxPayloadBytes = MaxBytes,
         };
-        var talariaOptions = Options.Create(new TalariaOptions
-        {
-            DeferralBackoff = TimeSpan.FromMilliseconds(50),
-            DeferralLeaseTimeout = TimeSpan.FromSeconds(30),
-        });
         var clock = new FakeTimeProvider();
         var adapter = new DeferralAdapter(
             scheduler,
             longTerm,
             adapterOptions,
-            talariaOptions,
             clock);
         return (adapter, scheduler, longTerm, clock);
     }

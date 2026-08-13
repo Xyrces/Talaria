@@ -79,7 +79,6 @@ public static class AzureServiceBusDeferralExtensions
             sp.GetRequiredService<IServiceBusMessageScheduler>(),
             ResolvePriorDurableStore(sp, priorDescriptors),
             sp.GetRequiredService<DeferralAdapterOptions>(),
-            sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<Talaria.Core.TalariaOptions>>(),
             sp.GetService<TimeProvider>()));
 
         return builder;

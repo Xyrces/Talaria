@@ -49,16 +49,6 @@ internal sealed class TalariaOptionsValidator : IValidateOptions<TalariaOptions>
         }
 
 
-        if (options.AzureServiceBusDeferralShortTermCutoff < TimeSpan.Zero)
-        {
-            return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.AzureServiceBusDeferralShortTermCutoff)} must not be negative.");
-        }
-
-        if (options.AzureServiceBusDeferralMaxPayloadBytes <= 0)
-        {
-            return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.AzureServiceBusDeferralMaxPayloadBytes)} must be greater than zero.");
-        }
-
         return ValidateOptionsResult.Success;
     }
 }
