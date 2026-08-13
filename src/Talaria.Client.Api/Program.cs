@@ -5,6 +5,7 @@ using Talaria.Client.Api.Sagas;
 using Talaria.Core.Abstractions;
 using Talaria.Core.Registration;
 using Talaria.StateStores.Redis;
+using Talaria.Transports.AzureServiceBus;
 using Talaria.Transports.InMemory;
 using Talaria.Transports.Kafka;
 
@@ -32,6 +33,37 @@ if (messagingProvider.Equals("InMemory", StringComparison.OrdinalIgnoreCase))
         .UseInMemoryStateStore()
         .UseInMemoryIdempotencyStore()
         .UseInMemoryDeferralStore();
+}
+else if (messagingProvider.Equals("ServiceBus", StringComparison.OrdinalIgnoreCase))
+{
+    // ASB transport: connection string is read from Messaging:ServiceBus:ConnectionString
+    // or the "servicebus" connection-string section. The local Service Bus emulator
+    // connection string ("UseDevelopmentEnvironment=true") is the saga sample's default
+    // so the sample is runnable without an Azure subscription.
+    var serviceBusConnection = builder.Configuration["Messaging:ServiceBus:ConnectionString"]
+        ?? builder.Configuration.GetConnectionString("servicebus")
+        ?? "UseDevelopmentEnvironment=true";
+
+    talaria
+        .UseAzureServiceBusTransport(opts =>
+        {
+            opts.ConnectionString = serviceBusConnection;
+        })
+        .UseRedisStateStore(opts =>
+        {
+            opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
+            opts.KeyPrefix = redisKeyPrefix;
+        })
+        .UseRedisIdempotencyStore(opts =>
+        {
+            opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
+            opts.KeyPrefix = redisKeyPrefix;
+        })
+        .UseRedisDeferralStore(opts =>
+        {
+            opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
+            opts.KeyPrefix = redisKeyPrefix;
+        });
 }
 else
 {

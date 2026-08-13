@@ -1,6 +1,6 @@
 # Talaria Saga Engine
 
-Talaria is a distributed messaging and saga orchestration library for **.NET** (multi-targeting `net8.0`, `net9.0`, `net10.0`) built on **Confluent Kafka** and **Redis**, with a zero-dependency in-memory provider for lightweight single-process deployments, prototyping, and tests.
+Talaria is a distributed messaging and saga orchestration library for **.NET** (multi-targeting `net8.0`, `net9.0`, `net10.0`) built on **Confluent Kafka**, **Azure Service Bus**, and **Redis**, with a zero-dependency in-memory provider for lightweight single-process deployments, prototyping, and tests.
 
 ## Delivery guarantees — stated precisely
 
@@ -14,7 +14,7 @@ Talaria provides **at-least-once delivery with idempotent processing**:
 
 ## Core Features
 
-- **Decoupled architecture:** provider-agnostic abstractions (`ITransport`, `IStateStore`, `IIdempotencyStore`, `IDeferralStore`, `IOutboxStore`) with Kafka/Redis and in-memory implementations.
+- **Decoupled architecture:** provider-agnostic abstractions (`ITransport`, `IStateStore`, `IIdempotencyStore`, `IDeferralStore`, `IOutboxStore`, `IIdempotencyVerifier`, `ITopologyProvisioner`, `IDeadLetterHandler`) with Kafka, Azure Service Bus, Redis, and in-memory implementations.
 - **Saga orchestration:** strongly typed state machines via `MapSaga<TState>` with explicit correlation and explicit dispatch routing (`DispatchTo`).
 - **Idempotency:** fencing-token locks (`SETNX` on Redis) filter duplicate `MessageId`s across a cluster; a stale lock holder can never release another worker's lock.
 - **Transactional outbox:** saga state transitions and their outbound messages are staged atomically (single Lua script on Redis, one lock in-memory); a background relay publishes staged messages with lease + fencing semantics. Registered automatically by `UseRedisStateStore()` / `UseInMemoryStateStore()`.
@@ -81,6 +81,41 @@ builder.Services.AddTalaria()
 ```
 
 All `UseRedis*` calls share one options registration — configure callbacks accumulate, so `KeyPrefix` only needs to be set once. `UseRedisStateStore` also registers the Redis transactional outbox used for saga dispatch.
+
+```csharp
+// Azure Service Bus transport: same saga code, swap the transport extension.
+// Connection string comes from the namespace's "Shared access policies" blade,
+// or from the Service Bus emulator ("UseDevelopmentEnvironment=true") for local runs.
+builder.Services.AddTalaria()
+    .UseAzureServiceBusTransport(opts =>
+    {
+        opts.ConnectionString = builder.Configuration.GetConnectionString("servicebus")
+            ?? "UseDevelopmentEnvironment=true";
+    })
+    .UseRedisStateStore(opts =>
+    {
+        opts.Configuration = builder.Configuration.GetConnectionString("redis")!;
+        opts.KeyPrefix = "mystate:";
+    })
+    .UseRedisIdempotencyStore(opts =>
+    {
+        opts.Configuration = builder.Configuration.GetConnectionString("redis")!;
+        opts.KeyPrefix = "mystate:";
+    })
+    .UseRedisDeferralStore(opts =>
+    {
+        opts.Configuration = builder.Configuration.GetConnectionString("redis")!;
+        opts.KeyPrefix = "mystate:";
+    });
+```
+
+> The ASB transport implements the same `ITransport` / `IConsumer<T>` / `IProducer<T>` contract as Kafka and InMemory, so existing saga code runs unchanged — see [`src/Talaria.Client.Api/Sagas/OnboardingSaga.cs`](src/Talaria.Client.Api/Sagas/OnboardingSaga.cs) and the `ServiceBus` branch of the `Messaging:Provider` switch in [`src/Talaria.Client.Api/Program.cs`](src/Talaria.Client.Api/Program.cs).
+>
+> The ASB transport currently provides buffered transactional semantics (mirroring the in-memory transport): produces obtained via `BeginTransactionAsync` are committed atomically when the session commits and discarded on abort. Consumer-offset transactions (KIP-98-style exactly-once with the broker) are not yet implemented — the saga state store + idempotency store provide the same end-to-end exactly-once guarantees as the InMemory transport, and saga step handlers must remain idempotent.
+>
+> Entity provisioning (queues, topics, subscriptions) is the host's responsibility and is exposed through the `ITopologyProvisioner` abstraction. The transport exposes a convenience `EnsureEntityAsync(name, kind, ct)` helper for the saga sample; production deployments should call `ITopologyProvisioner.ProvisionAsync(declarations, ct)` from their startup code so the host's full topology is declared in one place.
+>
+> Native-dedup short-circuit: ASB surfaces a built-in `MessageId`-based duplicate detection window on queues and topics. Hosts that opt in via `ITransport` implementations of `IIdempotencyVerifier` let the engine skip deserialization + handler invocation for duplicates — see [`src/Talaria.Core/Abstractions/IIdempotencyVerifier.cs`](src/Talaria.Core/Abstractions/IIdempotencyVerifier.cs).
 
 ```csharp
 // Zero-dependency configuration (in-memory): lightweight single-process
@@ -159,7 +194,7 @@ Notes:
 
 ## ⚠️ Sample API
 
-`src/Talaria.Client.Api` is a demo, not production-hardened: it has no authentication or authorization, and its `/api/diagnostics/*` endpoint exists for integration tests. Do not deploy it as-is.
+`src/Talaria.Client.Api` is a demo, not production-hardened: it has no authentication or authorization, and its `/api/diagnostics/*` endpoint exists for integration tests. The `Messaging:Provider` configuration switch selects between the Kafka, Azure Service Bus, and in-memory transports — flip the value to `Kafka`, `ServiceBus`, or `InMemory` and the existing onboarding saga (`src/Talaria.Client.Api/Sagas/OnboardingSaga.cs`) runs over the chosen transport with no code changes. Do not deploy it as-is.
 
 ---
 
