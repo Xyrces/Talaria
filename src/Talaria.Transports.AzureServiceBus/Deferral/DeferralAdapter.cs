@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 using System.Collections.Generic;
-using Microsoft.Extensions.Options;
-using Talaria.Core;
 using Talaria.Core.Abstractions;
 
 namespace Talaria.Transports.AzureServiceBus.Deferral;
@@ -44,7 +42,6 @@ public sealed class DeferralAdapter : IDeferralStore
     private readonly IServiceBusMessageScheduler _scheduler;
     private readonly IDeferralStore _longTermStore;
     private readonly DeferralAdapterOptions _adapterOptions;
-    private readonly TalariaOptions _options;
     private readonly TimeProvider _clock;
 
     /// <summary>
@@ -54,24 +51,20 @@ public sealed class DeferralAdapter : IDeferralStore
     /// <param name="scheduler">Broker-side send/schedule seam.</param>
     /// <param name="longTermStore">Durable store for long/deadline deferrals and for all lease acquire/complete/abandon flows.</param>
     /// <param name="adapterOptions">Routing thresholds.</param>
-    /// <param name="options">Host options (read-only here; passed in so a test can inject defaults).</param>
     /// <param name="clock">Time provider \u2014 injected so tests can pin "now".</param>
     internal DeferralAdapter(
         IServiceBusMessageScheduler scheduler,
         IDeferralStore longTermStore,
         DeferralAdapterOptions adapterOptions,
-        IOptions<TalariaOptions> options,
         TimeProvider? clock = null)
     {
         ArgumentNullException.ThrowIfNull(scheduler);
         ArgumentNullException.ThrowIfNull(longTermStore);
         ArgumentNullException.ThrowIfNull(adapterOptions);
-        ArgumentNullException.ThrowIfNull(options);
 
         _scheduler = scheduler;
         _longTermStore = longTermStore;
         _adapterOptions = adapterOptions;
-        _options = options.Value;
         _clock = clock ?? TimeProvider.System;
     }
 
@@ -121,14 +114,6 @@ public sealed class DeferralAdapter : IDeferralStore
         if (payloadBytes > _adapterOptions.MaxPayloadBytes)
         {
             return false;
-        }
-
-        // The defaults from TalariaOptions take over only when the adapter options
-        // explicitly asked for the engine defaults (zero / TimeSpan.Zero) \u2014 useful for
-        // tests, never expected from production wiring.
-        if (_adapterOptions.ShortTermCutoff == TimeSpan.Zero && _options.AzureServiceBusDeferralShortTermCutoff > TimeSpan.Zero)
-        {
-            return (message.DueAt - _clock.GetUtcNow()) <= _options.AzureServiceBusDeferralShortTermCutoff;
         }
 
         return true;
