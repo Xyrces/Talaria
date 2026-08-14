@@ -64,24 +64,14 @@ public sealed class KafkaTransportRow : TransportContractRow
 
     public override async Task<List<MessageEnvelope<T>>> ReadAllFromTopicAsync<T>(TransportHarness harness, string topic, TimeSpan timeout)
     {
-        var list = new List<MessageEnvelope<T>>();
         // Use a fresh consumer-group per call so the read is independent of any
         // consumer instance the scenario under test may already have.
         await using var consumer = await harness.Transport.CreateConsumerAsync<T>(
             topic,
             new ConsumerOptions { ConsumerGroup = $"test-reader-{Guid.NewGuid():N}" });
 
-        // Drain within the budget. A short per-message timeout means an empty
-        // topic returns quickly; the loop exits as soon as a poll yields null.
-        var deadline = DateTime.UtcNow + timeout;
-        while (DateTime.UtcNow < deadline)
-        {
-            var remaining = deadline - DateTime.UtcNow;
-            if (remaining <= TimeSpan.Zero) break;
-            var envelope = await TransportHarness.TryNextAsync(consumer, remaining);
-            if (envelope is null) break;
-            list.Add(envelope);
-        }
-        return list;
+        // Drain within a single enumeration so Kafka does not re-subscribe
+        // (and rewind to offset 0) between messages.
+        return await TransportHarness.DrainAsync<T>(consumer, timeout);
     }
 }
