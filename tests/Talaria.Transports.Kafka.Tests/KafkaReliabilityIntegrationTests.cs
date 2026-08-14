@@ -149,14 +149,19 @@ public class KafkaReliabilityIntegrationTests : IAsyncLifetime
         var consumer2 = await transport.CreateConsumerAsync<string>(topic, new ConsumerOptions { ConsumerGroup = group });
         var replay = await TryNextAsync(consumer2, TimeSpan.FromSeconds(8));
         Assert.Null(replay);
+        await consumer2.DisposeAsync();
 
-        // ...but newly produced messages are still delivered.
+        // ...but newly produced messages are still delivered (on a fresh consumer because
+        // each consumer instance may only be enumerated once).
         await producer.ProduceAsync("second", new MessageHeaders { MessageId = "m-2" });
-        var second = await TryNextAsync(consumer2, TimeSpan.FromSeconds(15));
+        // Give the group a moment to release the previous member before the new one joins.
+        await Task.Delay(TimeSpan.FromSeconds(1));
+        var consumer3 = await transport.CreateConsumerAsync<string>(topic, new ConsumerOptions { ConsumerGroup = group });
+        var second = await TryNextAsync(consumer3, TimeSpan.FromSeconds(15));
         Assert.NotNull(second);
         Assert.Equal("second", second!.Payload);
 
-        await consumer2.DisposeAsync();
+        await consumer3.DisposeAsync();
     }
 
     [DockerFact]
