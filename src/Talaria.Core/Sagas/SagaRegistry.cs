@@ -6,13 +6,35 @@ namespace Talaria.Core.Sagas;
 /// Registry of all sagas mapped via <c>MapSaga</c>.
 /// </summary>
 /// <since>1.0.0</since>
-public class SagaRegistry
+public sealed class SagaRegistry
 {
     private readonly List<SagaRegistration> _registrations = new();
+    private readonly object _lock = new();
     private bool _sealed;
 
+    /// <summary>True if the registry has been sealed and no further registrations can be added.</summary>
+    public bool IsSealed
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _sealed;
+            }
+        }
+    }
+
     /// <summary>The registrations added so far, in insertion order.</summary>
-    public IReadOnlyList<SagaRegistration> Registrations => _registrations;
+    public IReadOnlyList<SagaRegistration> Registrations
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _registrations.ToList();
+            }
+        }
+    }
 
     /// <summary>
     /// Seals the registry so no further saga registrations can be added.
@@ -20,7 +42,10 @@ public class SagaRegistry
     /// </summary>
     internal void Seal()
     {
-        _sealed = true;
+        lock (_lock)
+        {
+            _sealed = true;
+        }
     }
 
     /// <summary>Adds a saga registration.</summary>
@@ -28,15 +53,18 @@ public class SagaRegistry
     /// <exception cref="InvalidOperationException">
     /// Thrown when the registry has already been sealed by the hosted service.
     /// </exception>
-    public void Add(SagaRegistration registration)
+    internal void Add(SagaRegistration registration)
     {
-        if (_sealed)
+        lock (_lock)
         {
-            throw new InvalidOperationException(
-                "Saga registrations are captured when the host starts. " +
-                "Call MapSaga before the host runs (e.g. during startup, before app.Run()).");
-        }
+            if (_sealed)
+            {
+                throw new InvalidOperationException(
+                    "Saga registrations are captured when the host starts. " +
+                    "Call MapSaga before the host runs (e.g. during startup, before app.Run()).");
+            }
 
-        _registrations.Add(registration);
+            _registrations.Add(registration);
+        }
     }
 }
