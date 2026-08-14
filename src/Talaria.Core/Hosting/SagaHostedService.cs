@@ -101,6 +101,9 @@ public sealed class SagaHostedService : BackgroundService
             _options,
             _logger);
 
+        // Seal and snapshot the registry before consumers spin up — late registrations throw.
+        _registry.Seal();
+
         // Group every step of every saga by topic — one consumer per topic.
         var stepsByTopic = _registry.Registrations
             .SelectMany(r => r.Steps.Select(s => new StepRoute(r, s, CreateStateStoreAccessor(r.StateType))))

@@ -46,7 +46,8 @@ public sealed class TalariaHostedService : BackgroundService
             _logger);
         _pipeline = pipeline;
 
-        // Snapshot the registry before consumers spin up — late registrations are ignored.
+        // Seal and snapshot the registry before consumers spin up — late registrations throw.
+        _registry.Seal();
         var registrations = _registry.Registrations.ToList();
 
         var tasks = registrations.Select(registration =>
