@@ -84,6 +84,30 @@ public sealed class TransportHarness : IAsyncDisposable
     }
 
     /// <summary>
+    /// Drains every envelope from <paramref name="consumer"/> within a single
+    /// enumeration of <see cref="IConsumer{T}.ConsumeAsync"/> until the timeout
+    /// expires. Holding one enumeration prevents transports such as Kafka from
+    /// re-subscribing (and rewinding to the earliest offset) between messages.
+    /// </summary>
+    public static async Task<List<MessageEnvelope<T>>> DrainAsync<T>(IConsumer<T> consumer, TimeSpan timeout)
+    {
+        var received = new List<MessageEnvelope<T>>();
+        using var cts = new CancellationTokenSource(timeout);
+        try
+        {
+            await foreach (var env in consumer.ConsumeAsync(cts.Token))
+            {
+                received.Add(env);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Timeout elapsed — expected when the topic is drained.
+        }
+        return received;
+    }
+
+    /// <summary>
     /// Yields a single envelope or throws when the consumer completes without
     /// yielding. Mirrors the InMemory contract helper used by every
     /// redelivery/backlog assertion.
@@ -132,6 +156,14 @@ public abstract class TransportContractRow : IAsyncLifetime
     /// rows that require Docker or a remote emulator hook in here.
     /// </summary>
     public virtual bool IsAvailable => true;
+
+    /// <summary>
+    /// True when the transport routes nacked messages to a transport-wide
+    /// application dead-letter queue (<c>__app.dlq</c>) in addition to the
+    /// per-topic DLQ. Rows that do not implement an app-wide DLQ override
+    /// this to <c>false</c> so the matrix skips that assertion.
+    /// </summary>
+    public virtual bool SupportsApplicationDeadLetterQueue => false;
 
     /// <summary>
     /// Constructs a fresh <see cref="TransportHarness"/> for one scenario.

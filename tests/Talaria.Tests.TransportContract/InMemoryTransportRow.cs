@@ -19,6 +19,8 @@ public sealed class InMemoryTransportRow : TransportContractRow
 
     public override bool IsAvailable => true;
 
+    public override bool SupportsApplicationDeadLetterQueue => true;
+
     public override Task<TransportHarness> CreateAsync(CancellationToken ct = default)
     {
         var transport = new InMemoryTransport();
