@@ -213,12 +213,29 @@ public class EmulatorIntegrationTests : IAsyncLifetime
             await session.CommitAsync();
         }
 
-        var first = await FirstAsync(consumer, TimeSpan.FromSeconds(20));
-        var second = await FirstAsync(consumer, TimeSpan.FromSeconds(20));
-        Assert.NotNull(first);
-        Assert.NotNull(second);
-        Assert.Equal("tx-1", first!.Payload);
-        Assert.Equal("tx-2", second!.Payload);
+        // Read both messages within a single enumeration; a second call to
+        // ConsumeAsync on the same consumer instance is forbidden by contract.
+        var received = new List<MessageEnvelope<string>>();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        try
+        {
+            await foreach (var env in consumer.ConsumeAsync(cts.Token))
+            {
+                received.Add(env);
+                if (received.Count == 2)
+                {
+                    break;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Timeout — fall through to the assertion.
+        }
+
+        Assert.Equal(2, received.Count);
+        Assert.Equal("tx-1", received[0].Payload);
+        Assert.Equal("tx-2", received[1].Payload);
     }
 
     [EmulatorFact]

@@ -4,6 +4,7 @@ using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Channels;
 using Azure.Messaging.ServiceBus;
 using Microsoft.Extensions.Logging;
@@ -53,6 +54,7 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
     private Channel<MessageEnvelope<T>>? _activeChannel;
     private CancellationTokenSource? _activeReaderCts;
     private int _disposed;
+    private int _consuming;
 
     public AzureServiceBusConsumer(
         ServiceBusProcessor processor,
@@ -74,8 +76,21 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
 
     private readonly record struct PendingEntry(ServiceBusReceivedMessage Message, ProcessMessageEventArgs Args, MessageEnvelope<T> Envelope);
 
+    private const string SingleEnumerationMessage =
+        "ConsumeAsync may only be enumerated once per consumer instance. Create a new consumer to restart consumption.";
+
     /// <inheritdoc />
-    public async IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsync(
+    public IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsync(CancellationToken ct = default)
+    {
+        if (Interlocked.Exchange(ref _consuming, 1) != 0)
+        {
+            throw new InvalidOperationException(SingleEnumerationMessage);
+        }
+
+        return ConsumeAsyncCore(ct);
+    }
+
+    private async IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsyncCore(
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         var channel = Channel.CreateBounded<MessageEnvelope<T>>(new BoundedChannelOptions(_bufferCapacity)

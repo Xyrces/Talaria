@@ -3,6 +3,7 @@
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Channels;
 using Confluent.Kafka;
 using Microsoft.Extensions.Logging;
@@ -47,6 +48,7 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
     private readonly CancellationTokenSource _disposeCts = new();
     private volatile Task? _pumpTask;
     private int _disposed;
+    private int _consuming;
 
     public KafkaConsumer(
         IConsumer<string, byte[]> consumer,
@@ -66,7 +68,20 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
         _includeDlqExceptionDetails = includeDlqExceptionDetails;
     }
 
-    public async IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsync([EnumeratorCancellation] CancellationToken ct = default)
+    private const string SingleEnumerationMessage =
+        "ConsumeAsync may only be enumerated once per consumer instance. Create a new consumer to restart consumption.";
+
+    public IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsync(CancellationToken ct = default)
+    {
+        if (Interlocked.Exchange(ref _consuming, 1) != 0)
+        {
+            throw new InvalidOperationException(SingleEnumerationMessage);
+        }
+
+        return ConsumeAsyncCore(ct);
+    }
+
+    private async IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsyncCore([EnumeratorCancellation] CancellationToken ct = default)
     {
         var channel = Channel.CreateBounded<MessageEnvelope<T>>(new BoundedChannelOptions(_bufferCapacity)
         {

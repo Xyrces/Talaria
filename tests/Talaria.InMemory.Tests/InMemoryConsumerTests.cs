@@ -53,6 +53,43 @@ public class InMemoryConsumerTests
     }
 
     [Fact]
+    public async Task ConsumeAsync_SecondEnumeration_ThrowsInvalidOperationException()
+    {
+        var (ch, _, _, consumer) = CreateSut();
+        await ch.Writer.WriteAsync(new InMemoryMessage { PayloadJson = "\"first\"", Headers = new MessageHeaders() });
+        ch.Writer.Complete();
+
+        // First enumeration completes normally.
+        var first = new List<MessageEnvelope<string>>();
+        await foreach (var env in consumer.ConsumeAsync())
+        {
+            first.Add(env);
+        }
+        Assert.Single(first);
+
+        // A second call on the same instance is forbidden.
+        var ex = Assert.Throws<InvalidOperationException>(() => consumer.ConsumeAsync().GetAsyncEnumerator());
+        Assert.Equal("ConsumeAsync may only be enumerated once per consumer instance. Create a new consumer to restart consumption.", ex.Message);
+    }
+
+    [Fact]
+    public async Task ConsumeAsync_SecondEnumerationWhileFirstActive_ThrowsInvalidOperationException()
+    {
+        var (ch, _, _, consumer) = CreateSut();
+        await ch.Writer.WriteAsync(new InMemoryMessage { PayloadJson = "\"first\"", Headers = new MessageHeaders() });
+
+        // Start the first enumeration but do not complete it.
+        var enumerator = consumer.ConsumeAsync().GetAsyncEnumerator();
+        Assert.True(await enumerator.MoveNextAsync());
+        Assert.Equal("first", enumerator.Current.Payload);
+
+        // A concurrent/second call on the same instance is forbidden even though
+        // the first enumeration is still active.
+        var ex = Assert.Throws<InvalidOperationException>(() => consumer.ConsumeAsync().GetAsyncEnumerator());
+        Assert.Equal("ConsumeAsync may only be enumerated once per consumer instance. Create a new consumer to restart consumption.", ex.Message);
+    }
+
+    [Fact]
     public async Task NackAsync_SendsToDlqAndAppDlq()
     {
         var (_, dlqBus, appDlqBus, consumer) = CreateSut();
