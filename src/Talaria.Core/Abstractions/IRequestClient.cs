@@ -28,7 +28,7 @@ public interface IRequestClient<TRequest> where TRequest : class
     /// </summary>
     /// <typeparam name="TResponse">The expected CLR response type.</typeparam>
     /// <param name="request">The request payload.</param>
-    /// <param name="ct">Cancellation token. When not supplied, <see cref="TalariaOptions.DefaultRequestTimeout"/> is applied.</param>
+    /// <param name="ct">Cancellation token; cancels the wait early. <see cref="TalariaOptions.DefaultRequestTimeout"/> always applies and can only be shortened by cancelling this token.</param>
     /// <returns>A task that completes with the response payload.</returns>
     /// <exception cref="RequestTimeoutException">The response was not received before the timeout elapsed.</exception>
     /// <exception cref="RequestFaultException">The responder published a fault response.</exception>

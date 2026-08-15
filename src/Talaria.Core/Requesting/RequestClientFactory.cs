@@ -32,7 +32,6 @@ public sealed class RequestClientFactory : IAsyncDisposable
     private readonly string _consumerGroup;
 
     private Task? _initializationTask;
-    private IConsumer<JsonElement>? _inboxConsumer;
     private Task? _pumpTask;
     private CancellationTokenSource? _pumpCts;
     private bool _disposed;
@@ -204,7 +203,12 @@ public sealed class RequestClientFactory : IAsyncDisposable
             }
 
             _pumpCts = new CancellationTokenSource();
-            _pumpTask = RunPumpAsync(_pumpCts.Token);
+            // Supervised like the engine consumer loops: a faulting inbox pump is
+            // restarted with backoff instead of silently hanging every pending and
+            // future request. Pending requests survive restarts; uncommitted inbox
+            // messages redeliver to the replacement consumer.
+            _pumpTask = ConsumerSupervision.RunSupervisedAsync(
+                $"request-inbox:{_inboxTopic}", RunPumpAsync, _logger, _pumpCts.Token);
         }
         finally
         {
@@ -214,19 +218,19 @@ public sealed class RequestClientFactory : IAsyncDisposable
 
     private async Task RunPumpAsync(CancellationToken ct)
     {
+        var inboxConsumer = await _transport.CreateConsumerAsync<JsonElement>(
+            _inboxTopic,
+            new ConsumerOptions { ConsumerGroup = _consumerGroup },
+            ct).ConfigureAwait(false);
+
         try
         {
-            _inboxConsumer = await _transport.CreateConsumerAsync<JsonElement>(
-                _inboxTopic,
-                new ConsumerOptions { ConsumerGroup = _consumerGroup },
-                ct).ConfigureAwait(false);
-
-            await foreach (var envelope in _inboxConsumer.ConsumeAsync(ct).ConfigureAwait(false))
+            await foreach (var envelope in inboxConsumer.ConsumeAsync(ct).ConfigureAwait(false))
             {
                 var requestId = envelope.Headers.RequestId;
                 if (string.IsNullOrEmpty(requestId) || !_pending.TryRemove(requestId, out var pending))
                 {
-                    await _inboxConsumer.CommitAsync(envelope, ct).ConfigureAwait(false);
+                    await inboxConsumer.CommitAsync(envelope, ct).ConfigureAwait(false);
                     continue;
                 }
 
@@ -261,16 +265,12 @@ public sealed class RequestClientFactory : IAsyncDisposable
                     }
                 }
 
-                await _inboxConsumer.CommitAsync(envelope, ct).ConfigureAwait(false);
+                await inboxConsumer.CommitAsync(envelope, ct).ConfigureAwait(false);
             }
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        finally
         {
-            // Expected on disposal.
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Request/response inbox pump for '{Inbox}' faulted.", _inboxTopic);
+            await inboxConsumer.DisposeAsync().ConfigureAwait(false);
         }
     }
 
@@ -303,11 +303,6 @@ public sealed class RequestClientFactory : IAsyncDisposable
         _pumpCts?.Dispose();
         _initLock.Dispose();
         _pumpStartLock.Dispose();
-
-        if (_inboxConsumer is not null)
-        {
-            await _inboxConsumer.DisposeAsync().ConfigureAwait(false);
-        }
 
         await _producerCache.DisposeAsync().ConfigureAwait(false);
     }

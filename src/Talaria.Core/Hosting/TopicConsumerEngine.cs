@@ -276,6 +276,12 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
                         await PublishResponseAsync(registration, replyTo, response, envelope.Headers, ct);
                     }
                 }
+                else if (isRequest)
+                {
+                    _logger.LogWarning(
+                        "Request handler for topic '{Topic}' returned null; no response will be published and the requester will time out.",
+                        registration.TopicName);
+                }
 
                 await pipeline.CompleteAsync(gate.Lock, consumer, envelope, ct);
 

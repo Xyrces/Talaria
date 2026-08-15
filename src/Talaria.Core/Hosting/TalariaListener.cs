@@ -85,7 +85,7 @@ public sealed class TalariaListener : IAsyncDisposable
             transport,
             options,
             loggerFactory ?? new SingleLoggerFactory(logger),
-            provisioner: null);
+            serviceProvider?.GetService<ITopologyProvisioner>());
     }
 
     /// <summary>

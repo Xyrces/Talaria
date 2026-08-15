@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Talaria.Core.Abstractions;
@@ -105,7 +106,7 @@ public sealed class TalariaBuilder
     public TalariaBuilder AddRequestClient<TRequest>(string topic)
         where TRequest : class
     {
-        Services.AddSingleton<RequestClientFactory>(sp =>
+        Services.TryAddSingleton<RequestClientFactory>(sp =>
         {
             var transport = sp.GetRequiredService<ITransport>();
             var options = sp.GetRequiredService<IOptions<TalariaOptions>>().Value;
