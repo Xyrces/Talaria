@@ -21,8 +21,8 @@ Talaria is currently in pre-1.0 development. Until the first stable release,
 
 | Branch  | Supported                        |
 | ------- | -------------------------------- |
-| `main`  | ✅ — backported security fixes   |
-| `<other>` | ❌ — no backports; please upgrade |
+| `main`    | Supported — backported security fixes |
+| `<other>` | Not supported — no backports; please upgrade |
 
 Once a stable `1.0` is released, this table will expand to cover the current
 major release and the previous major release for a minimum of 12 months.
@@ -80,7 +80,7 @@ anonymous.
 ## Security-relevant policies
 
 These are the policies that shape how Talaria handles security-sensitive
-code paths. They are not exhaustive — they document the assumptions that
+code paths. They are not exhaustive; they document the assumptions that
 security-sensitive changes should preserve.
 
 ### Transport
@@ -109,7 +109,7 @@ security-sensitive changes should preserve.
   on commit; the store rejects commits from a stale lease holder. This is
   the only correctness guarantee against double-publish on relay crash.
 - `TalariaOptions.IncludeExceptionDetailsInDlq` defaults to `false`.
-  Exception detail in DLQ headers can leak payload internals — leave it
+  Exception detail in DLQ headers can leak payload internals; leave it
   off unless you control the consumer.
 
 ### Idempotency
