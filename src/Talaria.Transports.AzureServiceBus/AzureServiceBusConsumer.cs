@@ -249,9 +249,15 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
             "Azure Service Bus processor error on entity {Entity}: {ErrorSource} ({FullyQualifiedNamespace}).",
             _topic, args.ErrorSource, args.FullyQualifiedNamespace);
 
-        // Non-fatal errors are recoverable; fatal errors (AMQP link failures,
-        // credentials expiry) bubble through the exception path so the host's
-        // supervised loop can restart with backoff.
+        var isTransient = args.Exception is ServiceBusException sbEx && sbEx.IsTransient;
+        if (!isTransient)
+        {
+            // Fatal errors (non-transient ServiceBusException, AMQP link failures,
+            // credentials expiry, or any other exception) must fault the active
+            // enumeration so the host's supervised loop can restart with backoff.
+            _activeChannel?.Writer.TryComplete(args.Exception);
+        }
+
         return Task.CompletedTask;
     }
 

@@ -21,9 +21,10 @@ public static class TalariaServiceExtensions
     /// <returns>A <see cref="TalariaBuilder"/> for fluent configuration.</returns>
     /// <remarks>
     /// Registers the <see cref="TalariaOptions"/>, the topic + saga registries, the
-    /// options validator, the shared <see cref="TalariaListener"/>, and the topic + saga
-    /// hosted-service adapters. The host does not start any consumers until at least one
-    /// <c>MapTopic</c> or <c>MapSaga</c> call is also made against the service provider.
+    /// options validator, the shared <see cref="TalariaListener"/>, and the single
+    /// <see cref="TalariaHostedService"/> adapter. The host does not start any consumers
+    /// until at least one <c>MapTopic</c> or <c>MapSaga</c> call is also made against the
+    /// service provider.
     /// </remarks>
     public static TalariaBuilder AddTalaria(this IServiceCollection services)
     {
@@ -35,7 +36,6 @@ public static class TalariaServiceExtensions
         services.TryAddSingleton(sp => sp.GetRequiredService<IOptions<TalariaOptions>>().Value);
         services.TryAddSingleton<TalariaListener>();
         services.AddHostedService<TalariaHostedService>();
-        services.AddHostedService<SagaHostedService>();
 
         return new TalariaBuilder(services);
     }

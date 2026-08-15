@@ -71,7 +71,7 @@ public sealed class InMemoryTransport : ITransport
     /// or block the consumer loop).
     /// </summary>
     internal TopicBus GetOrCreateDlqBus(string dlqTopic)
-        => _dlqBuses.GetOrAdd(dlqTopic, _ => new TopicBus(_options.ChannelCapacity, unbounded: true));
+        => _dlqBuses.GetOrAdd(dlqTopic, _ => new TopicBus(unbounded: true));
 
     public Task<IConsumer<T>> CreateConsumerAsync<T>(
         string topic,
@@ -153,6 +153,16 @@ public sealed class InMemoryTransport : ITransport
         {
             _backlogCapacity = backlogCapacity;
             _unbounded = unbounded;
+        }
+
+        /// <summary>
+        /// Creates an unbounded DLQ bus. Dead letters must never be dropped, so capacity
+        /// is irrelevant and the retained backlog is not capped.
+        /// </summary>
+        public TopicBus(bool unbounded)
+        {
+            _unbounded = unbounded;
+            _backlogCapacity = int.MaxValue;
         }
 
         /// <summary>
