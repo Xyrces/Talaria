@@ -130,11 +130,10 @@ security-sensitive changes should preserve.
 
 ### Licensing
 
-- Talaria is **AGPL-3.0-or-later**. The AGPL's network-source clause is a
-  *license* concern, not a *security* one, but it does mean any service
-  that exposes a modified Talaria to third parties over a network must
-  publish its source. Organizations that need proprietary relicensing
-  without that obligation should contact us (see below).
+- Talaria is **Apache-2.0**. This is a *license* concern, not a *security*
+  one, but it does mean Apache-2.0's attribution and patent-grant terms
+  apply when redistributing the code. Organizations that need a separate
+  commercial license should contact us (see below).
 
 ---
 
@@ -146,9 +145,8 @@ A separate commercial offering is available for organizations that need:
   older supported versions.
 - **Hosted or managed Talaria** deployments with hardening, monitoring,
   and incident response.
-- **Proprietary relicensing** that removes the AGPL network-source
-  obligation, allowing modified Talaria to be embedded in closed-source
-  network services.
+- **Proprietary relicensing** or other commercial terms not covered by
+  the Apache-2.0 grant.
 
 The commercial offering is delivered under its own repository and license
 terms and is intentionally **out of scope for this repo**. Contact the

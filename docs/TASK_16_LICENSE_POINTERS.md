@@ -1,5 +1,11 @@
 # task-16: License Pointers Audit & Disposition
 
+> **Dated note (2026-08-15):** Talaria has since been relicensed from
+> AGPL-3.0-or-later to Apache-2.0. The `LICENSE` file, `README.md`,
+> `CONTRIBUTING.md`, `SECURITY.md`, and `docs/LICENSE-RATIONALE.md`
+> pointers were updated to reflect the new license. The body below is
+> preserved as a historical record of the task-16 implementation.
+
 This document records the disposition for **task-16** of the open-source
 release-readiness sprint. Task-16 asks that the chosen license and the
 canonical commercial-licensing posture be unambiguous to a first-time

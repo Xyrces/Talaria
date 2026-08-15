@@ -5,7 +5,7 @@
     <!-- Shared NuGet package metadata -->
     <RepositoryUrl>https://github.com/Xyrces/Talaria</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <Authors>Xyrces</Authors>
     <PackageProjectUrl>https://github.com/Xyrces/Talaria</PackageProjectUrl>
     <PackageTags>messaging;sagas;saga-orchestration;kafka;azure-service-bus;redis;outbox;idempotency;dotnet</PackageTags>

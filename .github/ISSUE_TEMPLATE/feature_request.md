@@ -20,7 +20,7 @@ assignees: []
 ## Alternatives considered
 
 <!-- Other ways to address the problem, including not addressing it at all.
-     This is the place to flag backward-compatibility or AGPL-impact
+     This is the place to flag backward-compatibility or licensing-impact
      concerns. -->
 
 ## Public-API impact
@@ -45,8 +45,8 @@ assignees: []
 <!-- Which SpecFlow scenario under `tests/Talaria.Specs/` will you add?
      Which unit tests? Which integration test (Kafka / Redis / AppHost)? -->
 
-## AGPL / licensing notes
+## Licensing notes
 
-<!-- Anything that affects the commercial offering, the AGPL-3.0-or-later
-     obligations, or the contribution license (e.g. included third-party
-     code, generated files, large asset dumps). -->
+<!-- Anything that affects the commercial offering, the Apache-2.0
+     contribution license, or included third-party code (e.g. generated
+     files, large asset dumps). -->
