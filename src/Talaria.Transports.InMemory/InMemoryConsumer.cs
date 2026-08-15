@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Channels;
+using Microsoft.Extensions.Logging;
 using Talaria.Core.Abstractions;
 
 namespace Talaria.Transports.InMemory;
@@ -27,6 +28,7 @@ internal sealed class InMemoryConsumer<T> : IConsumer<T>
     private readonly InMemoryTransport.TopicBus _appDlqBus;
     private readonly InMemoryTransportOptions _options;
     private readonly bool _includeDlqExceptionDetails;
+    private readonly ILogger? _logger;
     private readonly string _topic;
 
     // Unsettled envelopes by offset, mirroring Kafka's uncommitted offsets.
@@ -41,7 +43,8 @@ internal sealed class InMemoryConsumer<T> : IConsumer<T>
         InMemoryTransport.TopicBus dlqBus,
         InMemoryTransport.TopicBus appDlqBus,
         InMemoryTransportOptions options,
-        bool includeDlqExceptionDetails)
+        bool includeDlqExceptionDetails,
+        ILogger? logger = null)
     {
         _topic = topic;
         _groupChannel = groupChannel;
@@ -49,6 +52,7 @@ internal sealed class InMemoryConsumer<T> : IConsumer<T>
         _appDlqBus = appDlqBus;
         _options = options;
         _includeDlqExceptionDetails = includeDlqExceptionDetails;
+        _logger = logger;
     }
 
     public IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsync(CancellationToken ct = default)
@@ -154,10 +158,17 @@ internal sealed class InMemoryConsumer<T> : IConsumer<T>
     {
         // Kafka parity: unsettled (uncommitted) messages are redelivered. Requeue them
         // to the group channel so the next consumer instance picks them up. A full
-        // bounded channel drops the overflow — accepted, documented transport divergence.
+        // bounded channel drops the overflow — accepted, documented transport divergence,
+        // but each drop is logged so the data-loss path is observable.
         foreach (var raw in _pending.Values)
         {
-            _groupChannel.Writer.TryWrite(raw);
+            if (!_groupChannel.Writer.TryWrite(raw))
+            {
+                _logger?.LogWarning(
+                    "InMemoryConsumer on topic {Topic} dropped an uncommitted message (offset {Offset}) during disposal because the group channel was full.",
+                    _topic,
+                    raw.Offset);
+            }
         }
 
         _pending.Clear();

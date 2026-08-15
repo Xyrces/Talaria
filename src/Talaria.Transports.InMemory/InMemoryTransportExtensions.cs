@@ -35,7 +35,8 @@ public static class InMemoryTransportExtensions
         builder.Services.AddSingleton<Talaria.Core.Abstractions.ITransport>(sp =>
             new InMemoryTransport(
                 options,
-                sp.GetService<Microsoft.Extensions.Options.IOptions<Talaria.Core.TalariaOptions>>()?.Value.IncludeExceptionDetailsInDlq ?? false));
+                sp.GetService<Microsoft.Extensions.Options.IOptions<Talaria.Core.TalariaOptions>>()?.Value.IncludeExceptionDetailsInDlq ?? false,
+                sp.GetService<Microsoft.Extensions.Logging.ILogger<InMemoryTransport>>()));
         return builder;
     }
 

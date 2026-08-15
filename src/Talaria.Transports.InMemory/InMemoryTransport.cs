@@ -3,6 +3,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Threading.Channels;
+using Microsoft.Extensions.Logging;
 using Talaria.Core.Abstractions;
 
 namespace Talaria.Transports.InMemory;
@@ -36,11 +37,12 @@ public sealed class InMemoryTransport : ITransport
     private readonly ConcurrentDictionary<string, TopicBus> _dlqBuses = new();
     private readonly InMemoryTransportOptions _options;
     private readonly bool _includeDlqExceptionDetails;
+    private readonly ILogger? _logger;
     internal InMemoryTransportOptions Options => _options;
 
     public InMemoryTransport() : this(new InMemoryTransportOptions()) { }
 
-    public InMemoryTransport(InMemoryTransportOptions options, bool includeDlqExceptionDetails = false)
+    public InMemoryTransport(InMemoryTransportOptions options, bool includeDlqExceptionDetails = false, ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -58,6 +60,7 @@ public sealed class InMemoryTransport : ITransport
 
         _options = options;
         _includeDlqExceptionDetails = includeDlqExceptionDetails;
+        _logger = logger;
     }
 
     /// <summary>
@@ -83,7 +86,7 @@ public sealed class InMemoryTransport : ITransport
         var dlqBus = GetOrCreateDlqBus(topic + _options.DlqSuffix);
         var appDlqBus = GetOrCreateDlqBus("__app.dlq");
         IConsumer<T> consumer = new InMemoryConsumer<T>(
-            topic, groupChannel, dlqBus, appDlqBus, _options, _includeDlqExceptionDetails);
+            topic, groupChannel, dlqBus, appDlqBus, _options, _includeDlqExceptionDetails, _logger);
         return Task.FromResult(consumer);
     }
 
