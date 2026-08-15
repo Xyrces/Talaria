@@ -115,6 +115,26 @@ public static class TalariaDiagnostics
         unit: "ms",
         description: "Lateness past the scheduled due time when a deferred message is republished. A rising lag means the sweeper is falling behind.");
 
+    // ---- Delayed retries ----
+
+    /// <summary>Counter of messages scheduled for a delayed retry.</summary>
+    public static readonly Counter<long> RetryScheduled = Meter.CreateCounter<long>(
+        "talaria.messaging.retry.scheduled",
+        unit: "{message}",
+        description: "Number of messages scheduled for a delayed retry.");
+
+    /// <summary>Counter of messages whose retry attempts were exhausted and were routed to the DLQ.</summary>
+    public static readonly Counter<long> RetryExhausted = Meter.CreateCounter<long>(
+        "talaria.messaging.retry.exhausted",
+        unit: "{message}",
+        description: "Number of messages whose retry attempts were exhausted and were routed to the DLQ.");
+
+    /// <summary>Histogram of the computed delayed-retry delay in milliseconds.</summary>
+    public static readonly Histogram<double> RetryDelay = Meter.CreateHistogram<double>(
+        "talaria.messaging.retry.delay",
+        unit: "ms",
+        description: "Computed delayed-retry delay before the next attempt.");
+
     /// <summary>
     /// Attempts to extract existing W3C context from headers to resume a trace,
     /// or starts a new trace if no headers exist.
@@ -142,6 +162,11 @@ public static class TalariaDiagnostics
             activity.SetTag("messaging.destination.name", topic);
             activity.SetTag("messaging.operation", "process");
             activity.SetTag("messaging.message.type", messageType);
+
+            if (headers.TryGetValue(Abstractions.MessageHeaders.RetryAttemptKey, out var retryAttempt))
+            {
+                activity.SetTag("talaria.retry.attempt", retryAttempt);
+            }
         }
 
         return activity;

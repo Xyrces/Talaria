@@ -75,4 +75,17 @@ public sealed class TalariaOptions
     /// </summary>
     public bool IncludeExceptionDetailsInDlq { get; set; }
 
+    /// <summary>
+    /// Default retry policy applied to all topic handlers and saga steps that do not
+    /// declare their own. The default value has zero attempts, which preserves the
+    /// legacy immediate-DLQ behavior.
+    /// </summary>
+    public RetryPolicy DefaultRetryPolicy { get; set; } = new RetryPolicy();
+
+    /// <summary>
+    /// Hard floor for any computed retry delay. Prevents sub-millisecond delays from
+    /// spinning the sweeper. Must be greater than zero.
+    /// </summary>
+    public TimeSpan MinRetryDelay { get; set; } = TimeSpan.FromMilliseconds(100);
+
 }
