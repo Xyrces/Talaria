@@ -211,11 +211,10 @@ internal sealed class RetryCoordinator
             new KeyValuePair<string, object?>("messaging.destination.name", topicName));
 
         // Commit the original envelope BEFORE releasing the idempotency lock.
-        // The idempotency key is consumerGroup:messageId; the retry copy carries a
-        // freshly minted MessageId, so it is NOT gated by the original lock. Committing
-        // first ensures the original cannot redeliver and re-run the handler concurrently
-        // with the retry copy. If commit fails we leave the lock held: it expires via TTL
-        // and the transport redelivers the original, which is safe.
+        // The retry copy carries a deterministic MessageId ({root}:retry:{attempt}),
+        // so any duplicate copies produced by a redelivery are suppressed by the
+        // idempotency gate. If commit fails, release the lock best-effort so the
+        // original can redeliver promptly rather than waiting for the lock TTL to expire.
         try
         {
             await consumer.CommitAsync(envelope, ct);
@@ -223,22 +222,33 @@ internal sealed class RetryCoordinator
         catch (Exception commitEx)
         {
             _logger.LogError(commitEx, "Failed to commit original envelope after scheduling retry for {MessageId}; it remains uncommitted for redelivery.", envelope.Headers.MessageId);
+            await ReleaseLockBestEffortAsync(pipeline, @lock, ct);
             return RetryOutcome.Scheduled;
         }
 
-        if (@lock is not null)
-        {
-            try
-            {
-                await pipeline.ReleaseAsync(@lock, ct);
-            }
-            catch (Exception releaseEx)
-            {
-                _logger.LogError(releaseEx, "Failed to release idempotency lock {MessageId}; it expires via TTL.", @lock.MessageId);
-            }
-        }
+        await ReleaseLockBestEffortAsync(pipeline, @lock, ct);
 
         return RetryOutcome.Scheduled;
+    }
+
+    private async Task ReleaseLockBestEffortAsync(
+        MessageProcessingPipeline pipeline,
+        IdempotencyLock? @lock,
+        CancellationToken ct)
+    {
+        if (@lock is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await pipeline.ReleaseAsync(@lock, ct);
+        }
+        catch (Exception releaseEx)
+        {
+            _logger.LogError(releaseEx, "Failed to release idempotency lock {MessageId}; it expires via TTL.", @lock.MessageId);
+        }
     }
 
     /// <summary>

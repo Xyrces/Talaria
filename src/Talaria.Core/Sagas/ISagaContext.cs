@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+using System.Threading;
+
 namespace Talaria.Core.Sagas;
 
 /// <summary>
@@ -10,6 +12,12 @@ namespace Talaria.Core.Sagas;
 /// <since>1.0.0</since>
 public interface ISagaContext<TState>
 {
+    /// <summary>
+    /// Cancellation token that is canceled when the saga consumer engine is stopping.
+    /// Handlers can observe this token to cooperate with graceful shutdown.
+    /// </summary>
+    CancellationToken CancellationToken { get; }
+
     /// <summary>
     /// Dispatches a message to the transport after the saga state is committed.
     /// </summary>

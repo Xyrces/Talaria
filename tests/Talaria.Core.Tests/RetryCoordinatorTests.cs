@@ -375,7 +375,7 @@ public class RetryCoordinatorTests
     }
 
     [Fact]
-    public async Task TryCoordinateTopicRetryAsync_CommitFailure_DoesNotReleaseLock()
+    public async Task TryCoordinateTopicRetryAsync_CommitFailure_ReleasesLock()
     {
         var store = new FakeDeferralStore();
         var options = OptionsWithRetries(maxAttempts: 2);
@@ -397,7 +397,7 @@ public class RetryCoordinatorTests
             registration, pipeline, consumer, envelope, new InvalidOperationException("boom"), lck, default);
 
         Assert.Equal(RetryCoordinator.RetryOutcome.Scheduled, outcome);
-        Assert.Empty(idempotencyStore.Released);
+        Assert.Contains(lck, idempotencyStore.Released);
     }
 
     [Fact]

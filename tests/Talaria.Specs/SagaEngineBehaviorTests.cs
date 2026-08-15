@@ -252,9 +252,9 @@ public class SagaEngineBehaviorTests
     private class DispatchStart { public string Id { get; set; } = ""; }
     private class UnmappedMsg { public string Data { get; set; } = ""; }
 
-    // The engine validates dispatch routes before opening the transaction (step 8a of
-    // SagaHostedService.ProcessStepMessageAsync): an unmapped dispatch type dead-letters
-    // the consumed message with reason "unmapped_dispatch" and never saves saga state.
+    // The engine validates dispatch routes before opening the transaction
+    // (TalariaListener/SagaConsumerEngine): an unmapped dispatch type dead-letters the
+    // consumed message with reason "unmapped_dispatch" and never saves saga state.
     // (Previously the exception escaped the consumer loop and the message was silently dropped.)
     [Fact]
     public async Task Dispatch_WithoutDispatchToMapping_RoutesToDlq_WithoutStateSave()
@@ -452,7 +452,205 @@ public class SagaEngineBehaviorTests
         await listener.StopAsync(cts.Token);
     }
 
-    // ---- Helpers (same poll-with-timeout pattern as SagaHostedServiceTests) ----
+    // ---- Test 7: deferral commit failure releases lock and duplicate deferred copies are suppressed ----
+
+    private class DeferCommitState { public string Id { get; set; } = ""; public string Log { get; set; } = ""; }
+    private class DeferCommitStart { public string Id { get; set; } = ""; }
+    private class DeferCommitStep { public string Id { get; set; } = ""; }
+
+    [Fact]
+    public async Task Deferral_CommitFailure_ReleasesLock_AndSuppressesDuplicateDeferredCopy()
+    {
+        var innerTransport = new InMemoryTransport();
+        var transport = new CommitFailingInMemoryTransport(innerTransport);
+        var deferralStore = new InMemoryDeferralStore();
+        var idempotencyStore = new InMemoryIdempotencyStore();
+        var registry = new SagaRegistry();
+
+        var stepRuns = 0;
+        var config = new SagaConfigurator<DeferCommitState>(registry);
+        config.StartedBy<DeferCommitStart>("s7-start",
+            (msg, ctx) => Task.FromResult(ctx.Transition(new DeferCommitState { Id = msg.Id, Log = "start" })),
+            m => m.Id);
+        config.On<DeferCommitStep>("s7-step",
+            (state, msg, ctx) =>
+            {
+                state.Log += "+step";
+                Interlocked.Increment(ref stepRuns);
+                return Task.FromResult(ctx.Transition(state));
+            },
+            m => m.Id);
+        config.Complete();
+
+        var services = new ServiceCollection()
+            .AddSingleton<ITransport>(transport)
+            .AddSingleton(transport)
+            .AddSingleton(typeof(IStateStore<>), typeof(InMemoryStateStore<>))
+            .AddSingleton<IDeferralStore>(deferralStore)
+            .AddSingleton<IIdempotencyStore>(idempotencyStore)
+            .BuildServiceProvider();
+
+        var options = new TalariaOptions
+        {
+            ApplicationName = "test-app",
+            DeferralBackoff = TimeSpan.FromSeconds(1),
+            MaxDeferralAttempts = 5
+        };
+
+        var listener = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            options,
+            NullLogger<TalariaListener>.Instance,
+            services,
+            new TalariaListenerStores(idempotencyStore, deferralStore, null));
+
+        await listener.StartAsync();
+
+        // The first commit of the original step envelope will fail after the deferred copy is enqueued.
+        transport.SetCommitFailures("s7-step-1", 1);
+
+        var stepProducer = await transport.CreateProducerAsync<DeferCommitStep>("s7-step", new ProducerOptions());
+        await stepProducer.ProduceAsync(new DeferCommitStep { Id = "c7" }, new MessageHeaders { MessageId = "s7-step-1" });
+
+        // Wait until the out-of-order step has been deferred at least once.
+        var deferred = await PollUntilAsync(() => Task.FromResult(deferralStore.Count >= 1), TimeSpan.FromSeconds(5));
+        Assert.True(deferred, "The step message was never deferred.");
+
+        await listener.StopAsync();
+
+        // The commit-failure path must release the original idempotency lock so the
+        // original message can redeliver promptly.
+        var reacquired = await idempotencyStore.TryAcquireLockAsync(
+            "s7-step-1", "test-app", TimeSpan.FromMinutes(1));
+        Assert.NotNull(reacquired);
+        await idempotencyStore.ReleaseLockAsync(reacquired);
+
+        // Now start a fresh listener, produce the starter, and prove the step ran exactly once
+        // even though the original redelivery enqueued a second deferred copy with the same id.
+        var listener2 = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            options,
+            NullLogger<TalariaListener>.Instance,
+            services,
+            new TalariaListenerStores(idempotencyStore, deferralStore, null));
+
+        await listener2.StartAsync();
+
+        var startProducer = await transport.CreateProducerAsync<DeferCommitStart>("s7-start", new ProducerOptions());
+        await startProducer.ProduceAsync(new DeferCommitStart { Id = "c7" });
+
+        var stepRan = await PollUntilAsync(
+            () => Task.FromResult(Volatile.Read(ref stepRuns) >= 1), TimeSpan.FromSeconds(10));
+        Assert.True(stepRan, "The deferred step handler never ran after the starter arrived.");
+
+        var store = services.GetRequiredService<IStateStore<DeferCommitState>>();
+        DeferCommitState? state = null;
+        await PollUntilAsync(async () =>
+        {
+            state = await store.GetAsync("c7");
+            return state is { Log: "start+step" };
+        }, TimeSpan.FromSeconds(5));
+        Assert.Equal("start+step", state?.Log);
+
+        // No duplicate step processing and nothing dead-lettered.
+        Assert.Equal(1, Volatile.Read(ref stepRuns));
+        Assert.Empty(await innerTransport.ReadAllFromTopicAsync<DeferCommitStep>("s7-step.dlq"));
+        Assert.Empty(await innerTransport.ReadAllFromTopicAsync<DeferCommitStart>("s7-start.dlq"));
+
+        await listener2.StopAsync();
+    }
+
+    // ---- Test 8: OperationCanceledException during saga shutdown is not DLQ'd ----
+
+    private class ShutdownState { public string Id { get; set; } = ""; }
+    private class ShutdownStart { public string Id { get; set; } = ""; }
+
+    [Fact]
+    public async Task OperationCanceledException_DuringShutdown_IsNotDLQed_AndRedelivers()
+    {
+        var transport = new InMemoryTransport();
+        var registry = new SagaRegistry();
+        var attempts = 0;
+
+        var config = new SagaConfigurator<ShutdownState>(registry);
+        config.StartedBy<ShutdownStart>("s8-start",
+            async (msg, ctx) =>
+            {
+                Interlocked.Increment(ref attempts);
+                await Task.Delay(Timeout.Infinite, ctx.CancellationToken);
+                return ctx.Transition(new ShutdownState { Id = msg.Id });
+            },
+            m => m.Id);
+        config.Complete();
+
+        var services = new ServiceCollection()
+            .AddSingleton<ITransport>(transport)
+            .AddSingleton(typeof(IStateStore<>), typeof(InMemoryStateStore<>))
+            .BuildServiceProvider();
+
+        var listener = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            new TalariaOptions
+            {
+                ApplicationName = "shutdown-app",
+                DeferralBackoff = TimeSpan.FromMilliseconds(50),
+                MaxDeferralAttempts = 5
+            },
+            NullLogger<TalariaListener>.Instance,
+            services);
+
+        await listener.StartAsync();
+
+        var producer = await transport.CreateProducerAsync<ShutdownStart>("s8-start", new ProducerOptions());
+        await producer.ProduceAsync(new ShutdownStart { Id = "c8" }, new MessageHeaders { MessageId = "shutdown-saga-1" });
+
+        // Wait until the handler has entered before stopping.
+        await PollUntilAsync(
+            () => Task.FromResult(Volatile.Read(ref attempts) >= 1), TimeSpan.FromSeconds(5));
+
+        // Stopping cancels the loop token, so the handler throws OCE.
+        await listener.StopAsync();
+
+        // The message must NOT be in the DLQ.
+        Assert.Empty(await transport.ReadAllFromTopicAsync<ShutdownStart>("s8-start.dlq"));
+
+        // Start a fresh listener; the uncommitted message redelivers.
+        var received = new List<string>();
+        var registry2 = new SagaRegistry();
+        var config2 = new SagaConfigurator<ShutdownState>(registry2);
+        config2.StartedBy<ShutdownStart>("s8-start",
+            (msg, ctx) =>
+            {
+                received.Add(msg.Id);
+                return Task.FromResult(ctx.Transition(new ShutdownState { Id = msg.Id }));
+            },
+            m => m.Id);
+        config2.Complete();
+
+        var listener2 = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry2,
+            new TalariaOptions { ApplicationName = "shutdown-app" },
+            NullLogger<TalariaListener>.Instance,
+            services);
+
+        await listener2.StartAsync();
+
+        await PollUntilAsync(
+            () => Task.FromResult(received.Count == 1), TimeSpan.FromSeconds(5));
+        Assert.Equal("c8", received[0]);
+
+        await listener2.StopAsync();
+    }
+
+    // ---- Helpers (same poll-with-timeout pattern as other saga behavior tests) ----
 
     private static async Task<List<MessageEnvelope<T>>> ReadUntilAsync<T>(
         InMemoryTransport transport, string topic, int expectedCount)

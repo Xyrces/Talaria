@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+using System.Threading;
 using Talaria.Core.Abstractions;
 
 namespace Talaria.Core.Sagas;
@@ -148,6 +149,8 @@ public class SagaConfigurator<TState> where TState : class, new()
         {
             _inner = inner;
         }
+
+        public CancellationToken CancellationToken => _inner.CancellationToken;
 
         public SagaResult<TState> Complete()
         {
