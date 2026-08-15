@@ -14,7 +14,7 @@ using Xunit;
 
 namespace Talaria.Specs.Tests;
 
-public class TalariaHostedServiceTests
+public class TalariaListenerTests
 {
     private class DummyMessage { }
 

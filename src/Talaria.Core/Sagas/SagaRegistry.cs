@@ -51,7 +51,7 @@ public sealed class SagaRegistry
     /// <summary>Adds a saga registration.</summary>
     /// <param name="registration">The saga registration to add.</param>
     /// <exception cref="InvalidOperationException">
-    /// Thrown when the registry has already been sealed by the hosted service.
+    /// Thrown when the registry has already been sealed by TalariaListener.
     /// </exception>
     internal void Add(SagaRegistration registration)
     {

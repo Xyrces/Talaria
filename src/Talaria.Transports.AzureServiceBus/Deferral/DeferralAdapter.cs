@@ -19,7 +19,7 @@ namespace Talaria.Transports.AzureServiceBus.Deferral;
 ///   <item>
 ///     <b>Long/deadline deferrals</b> \u2014 everything else. The adapter passes the entry
 ///     through to the durable <see cref="IDeferralStore"/> supplied at construction.
-///     The saga hosted service sweeper republishes those entries via the regular
+///     The deferral sweeper republishes those entries via the regular
 ///     <see cref="Talaria.Core.Abstractions.IProducer{T}"/> exactly as before the adapter existed.
 ///   </item>
 /// </list>

@@ -21,7 +21,6 @@ internal sealed class SagaConsumerEngine
     private readonly IServiceProvider _serviceProvider;
     private readonly IReadOnlyList<SagaRegistration> _registrations;
     private readonly TalariaOptions _options;
-    private readonly IIdempotencyStore? _idempotencyStore;
     private readonly IDeferralStore? _deferralStore;
     private readonly IOutboxStore? _outboxStore;
     private readonly MessageProcessingPipeline _pipeline;
@@ -44,7 +43,6 @@ internal sealed class SagaConsumerEngine
         IServiceProvider serviceProvider,
         SagaRegistry registry,
         TalariaOptions options,
-        IIdempotencyStore? idempotencyStore,
         IDeferralStore? deferralStore,
         IOutboxStore? outboxStore,
         MessageProcessingPipeline pipeline,
@@ -54,7 +52,6 @@ internal sealed class SagaConsumerEngine
         _serviceProvider = serviceProvider;
         _registrations = registry.Registrations;
         _options = options;
-        _idempotencyStore = idempotencyStore;
         _deferralStore = deferralStore;
         _outboxStore = outboxStore;
         _pipeline = pipeline;
@@ -69,6 +66,8 @@ internal sealed class SagaConsumerEngine
 
     public async Task RunAsync(CancellationToken ct)
     {
+        var retryCoordinator = new RetryCoordinator(_deferralStore, _options, _logger);
+
         var stepsByTopic = _registrations
             .SelectMany(r => r.Steps.Select(s => new StepRoute(r, s, CreateStateStoreAccessor(r.StateType))))
             .GroupBy(x => x.Step.TopicName)
@@ -104,11 +103,11 @@ internal sealed class SagaConsumerEngine
         var tasks = stepsByTopic.Select(kvp =>
             ConsumerSupervision.RunSupervisedAsync(
                 $"saga:{kvp.Key}",
-                ct => ConsumeTopicLoopAsync(kvp.Key, kvp.Value, ct),
+                ct => ConsumeTopicLoopAsync(kvp.Key, kvp.Value, retryCoordinator, ct),
                 _logger,
                 ct)).ToList();
 
-        _logger.LogInformation("Talaria Sagas: started {Count} topic consumers.", tasks.Count);
+        _logger.LogInformation("Talaria Sagas: started {Count} saga topic consumer loops.", tasks.Count);
 
         await Task.WhenAll(tasks);
     }
@@ -151,6 +150,7 @@ internal sealed class SagaConsumerEngine
     private async Task ConsumeTopicLoopAsync(
         string topic,
         IReadOnlyList<StepRoute> routes,
+        RetryCoordinator retryCoordinator,
         CancellationToken ct)
     {
         await using var consumer = await _transport.CreateConsumerAsync<JsonElement>(
@@ -175,7 +175,7 @@ internal sealed class SagaConsumerEngine
                 continue;
             }
 
-            await ProcessStepMessageAsync(env, route, consumer, ct);
+            await ProcessStepMessageAsync(env, route, consumer, retryCoordinator, ct);
         }
     }
 
@@ -203,6 +203,7 @@ internal sealed class SagaConsumerEngine
         MessageEnvelope<JsonElement> env,
         StepRoute route,
         IConsumer<JsonElement> consumer,
+        RetryCoordinator retryCoordinator,
         CancellationToken ct)
     {
         var step = route.Step;
@@ -271,7 +272,7 @@ internal sealed class SagaConsumerEngine
                 {
                     await HandleDeferralAsync(env, payload, step, correlationId, ct);
 
-                    await ReleaseLockBestEffortAsync(_pipeline, gate.Lock, ct);
+                    await ReleaseLockBestEffortAsync(gate.Lock, ct);
                     await consumer.CommitAsync(env, ct);
 
                     Diagnostics.TalariaDiagnostics.MessagesDeferred.Add(1, new KeyValuePair<string, object?>("saga.type", stateType.Name));
@@ -309,7 +310,6 @@ internal sealed class SagaConsumerEngine
 
                 Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
 
-                var retryCoordinator = new RetryCoordinator(_deferralStore, _options, _logger);
                 var outcome = await retryCoordinator.TryCoordinateSagaRetryAsync(
                     step.TopicName, step.MessageType, _pipeline, consumer, env, ex, gate.Lock, ct);
 
@@ -329,7 +329,7 @@ internal sealed class SagaConsumerEngine
                     activity?.SetTag("saga.status", "deferred");
                     await HandleDeferralAsync(env, payload, step, correlationId, ct);
 
-                    await ReleaseLockBestEffortAsync(_pipeline, gate.Lock, ct);
+                    await ReleaseLockBestEffortAsync(gate.Lock, ct);
                     await consumer.CommitAsync(env, ct);
 
                     Diagnostics.TalariaDiagnostics.MessagesDeferred.Add(1, new KeyValuePair<string, object?>("saga.type", stateType.Name));
@@ -405,7 +405,7 @@ internal sealed class SagaConsumerEngine
                 {
                     _logger.LogError(ex, "Failed to complete saga transition; the message remains uncommitted for redelivery.");
 
-                    await ReleaseLockBestEffortAsync(_pipeline, gate.Lock, ct);
+                    await ReleaseLockBestEffortAsync(gate.Lock, ct);
 
                     activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, ex.Message);
                     Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
@@ -458,7 +458,7 @@ internal sealed class SagaConsumerEngine
                 {
                     _logger.LogError(ex, "Failed to commit saga transition; the message remains uncommitted for redelivery.");
 
-                    await ReleaseLockBestEffortAsync(_pipeline, gate.Lock, ct);
+                    await ReleaseLockBestEffortAsync(gate.Lock, ct);
 
                     activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, ex.Message);
                     Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
@@ -566,7 +566,7 @@ internal sealed class SagaConsumerEngine
     private static IStateStoreAccessor CreateStateStoreAccessorTyped<TState>() where TState : class, new()
         => new StateStoreAccessor<TState>();
 
-    private static async Task ReleaseLockBestEffortAsync(MessageProcessingPipeline pipeline, IdempotencyLock? lck, CancellationToken ct)
+    private async Task ReleaseLockBestEffortAsync(IdempotencyLock? lck, CancellationToken ct)
     {
         if (lck is null)
         {
@@ -575,11 +575,11 @@ internal sealed class SagaConsumerEngine
 
         try
         {
-            await pipeline.ReleaseAsync(lck, ct);
+            await _pipeline.ReleaseAsync(lck, ct);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // Release failures must not mask the successful deferral path; the lock expires via TTL.
+            _logger.LogError(ex, "Failed to release idempotency lock {MessageId}; it expires via TTL.", lck.MessageId);
         }
     }
 

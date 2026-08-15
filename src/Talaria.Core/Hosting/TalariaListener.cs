@@ -83,7 +83,7 @@ public sealed class TalariaListener : IAsyncDisposable
         {
             lock (_lifecycleLock)
             {
-                return _runTask is { IsCompleted: false } && !_stopped;
+                return _runTask is { IsCompleted: false };
             }
         }
     }
@@ -127,6 +127,18 @@ public sealed class TalariaListener : IAsyncDisposable
 
             _runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             _runTask = RunAsync(_runCts.Token);
+
+            if (_runTask.IsCompleted)
+            {
+                if (_runTask.IsFaulted)
+                {
+                    _stopped = true;
+                    _runCts.Dispose();
+                }
+
+                return _runTask;
+            }
+
             return Task.CompletedTask;
         }
     }
@@ -164,8 +176,9 @@ public sealed class TalariaListener : IAsyncDisposable
             {
                 throw;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                _logger.LogError(ex, "TalariaListener RunAsync terminated with an unexpected exception.");
                 // Loops are supervised; absorb any fault so stop is idempotent.
             }
         }
@@ -184,11 +197,15 @@ public sealed class TalariaListener : IAsyncDisposable
             {
                 return;
             }
-
-            _disposed = true;
         }
 
         await StopAsync();
+
+        lock (_lifecycleLock)
+        {
+            _disposed = true;
+        }
+
         GC.SuppressFinalize(this);
     }
 
@@ -230,7 +247,6 @@ public sealed class TalariaListener : IAsyncDisposable
                     _serviceProvider!,
                     _sagaRegistry,
                     _options,
-                    _stores.IdempotencyStore,
                     _stores.DeferralStore,
                     _stores.OutboxStore,
                     pipeline,

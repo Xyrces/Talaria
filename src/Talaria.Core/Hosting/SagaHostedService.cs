@@ -26,6 +26,7 @@ public sealed class SagaHostedService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        _logger.LogDebug("SagaHostedService forwarding host start to TalariaListener.");
         await _listener.StartAsync(stoppingToken);
 
         try
@@ -40,6 +41,7 @@ public sealed class SagaHostedService : BackgroundService
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
+        _logger.LogDebug("SagaHostedService forwarding host stop to TalariaListener.");
         await _listener.StopAsync(cancellationToken);
         await base.StopAsync(cancellationToken);
     }

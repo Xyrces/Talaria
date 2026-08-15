@@ -18,7 +18,7 @@ public sealed record IdempotencyLock(string MessageId, string ConsumerQueue, str
 /// Tracks physical message IDs globally to prevent redundant concurrent processing and duplicate replays.
 /// </summary>
 /// <remarks>
-/// Talaria's hosted services acquire an <see cref="IdempotencyLock"/> before processing a
+/// TalariaListener acquires an <see cref="IdempotencyLock"/> before processing a
 /// message; only the holder may release or complete the lock. Lease/fencing semantics
 /// (<see cref="TalariaOptions.IdempotencyLockTtl"/>) bound how long a crashed worker can
 /// hold a lock — after expiry, a new worker may re-acquire the message ID.

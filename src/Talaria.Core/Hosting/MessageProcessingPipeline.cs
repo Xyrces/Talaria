@@ -154,7 +154,7 @@ internal sealed class MessageProcessingPipeline
 /// <summary>
 /// Runs a consumer loop with per-topic fault isolation: a faulting loop is logged and
 /// restarted with capped exponential backoff instead of taking down every other consumer
-/// (and, via BackgroundServiceExceptionBehavior, the whole host).
+/// or the host.
 /// </summary>
 internal static class ConsumerSupervision
 {

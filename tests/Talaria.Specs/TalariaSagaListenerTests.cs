@@ -15,7 +15,7 @@ using Xunit;
 
 namespace Talaria.Specs.Tests;
 
-public class SagaHostedServiceTests
+public class TalariaSagaListenerTests
 {
     private class TestState { public string Id { get; set; } = ""; }
     private class NoCorrelationMessage { public string Data { get; set; } = ""; }
