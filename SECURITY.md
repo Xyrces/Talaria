@@ -33,15 +33,10 @@ major release and the previous major release for a minimum of 12 months.
 
 **Please do not file public GitHub issues for suspected vulnerabilities.**
 
-Use one of the following private channels instead:
-
-1. **GitHub Security Advisories (preferred)** — open a private advisory at
-   <https://github.com/Xyrces/Talaria/security/advisories/new>. This routes
-   directly to the maintainer team and keeps the report out of the public
-   issue tracker.
-2. **Direct email** — `security@example.com`. Encrypt sensitive details with
-   the maintainer's PGP key (published on request); otherwise plain text is
-   acceptable for non-sensitive reports.
+Report them privately through **GitHub Security Advisories**: open a private
+advisory at <https://github.com/Xyrces/Talaria/security/advisories/new>. This
+routes directly to the maintainer team and keeps the report out of the public
+issue tracker.
 
 A good report includes:
 
@@ -149,8 +144,9 @@ A separate commercial offering is available for organizations that need:
   the Apache-2.0 grant.
 
 The commercial offering is delivered under its own repository and license
-terms and is intentionally **out of scope for this repo**. Contact the
-maintainers at `security@example.com` for details.
+terms and is intentionally **out of scope for this repo**. Reach the
+maintainers through the repository's GitHub channels (a private security
+advisory or a discussion) for details.
 
 ---
 
