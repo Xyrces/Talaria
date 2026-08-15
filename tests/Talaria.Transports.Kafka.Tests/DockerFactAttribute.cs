@@ -13,7 +13,14 @@ public sealed class DockerFactAttribute : FactAttribute
         }
     }
 
-    public static bool IsDockerRunning()
+    // Probe once per test process and cache the result: docker info can take
+    // several seconds while Docker Desktop is busy starting containers, and a
+    // short per-call timeout makes the same run randomly pass or skip.
+    private static readonly Lazy<bool> DockerAvailable = new(ProbeDocker);
+
+    public static bool IsDockerRunning() => DockerAvailable.Value;
+
+    private static bool ProbeDocker()
     {
         try
         {
@@ -28,7 +35,7 @@ public sealed class DockerFactAttribute : FactAttribute
             };
             using var proc = Process.Start(psi);
             if (proc == null) return false;
-            bool exited = proc.WaitForExit(3000);
+            bool exited = proc.WaitForExit(30000);
             return exited && proc.ExitCode == 0;
         }
         catch
