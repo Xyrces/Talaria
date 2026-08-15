@@ -9,7 +9,7 @@ using Talaria.Core.Abstractions;
 namespace Talaria.StateStores.Redis;
 
 /// <summary>
-/// Redis-backed state store for propagating saga configurations and persistence across pods.
+/// Redis-backed saga state store for persistence across pods.
 /// <see cref="TransitionAsync"/> applies the state write/purge and stages outbound messages
 /// in the shared outbox within a single Lua script, so a saga state transition and its
 /// outbound messages are persisted atomically — the write half of the transactional

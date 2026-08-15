@@ -28,7 +28,7 @@ public sealed record DeferredMessage(
 
 /// <summary>
 /// A lease on a deferred message. Carries a fencing token so that only the current
-/// lease holder can complete or abandon the entry — a stale holder (e.g. a sweeper
+/// lease holder can complete or abandon the entry. A stale holder (e.g. a sweeper
 /// whose lease expired) cannot remove an entry another sweeper has since acquired.
 /// </summary>
 /// <param name="Id">Identifier of the leased <see cref="DeferredMessage"/>.</param>
@@ -56,7 +56,7 @@ public sealed record LeasedDeferral(DeferredMessage Message, DeferralLease Lease
 /// rescheduled with <see cref="AbandonAsync"/>. Both are fenced by the lease token, so
 /// an expired holder cannot interfere with a newer owner. Because lease expiry can
 /// produce a duplicate republication, downstream deduplication (the idempotency store)
-/// is what makes processing effectively once — the same model as Service Bus.
+/// suppresses duplicates — the same model as Service Bus.
 /// </para>
 /// </summary>
 /// <since>1.0.0</since>

@@ -34,7 +34,7 @@ public sealed class ConsumerOptions
 public sealed class ProducerOptions
 {
     /// <summary>
-    /// Whether to enable idempotent production (exactly-once guarantee where supported).
+    /// Whether to enable idempotent production (broker-side message deduplication where supported).
     /// </summary>
     /// <remarks>
     /// Defaults to true. Disable only when the transport does not support idempotent

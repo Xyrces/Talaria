@@ -27,7 +27,7 @@ public sealed record OutboxMessage(
 
 /// <summary>
 /// A lease on an outbox entry. Carries a fencing token so that only the current
-/// lease holder can complete or abandon the entry — a stale relay (e.g. one whose
+/// lease holder can complete or abandon the entry. A stale relay (e.g. one whose
 /// lease expired) cannot remove an entry another relay has since acquired.
 /// </summary>
 /// <param name="Id">Identifier of the leased <see cref="OutboxMessage"/>.</param>
@@ -50,10 +50,10 @@ public sealed record LeasedOutboxMessage(OutboxMessage Message, OutboxLease Leas
 /// <para>
 /// Lease semantics match <see cref="IDeferralStore"/>: acquiring hides entries for the
 /// lease duration instead of removing them, so a relay crash never loses a staged
-/// message — the lease expires and another relay re-acquires it. Because every entry
+/// message; the lease expires and another relay re-acquires it. Because every entry
 /// carries a stable minted MessageId, the duplicate publish that lease expiry can
 /// produce is deduplicated by the downstream idempotency gate: at-least-once
-/// publishing, effectively-once processing.
+/// publishing with idempotent duplicate suppression.
 /// </para>
 /// </summary>
 /// <since>1.0.0</since>

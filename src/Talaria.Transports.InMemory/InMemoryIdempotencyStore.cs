@@ -7,7 +7,7 @@ namespace Talaria.Transports.InMemory;
 
 /// <summary>
 /// In-memory idempotency store using ConcurrentDictionary.
-/// Provides container-free exactly-once semantics for testing and local development.
+/// Provides process-local duplicate suppression for testing and local development.
 /// </summary>
 public sealed class InMemoryIdempotencyStore : IIdempotencyStore
 {

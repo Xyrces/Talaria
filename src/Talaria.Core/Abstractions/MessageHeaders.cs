@@ -82,7 +82,7 @@ public sealed class MessageHeaders : IDictionary<string, string>
         }
     }
 
-    /// <summary>Unique identifier representing the delivery execution cycle, leveraged for guaranteed Exactly-Once stateful bindings and deduplication.</summary>
+    /// <summary>Unique message identifier used for idempotency deduplication and correlation.</summary>
     public string? MessageId
     {
         get => TryGetValue(MessageIdKey, out var v) ? v : null;

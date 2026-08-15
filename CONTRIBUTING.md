@@ -32,7 +32,7 @@ separate terms and is intentionally out of scope for this repo.
 
 All participants in this project — maintainers, contributors, and users — are
 expected to follow the [Contributor Covenant](CODE_OF_CONDUCT.md). Be
-respectful, assume good faith, and help us keep the community welcoming.
+respectful, assume good faith, and help keep the community welcoming.
 
 ---
 
@@ -53,7 +53,7 @@ understand and reproduce the problem.
 ## Security issues
 
 **Do not file public issues for security vulnerabilities.** Follow the
-disclosure process in [`SECURITY.md`](SECURITY.md) instead — it lists the
+disclosure process in [`SECURITY.md`](SECURITY.md) instead; it lists the
 private reporting channel and the response SLA.
 
 ---
@@ -67,7 +67,7 @@ private reporting channel and the response SLA.
 | Git               | Recent (uses MinVer for versioning)                      |
 
 Talaria targets `net8.0`, `net9.0`, and `net10.0`. The solution
-([`Talaria.slnx`](Talaria.slnx)) multi-targets across all three — make sure
+([`Talaria.slnx`](Talaria.slnx)) multi-targets across all three; make sure
 all three SDKs are installed before opening the solution in your IDE.
 
 The repository uses **MinVer** to derive the assembly version from Git tags.
@@ -99,7 +99,7 @@ Grafana, and three API replicas when run.
 
 ## Running tests
 
-The full suite is Docker-backed — start Docker (or OrbStack) first. Then:
+The full suite is Docker-backed; start Docker (or OrbStack) first. Then:
 
 ```bash
 # Run everything in Release (the CI equivalent)
@@ -126,9 +126,8 @@ dotnet test tests/Talaria.AppHost.Tests/Talaria.AppHost.Tests.csproj --configura
 
 A passing local run should match the CI baseline:
 
-- ~110 tests pass with Docker available.
-- ~14 tests are gated behind `[DockerFact]` and skip without Docker
-  (covering Redis, Kafka, and AppHost multi-container paths).
+- All tests that can run in the current environment pass.
+- `[DockerFact]`-gated tests skip without Docker (covering Redis, Kafka, and AppHost multi-container paths).
 - 0 failures, 0 unexpected skips.
 
 Tests under `tests/Talaria.Specs/` use xUnit and SpecFlow-style
@@ -142,7 +141,7 @@ focused unit tests alongside the production code under `tests/Talaria.*Tests/`.
 - **Language version**: C# 12 / latest stable; nullable reference types are
   enabled project-wide (`<Nullable>enable</Nullable>`).
 - **Style**: match the surrounding code. Run `dotnet format Talaria.slnx`
-  before committing — CI runs `dotnet format --verify-no-changes` as a gate.
+  before committing.
 - **XML doc comments**: required on all `public` and `protected` members of
   `Talaria.Core` and the transport / state-store libraries. The project
   ships the XML doc file in its NuGet package. CS1591 is suppressed, but
@@ -215,7 +214,7 @@ defaults, default interface members) are preferred.
 7. **Review turnaround.** A maintainer will either approve, request
    changes, or leave non-blocking comments. Force-pushes are fine; please
    mark conversations as resolved after addressing them.
-8. **Merge.** The maintainer merges once approved and CI is green — do
+8. **Merge.** The maintainer merges once approved and CI is green; do
    not merge your own PR.
 
 ---
@@ -254,4 +253,4 @@ remarks, a README section, and a SpecFlow feature.
 - Open a discussion on the issue tracker.
 - For security-sensitive questions, follow [`SECURITY.md`](SECURITY.md).
 - For commercial licensing or support, see [`docs/LICENSE-RATIONALE.md`](docs/LICENSE-RATIONALE.md)
-  and the **License** section of the [README](README.md#-license).
+  and the **License** section of the [README](README.md#license).

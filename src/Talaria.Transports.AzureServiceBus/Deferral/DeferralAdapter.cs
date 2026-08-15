@@ -9,7 +9,7 @@ namespace Talaria.Transports.AzureServiceBus.Deferral;
 /// Adapter that splits <see cref="IDeferralStore.EnqueueAsync"/> calls into two paths:
 /// <list type="bullet">
 ///   <item>
-///     <b>Short/medium deferrals</b> \u2014 the wait is &lt;= <see cref="DeferralAdapterOptions.ShortTermCutoff"/>
+///     <b>Short/medium deferrals:</b> the wait is &lt;= <see cref="DeferralAdapterOptions.ShortTermCutoff"/>
 ///     AND the JSON payload fits within <see cref="DeferralAdapterOptions.MaxPayloadBytes"/>. The adapter
 ///     hands the message directly to Azure Service Bus via <see cref="Azure.Messaging.ServiceBus.ServiceBusMessage.ScheduledEnqueueTime"/>
 ///     so the broker holds and then publishes it. Nothing is stored in the durable
@@ -17,7 +17,7 @@ namespace Talaria.Transports.AzureServiceBus.Deferral;
 ///     the broker's scheduled queue.
 ///   </item>
 ///   <item>
-///     <b>Long/deadline deferrals</b> \u2014 everything else. The adapter passes the entry
+///     <b>Long/deadline deferrals:</b> everything else. The adapter passes the entry
 ///     through to the durable <see cref="IDeferralStore"/> supplied at construction.
 ///     The deferral sweeper republishes those entries via the regular
 ///     <see cref="Talaria.Core.Abstractions.IProducer{T}"/> exactly as before the adapter existed.
@@ -32,7 +32,7 @@ namespace Talaria.Transports.AzureServiceBus.Deferral;
 /// the DI container is the same one-liner the engine already uses for any other
 /// <c>IDeferralStore</c>. <see cref="AcquireDueAsync"/>, <see cref="CompleteAsync"/>,
 /// and <see cref="AbandonAsync"/> are pure pass-throughs to the durable backing
-/// store \u2014 the broker's own scheduled-queue holds short-term entries, so the sweeper
+/// store. The broker's own scheduled-queue holds short-term entries, so the sweeper
 /// only ever sees long-term ones. Pairing the adapter with <c>UseInMemoryDeferralStore()</c>
 /// or <c>UseRedisDeferralStore()</c> works without engine changes.
 /// </remarks>
@@ -45,13 +45,13 @@ public sealed class DeferralAdapter : IDeferralStore
     private readonly TimeProvider _clock;
 
     /// <summary>
-    /// Constructs the adapter. <paramref name="longTermStore"/> must not be null \u2014 the
+    /// Constructs the adapter. <paramref name="longTermStore"/> must not be null. The
     /// adapter composes it for any deferral that does not fit the short-term window.
     /// </summary>
     /// <param name="scheduler">Broker-side send/schedule seam.</param>
     /// <param name="longTermStore">Durable store for long/deadline deferrals and for all lease acquire/complete/abandon flows.</param>
     /// <param name="adapterOptions">Routing thresholds.</param>
-    /// <param name="clock">Time provider \u2014 injected so tests can pin "now".</param>
+    /// <param name="clock">Time provider; injected so tests can pin "now".</param>
     internal DeferralAdapter(
         IServiceBusMessageScheduler scheduler,
         IDeferralStore longTermStore,
