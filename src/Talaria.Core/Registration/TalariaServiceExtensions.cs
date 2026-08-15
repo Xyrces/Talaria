@@ -3,6 +3,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
+using Talaria.Core;
 using Talaria.Core.Hosting;
 
 namespace Talaria.Core.Registration;
@@ -20,9 +21,10 @@ public static class TalariaServiceExtensions
     /// <returns>A <see cref="TalariaBuilder"/> for fluent configuration.</returns>
     /// <remarks>
     /// Registers the <see cref="TalariaOptions"/>, the topic + saga registries, the
-    /// options validator, and the topic + saga hosted services. The host does not
-    /// start any consumers until at least one <c>MapTopic</c> or <c>MapSaga</c> call
-    /// is also made against the service provider.
+    /// options validator, the shared <see cref="TalariaListener"/>, and the single
+    /// <see cref="TalariaHostedService"/> adapter. The host does not start any consumers
+    /// until at least one <c>MapTopic</c> or <c>MapSaga</c> call is also made against the
+    /// service provider.
     /// </remarks>
     public static TalariaBuilder AddTalaria(this IServiceCollection services)
     {
@@ -31,8 +33,9 @@ public static class TalariaServiceExtensions
         services.AddOptions<TalariaOptions>();
         services.TryAddEnumerable(
             ServiceDescriptor.Singleton<IValidateOptions<TalariaOptions>, TalariaOptionsValidator>());
+        services.TryAddSingleton(sp => sp.GetRequiredService<IOptions<TalariaOptions>>().Value);
+        services.TryAddSingleton<TalariaListener>();
         services.AddHostedService<TalariaHostedService>();
-        services.AddHostedService<SagaHostedService>();
 
         return new TalariaBuilder(services);
     }
@@ -50,5 +53,17 @@ public static class TalariaServiceExtensions
         var builder = services.AddTalaria();
         builder.Configure(configure);
         return builder;
+    }
+
+    /// <summary>
+    /// Returns the shared <see cref="TalariaListener"/> from a built DI container so the
+    /// caller can manage its lifecycle manually (e.g. in a console app that still uses DI
+    /// for stores and transport, or in a custom composition root).
+    /// </summary>
+    /// <param name="services">The built service provider.</param>
+    /// <returns>The singleton <see cref="TalariaListener"/>.</returns>
+    public static TalariaListener BuildTalariaListener(this IServiceProvider services)
+    {
+        return services.GetRequiredService<TalariaListener>();
     }
 }

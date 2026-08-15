@@ -31,7 +31,7 @@ public class TalariaEndpointExtensionsTests
         Assert.Equal("test", reg.TopicName);
         Assert.Equal(typeof(string), reg.MessageType);
         
-        await reg.Handler("payload", new MessageHeaders(), CancellationToken.None);
+        await reg.Handler("payload", new MessageHeaders(), EnvelopeMetadata.Empty, CancellationToken.None);
         Assert.True(called);
     }
 
@@ -40,8 +40,8 @@ public class TalariaEndpointExtensionsTests
     {
         var provider = CreateProvider();
         MessageEnvelope<string>? received = null;
-        
-        provider.MapTopicWithEnvelope<string>("test-env", (e, c) => 
+
+        provider.MapTopicWithEnvelope<string>("test-env", (e, c) =>
         {
             received = e;
             return Task.CompletedTask;
@@ -49,15 +49,20 @@ public class TalariaEndpointExtensionsTests
 
         var registry = provider.GetRequiredService<TopicRegistry>();
         var reg = registry.Registrations.First();
-        
+
         var headers = new MessageHeaders();
         headers["some-key"] = "test";
-        await reg.Handler("hello", headers, CancellationToken.None);
-        
+        var metadata = new EnvelopeMetadata("part-key", 7, 42L, DateTimeOffset.UtcNow, "corr-1");
+        await reg.Handler("hello", headers, metadata, CancellationToken.None);
+
         Assert.NotNull(received);
         Assert.Equal("hello", received!.Payload);
         Assert.Equal("test", received.Headers["some-key"]);
         Assert.Equal("test-env", received.SourceTopic);
+        Assert.Equal("part-key", received.PartitionKey);
+        Assert.Equal(7, received.Partition);
+        Assert.Equal(42L, received.Offset);
+        Assert.Equal("corr-1", received.CorrelationId);
     }
 
     [Fact]
@@ -65,16 +70,16 @@ public class TalariaEndpointExtensionsTests
     {
         var provider = CreateProvider();
         bool called = false;
-        
-        provider.MapTopic<string>("test-sync", m => 
+
+        provider.MapTopic<string>("test-sync", m =>
         {
             called = true;
         });
 
         var registry = provider.GetRequiredService<TopicRegistry>();
         var reg = registry.Registrations.First();
-        
-        await reg.Handler("payload", new MessageHeaders(), CancellationToken.None);
+
+        await reg.Handler("payload", new MessageHeaders(), EnvelopeMetadata.Empty, CancellationToken.None);
         Assert.True(called);
     }
 

@@ -9,6 +9,7 @@ using Talaria.Core;
 using Talaria.Core.Abstractions;
 using Talaria.Core.Hosting;
 using Talaria.Core.Registration;
+using Talaria.Core.Sagas;
 using Talaria.Transports.InMemory;
 using Xunit;
 
@@ -31,7 +32,7 @@ public class SagaCancellationTests
         {
             TopicName = "cancel-topic",
             MessageType = typeof(CancelMessage),
-            Handler = async (msg, headers, ct) =>
+            Handler = async (msg, headers, _, ct) =>
             {
                 // Block mid-handler until the test signals completion.
                 handlerEntered.TrySetResult();
@@ -40,15 +41,16 @@ public class SagaCancellationTests
         });
 
         var services = new ServiceCollection().BuildServiceProvider();
-        var hostedService = new TalariaHostedService(
+        var listener = new TalariaListener(
             transport,
             topicReg,
-            Options.Create(new TalariaOptions { ApplicationName = "test-app" }),
-            NullLogger<TalariaHostedService>.Instance,
+            new SagaRegistry(),
+            new TalariaOptions { ApplicationName = "test-app" },
+            NullLogger<TalariaListener>.Instance,
             services);
 
         using var cts = new CancellationTokenSource();
-        await hostedService.StartAsync(cts.Token);
+        await listener.StartAsync(cts.Token);
 
         var producer = await transport.CreateProducerAsync<CancelMessage>("cancel-topic", new ProducerOptions());
         await producer.ProduceAsync(new CancelMessage { Id = "m1" });
@@ -63,7 +65,7 @@ public class SagaCancellationTests
 
         var sw = Stopwatch.StartNew();
         using var stopCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        await hostedService.StopAsync(stopCts.Token);
+        await listener.StopAsync(stopCts.Token);
         sw.Stop();
 
         Assert.True(sw.Elapsed < TimeSpan.FromSeconds(5), $"StopAsync took too long: {sw.Elapsed}.");

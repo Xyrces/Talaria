@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Talaria.Core.Abstractions;
 using Talaria.Core.Hosting;
@@ -55,7 +56,7 @@ public class RetryCoordinatorTests
         {
             TopicName = "test.topic",
             MessageType = typeof(string),
-            Handler = (_, _, _) => Task.CompletedTask,
+            Handler = (_, _, _, _) => Task.CompletedTask,
         };
 
         var outcome = await coordinator.TryCoordinateTopicRetryAsync(
@@ -80,7 +81,7 @@ public class RetryCoordinatorTests
         {
             TopicName = "test.topic",
             MessageType = typeof(string),
-            Handler = (_, _, _) => Task.CompletedTask,
+            Handler = (_, _, _, _) => Task.CompletedTask,
         };
 
         var outcome = await coordinator.TryCoordinateTopicRetryAsync(
@@ -116,7 +117,7 @@ public class RetryCoordinatorTests
         {
             TopicName = "test.topic",
             MessageType = typeof(string),
-            Handler = (_, _, _) => Task.CompletedTask,
+            Handler = (_, _, _, _) => Task.CompletedTask,
         };
 
         var outcome = await coordinator.TryCoordinateTopicRetryAsync(
@@ -141,7 +142,7 @@ public class RetryCoordinatorTests
         {
             TopicName = "test.topic",
             MessageType = typeof(string),
-            Handler = (_, _, _) => Task.CompletedTask,
+            Handler = (_, _, _, _) => Task.CompletedTask,
         };
 
         var outcome = await coordinator.TryCoordinateTopicRetryAsync(
@@ -165,7 +166,7 @@ public class RetryCoordinatorTests
         {
             TopicName = "test.topic",
             MessageType = typeof(string),
-            Handler = (_, _, _) => Task.CompletedTask,
+            Handler = (_, _, _, _) => Task.CompletedTask,
         };
 
         var outcome = await coordinator.TryCoordinateTopicRetryAsync(
@@ -189,7 +190,7 @@ public class RetryCoordinatorTests
         {
             TopicName = "test.topic",
             MessageType = typeof(string),
-            Handler = (_, _, _) => Task.CompletedTask,
+            Handler = (_, _, _, _) => Task.CompletedTask,
         };
 
         var outcome = await coordinator.TryCoordinateTopicRetryAsync(
@@ -216,7 +217,7 @@ public class RetryCoordinatorTests
         {
             TopicName = "test.topic",
             MessageType = typeof(string),
-            Handler = (_, _, _) => Task.CompletedTask,
+            Handler = (_, _, _, _) => Task.CompletedTask,
         };
 
         var outcome = await coordinator.TryCoordinateTopicRetryAsync(
@@ -256,7 +257,7 @@ public class RetryCoordinatorTests
                 RetryInterval = TimeSpan.FromMilliseconds(50),
                 BackoffType = RetryBackoffType.Fixed,
             },
-            Handler = (_, _, _) => Task.CompletedTask,
+            Handler = (_, _, _, _) => Task.CompletedTask,
         };
 
         var outcome = await coordinator.TryCoordinateTopicRetryAsync(
@@ -344,10 +345,11 @@ public class RetryCoordinatorTests
     {
         var store = new FakeDeferralStore();
         var options = OptionsWithRetries(maxAttempts: 2);
-        var idempotencyStore = new FakeIdempotencyStore();
+        var calls = new List<string>();
+        var idempotencyStore = new FakeIdempotencyStore(calls);
         var pipeline = new MessageProcessingPipeline(idempotencyStore, options, NullLogger.Instance);
         var coordinator = new RetryCoordinator(store, options, NullLogger.Instance);
-        var consumer = new FakeConsumer<string>();
+        var consumer = new FakeConsumer<string>(calls);
         var envelope = Envelope<string>("payload", "msg-1");
         var lck = await idempotencyStore.TryAcquireLockAsync("msg-1", "cg", TimeSpan.FromMinutes(1), default);
         Assert.NotNull(lck);
@@ -355,7 +357,7 @@ public class RetryCoordinatorTests
         {
             TopicName = "test.topic",
             MessageType = typeof(string),
-            Handler = (_, _, _) => Task.CompletedTask,
+            Handler = (_, _, _, _) => Task.CompletedTask,
         };
 
         var outcome = await coordinator.TryCoordinateTopicRetryAsync(
@@ -365,7 +367,11 @@ public class RetryCoordinatorTests
         Assert.Single(consumer.Committed);
         Assert.Contains(lck, idempotencyStore.Released);
         // Commit must be recorded before the lock release.
-        Assert.True(consumer.CommitCallCount <= idempotencyStore.ReleaseCallCount);
+        var commitIndex = calls.IndexOf("commit");
+        var releaseIndex = calls.IndexOf("release");
+        Assert.True(commitIndex >= 0, "Commit was not recorded.");
+        Assert.True(releaseIndex >= 0, "Release was not recorded.");
+        Assert.True(commitIndex < releaseIndex, "Commit must occur before release.");
     }
 
     [Fact]
@@ -384,7 +390,7 @@ public class RetryCoordinatorTests
         {
             TopicName = "test.topic",
             MessageType = typeof(string),
-            Handler = (_, _, _) => Task.CompletedTask,
+            Handler = (_, _, _, _) => Task.CompletedTask,
         };
 
         var outcome = await coordinator.TryCoordinateTopicRetryAsync(
@@ -417,6 +423,146 @@ public class RetryCoordinatorTests
         Assert.False(cloned.ContainsKey(MessageHeaders.DlqAttemptsKey));
     }
 
+    [Fact]
+    public async Task TryCoordinateTopicRetryAsync_NoOriginalMessageId_CreatesStableRoot()
+    {
+        var store = new FakeDeferralStore();
+        var options = OptionsWithRetries(maxAttempts: 3);
+        var coordinator = new RetryCoordinator(store, options, NullLogger.Instance);
+        var pipeline = new MessageProcessingPipeline(null, options, NullLogger.Instance);
+        var consumer = new FakeConsumer<string>();
+        var envelope = Envelope<string>("payload");
+        var registration = new TopicRegistration
+        {
+            TopicName = "test.topic",
+            MessageType = typeof(string),
+            Handler = (_, _, _, _) => Task.CompletedTask,
+        };
+
+        var outcome1 = await coordinator.TryCoordinateTopicRetryAsync(
+            registration, pipeline, consumer, envelope, new InvalidOperationException("boom"), null, default);
+
+        Assert.Equal(RetryCoordinator.RetryOutcome.Scheduled, outcome1);
+        Assert.Single(store.Enqueued);
+        var first = store.Enqueued[0];
+        Assert.NotNull(first.Headers.RetryRootMessageId);
+        Assert.Equal($"{first.Headers.RetryRootMessageId}:retry:1", first.Headers.MessageId);
+
+        // Simulate the second attempt: the deferred copy is republished with RetryAttempt = 1.
+        var secondEnvelope = new MessageEnvelope<string>
+        {
+            Payload = "payload",
+            Headers = new MessageHeaders(first.Headers) { RetryAttempt = 1 },
+            SourceTopic = "test.topic",
+        };
+
+        var outcome2 = await coordinator.TryCoordinateTopicRetryAsync(
+            registration, pipeline, consumer, secondEnvelope, new InvalidOperationException("boom"), null, default);
+
+        Assert.Equal(RetryCoordinator.RetryOutcome.Scheduled, outcome2);
+        Assert.Equal(2, store.Enqueued.Count);
+        var second = store.Enqueued[1];
+        Assert.Equal(first.Headers.RetryRootMessageId, second.Headers.RetryRootMessageId);
+        Assert.Equal($"{first.Headers.RetryRootMessageId}:retry:2", second.Headers.MessageId);
+    }
+
+    [Theory]
+    [InlineData("not-a-number")]
+    [InlineData("2147483648")]
+    public async Task TryCoordinateTopicRetryAsync_MalformedRetryAttempt_LogsWarning_AndTreatsAsZero(string rawValue)
+    {
+        var store = new FakeDeferralStore();
+        var options = OptionsWithRetries(maxAttempts: 2);
+        var logger = new CollectingLogger();
+        var coordinator = new RetryCoordinator(store, options, logger);
+        var pipeline = new MessageProcessingPipeline(null, options, logger);
+        var consumer = new FakeConsumer<string>();
+        var envelope = Envelope<string>("payload", "msg-1");
+        envelope.Headers[MessageHeaders.RetryAttemptKey] = rawValue;
+        var registration = new TopicRegistration
+        {
+            TopicName = "test.topic",
+            MessageType = typeof(string),
+            Handler = (_, _, _, _) => Task.CompletedTask,
+        };
+
+        var outcome = await coordinator.TryCoordinateTopicRetryAsync(
+            registration, pipeline, consumer, envelope, new InvalidOperationException("boom"), null, default);
+
+        Assert.Equal(RetryCoordinator.RetryOutcome.Scheduled, outcome);
+        Assert.Single(store.Enqueued);
+        Assert.Equal(1, store.Enqueued[0].Attempt);
+        Assert.Contains(logger.Entries, e =>
+            e.LogLevel == LogLevel.Warning &&
+            e.Message.Contains("malformed retry attempt header") &&
+            e.Message.Contains(rawValue));
+    }
+
+    [Fact]
+    public async Task TryCoordinateTopicRetryAsync_RetryUnavailable_SetsDlqAttempts()
+    {
+        var options = OptionsWithRetries(maxAttempts: 2);
+        var coordinator = new RetryCoordinator(null, options, NullLogger.Instance);
+        var pipeline = new MessageProcessingPipeline(null, options, NullLogger.Instance);
+        var consumer = new FakeConsumer<string>();
+        var envelope = Envelope<string>("payload", "msg-1", retryAttempt: 1);
+        var registration = new TopicRegistration
+        {
+            TopicName = "test.topic",
+            MessageType = typeof(string),
+            Handler = (_, _, _, _) => Task.CompletedTask,
+        };
+
+        var outcome = await coordinator.TryCoordinateTopicRetryAsync(
+            registration, pipeline, consumer, envelope, new InvalidOperationException("boom"), null, default);
+
+        Assert.Equal(RetryCoordinator.RetryOutcome.Unavailable, outcome);
+        Assert.Single(consumer.Nacked);
+        Assert.Equal("retry_unavailable", consumer.Nacked[0].Headers.DlqReason);
+        Assert.Equal(1, consumer.Nacked[0].Headers.DlqAttempts);
+    }
+
+    [Fact]
+    public async Task TryCoordinateTopicRetryAsync_EnqueueThrows_SetsDlqAttempts()
+    {
+        var store = new FakeDeferralStore { ThrowOnEnqueue = true };
+        var options = OptionsWithRetries(maxAttempts: 2);
+        var coordinator = new RetryCoordinator(store, options, NullLogger.Instance);
+        var pipeline = new MessageProcessingPipeline(null, options, NullLogger.Instance);
+        var consumer = new FakeConsumer<string>();
+        var envelope = Envelope<string>("payload", "msg-1", retryAttempt: 1);
+        var registration = new TopicRegistration
+        {
+            TopicName = "test.topic",
+            MessageType = typeof(string),
+            Handler = (_, _, _, _) => Task.CompletedTask,
+        };
+
+        var outcome = await coordinator.TryCoordinateTopicRetryAsync(
+            registration, pipeline, consumer, envelope, new InvalidOperationException("boom"), null, default);
+
+        Assert.Equal(RetryCoordinator.RetryOutcome.Unavailable, outcome);
+        Assert.Single(consumer.Nacked);
+        Assert.Equal("retry_unavailable", consumer.Nacked[0].Headers.DlqReason);
+        Assert.Equal(1, consumer.Nacked[0].Headers.DlqAttempts);
+    }
+
+    private sealed class CollectingLogger : ILogger
+    {
+        public List<LogEntry> Entries { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            Entries.Add(new LogEntry(logLevel, formatter(state, exception)));
+        }
+    }
+
+    private sealed record LogEntry(LogLevel LogLevel, string Message);
+
     private sealed class FakeDeferralStore : IDeferralStore
     {
         public List<DeferredMessage> Enqueued { get; } = new();
@@ -447,12 +593,19 @@ public class RetryCoordinatorTests
         public List<MessageEnvelope<T>> Nacked { get; } = new();
         public int CommitCallCount { get; private set; }
         public bool ThrowOnCommit { get; set; }
+        public List<string> Calls { get; }
+
+        public FakeConsumer(List<string>? calls = null)
+        {
+            Calls = calls ?? new List<string>();
+        }
 
         public IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsync(CancellationToken ct = default) => throw new NotImplementedException();
 
         public Task CommitAsync(MessageEnvelope<T> envelope, CancellationToken ct = default)
         {
             CommitCallCount++;
+            Calls.Add("commit");
             if (ThrowOnCommit)
             {
                 throw new InvalidOperationException("commit failed");
@@ -476,6 +629,12 @@ public class RetryCoordinatorTests
         private readonly Dictionary<string, IdempotencyLock> _locks = new();
         public List<IdempotencyLock> Released { get; } = new();
         public int ReleaseCallCount { get; private set; }
+        public List<string> Calls { get; }
+
+        public FakeIdempotencyStore(List<string>? calls = null)
+        {
+            Calls = calls ?? new List<string>();
+        }
 
         public Task<IdempotencyLock?> TryAcquireLockAsync(string messageId, string consumerGroup, TimeSpan ttl, CancellationToken ct = default)
         {
@@ -489,6 +648,7 @@ public class RetryCoordinatorTests
         public Task ReleaseLockAsync(IdempotencyLock lck, CancellationToken ct = default)
         {
             ReleaseCallCount++;
+            Calls.Add("release");
             Released.Add(lck);
             return Task.CompletedTask;
         }

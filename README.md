@@ -6,7 +6,7 @@ Talaria is a distributed messaging and saga orchestration library for **.NET** (
 
 Talaria provides **at-least-once delivery with idempotent processing**:
 
-- When delayed retries are disabled (the default), consumers commit offsets only after successful processing, so failures redeliver. When retries are enabled, a handler failure commits the original delivery as soon as a retry copy is durably scheduled in the `IDeferralStore`; the sweeper republishes the retry copy later. The original message is therefore acknowledged before the retry runs, and the idempotency store (keyed by `MessageId`) ensures the retry copy — which carries a freshly minted `MessageId` — is processed exactly once.
+- When delayed retries are disabled (the default), consumers commit offsets only after successful processing; unhandled handler failures are routed to the DLQ. When retries are enabled, a handler failure commits the original delivery as soon as a retry copy is durably scheduled in the `IDeferralStore`; the sweeper republishes the retry copy later. The original message is therefore acknowledged before the retry runs, and the idempotency store (keyed by `MessageId`) ensures the retry copy — which carries a freshly minted `MessageId` — is processed exactly once.
 - A distributed idempotency store (`IIdempotencyStore`) deduplicates by `MessageId` using fencing-token locks, so redeliveries and duplicate publishes are processed exactly once per consumer group.
 - Saga outbound messages go through a **transactional outbox**: the state transition and its outbound messages are staged in one atomic store operation (`IStateStore.TransitionAsync`), then a leased relay publishes them at-least-once. Each staged message carries a minted `MessageId`, so a duplicate publish after a relay crash is deduplicated by the downstream idempotency gate. A crash after the atomic transition loses nothing.
 - The replay window that remains is between the atomic transition and the offset commit: a crash there replays the message against transitioned state. Starter steps are protected by a built-in replay guard; custom step handlers should be idempotent.
@@ -225,6 +225,70 @@ Notes:
 - Dispatches are staged in the transactional outbox atomically with the state transition and published asynchronously by the relay — expect a small relay-latency delay (poll interval configurable via `TalariaOptions.OutboxRelayInterval`, default 250ms).
 - Dispatching a message type with no `DispatchTo` mapping dead-letters the triggering message (`unmapped_dispatch`) without saving state.
 - Multiple saga steps (and stateless handlers) may share one topic — messages are fanned out by a `talaria.message_type` header.
+
+### Host-agnostic usage (console apps / custom composition roots)
+
+Talaria can run without `IHost` via `TalariaListener`. It exposes explicit `StartAsync` / `StopAsync` and supports the full supervision, hop-guard, idempotency, retry, deferral-sweeper, and outbox-relay pipeline.
+
+```csharp
+using Talaria.Core;
+using Talaria.Core.Abstractions;
+using Talaria.Core.Hosting;
+using Talaria.Core.Registration;
+using Talaria.Core.Sagas;
+using Talaria.Transports.InMemory;
+
+var transport = new InMemoryTransport();
+var topicRegistry = new TopicRegistry();
+var sagaRegistry = new SagaRegistry();
+
+topicRegistry.MapTopic<SendVerificationEmailCommand>("email-commands", async (msg, ct) =>
+{
+    await EmailService.Dispatch(msg.Email);
+});
+
+sagaRegistry.MapSaga<OnboardingState>(saga =>
+{
+    saga.StartedBy<CreateAccountCommand>("onboarding-commands", async (msg, ctx) =>
+    {
+        var state = new OnboardingState { AccountId = msg.AccountId };
+        ctx.Dispatch(new SendVerificationEmailCommand { AccountId = msg.AccountId });
+        return ctx.Transition(state);
+    }, correlateBy: msg => msg.AccountId);
+
+    saga.DispatchTo<SendVerificationEmailCommand>("email-commands");
+});
+
+// Sagas require an IServiceProvider that can resolve IStateStore<TState>.
+var services = new ServiceCollection()
+    .AddSingleton<ITransport>(transport)
+    .AddSingleton(typeof(IStateStore<>), typeof(InMemoryStateStore<>))
+    .BuildServiceProvider();
+
+await using var listener = new TalariaListener(
+    transport,
+    topicRegistry,
+    sagaRegistry,
+    new TalariaOptions { ApplicationName = "my-console-app" },
+    LoggerFactory.Create(b => b.AddConsole()).CreateLogger<TalariaListener>(),
+    services);
+
+await listener.StartAsync();
+Console.WriteLine("Press enter to stop...");
+Console.ReadLine();
+await listener.StopAsync();
+```
+
+In a DI-based app you can still grab the singleton listener manually:
+
+```csharp
+var listener = app.Services.BuildTalariaListener();
+await listener.StartAsync();
+// ...
+await listener.StopAsync();
+```
+
+`TalariaListener` is single-cycle: `StartAsync` after `StopAsync` throws `InvalidOperationException`. Double-start and double-stop are idempotent no-ops. Disposing the listener stops it if running but does not dispose caller-owned transports or stores.
 
 ---
 

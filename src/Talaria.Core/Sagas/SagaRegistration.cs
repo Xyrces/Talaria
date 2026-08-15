@@ -36,7 +36,7 @@ public class SagaStepRegistration
     /// <summary>True for steps that start a new saga instance; false for transitions.</summary>
     public required bool IsStarter { get; init; }
 
-    // The generic delegate signature for executing the step from the HostedService:
+    // The generic delegate signature for executing the step from TalariaListener:
     // Task<SagaResult<object>> Execute(object? state, object payload, ISagaContext<object> context)
     /// <summary>The erased async handler invoked for each delivered message.</summary>
     public required Func<object?, object, ISagaContext<object>, Task<SagaResult<object>>> Handler { get; init; }

@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Talaria.Core.Abstractions;
 using Talaria.Core.Sagas;
@@ -29,8 +28,9 @@ public static class TalariaEndpointExtensions
         Func<T, CancellationToken, Task> handler,
         RetryPolicy? retryPolicy = null)
     {
-        return AddTopicRegistration(services, topic, typeof(T), retryPolicy, null,
-            async (payload, _, ct) => await handler((T)payload, ct));
+        var registry = services.GetRequiredService<TopicRegistry>();
+        registry.MapTopic(topic, handler, retryPolicy);
+        return services;
     }
 
     /// <summary>
@@ -52,8 +52,9 @@ public static class TalariaEndpointExtensions
         Func<T, CancellationToken, Task> handler,
         RetryPolicy? retryPolicy = null)
     {
-        return AddTopicRegistration(services, topic, typeof(T), retryPolicy, consumerGroup,
-            async (payload, _, ct) => await handler((T)payload, ct));
+        var registry = services.GetRequiredService<TopicRegistry>();
+        registry.MapTopic(topic, consumerGroup, handler, retryPolicy);
+        return services;
     }
 
     /// <summary>
@@ -76,17 +77,9 @@ public static class TalariaEndpointExtensions
         Func<MessageEnvelope<T>, CancellationToken, Task> handler,
         RetryPolicy? retryPolicy = null)
     {
-        return AddTopicRegistration(services, topic, typeof(T), retryPolicy, null,
-            async (payload, headers, ct) =>
-            {
-                var envelope = new MessageEnvelope<T>
-                {
-                    Payload = (T)payload,
-                    Headers = headers,
-                    SourceTopic = topic,
-                };
-                await handler(envelope, ct);
-            });
+        var registry = services.GetRequiredService<TopicRegistry>();
+        registry.MapTopicWithEnvelope(topic, handler, retryPolicy);
+        return services;
     }
 
     /// <summary>
@@ -104,11 +97,9 @@ public static class TalariaEndpointExtensions
         Action<T> handler,
         RetryPolicy? retryPolicy = null)
     {
-        return services.MapTopic<T>(topic, (msg, _) =>
-        {
-            handler(msg);
-            return Task.CompletedTask;
-        }, retryPolicy);
+        var registry = services.GetRequiredService<TopicRegistry>();
+        registry.MapTopic(topic, handler, retryPolicy);
+        return services;
     }
 
     /// <summary>
@@ -130,39 +121,8 @@ public static class TalariaEndpointExtensions
         Action<SagaConfigurator<TState>> configure) where TState : class, new()
     {
         var registry = services.GetRequiredService<SagaRegistry>();
-        var configurator = new SagaConfigurator<TState>(registry);
-        configure(configurator);
-        configurator.Complete();
+        registry.MapSaga(configure);
 
-        return services;
-    }
-
-    private static IServiceProvider AddTopicRegistration(
-        IServiceProvider services,
-        string topic,
-        Type messageType,
-        RetryPolicy? retryPolicy,
-        string? consumerGroup,
-        Func<object, MessageHeaders, CancellationToken, Task> handler)
-    {
-        if (retryPolicy is not null)
-        {
-            var validation = TalariaOptionsValidator.ValidateRetryPolicy(retryPolicy, nameof(retryPolicy));
-            if (validation is not null)
-            {
-                throw new ArgumentException(validation.FailureMessage, nameof(retryPolicy));
-            }
-        }
-
-        var registry = services.GetRequiredService<TopicRegistry>();
-        registry.Add(new TopicRegistration
-        {
-            TopicName = topic,
-            MessageType = messageType,
-            ConsumerGroup = consumerGroup,
-            RetryPolicy = retryPolicy,
-            Handler = handler,
-        });
         return services;
     }
 }

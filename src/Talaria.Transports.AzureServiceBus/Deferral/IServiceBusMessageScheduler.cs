@@ -18,7 +18,7 @@ namespace Talaria.Transports.AzureServiceBus.Deferral;
 /// this interface is intentionally narrow because the short-term path does exactly
 /// one operation. The long-term deferral path does NOT use this interface \u2014
 /// entries there are stored in the durable <see cref="Talaria.Core.Abstractions.IDeferralStore"/>
-/// and republished by the saga hosted service sweeper via the regular
+/// and republished by the deferral sweeper via the regular
 /// <see cref="Talaria.Core.Abstractions.IProducer{T}"/>.
 /// </remarks>
 /// <since>1.0.0</since>

@@ -17,7 +17,7 @@ public class RegistrySealTests
         {
             TopicName = "early",
             MessageType = typeof(string),
-            Handler = (_, _, _) => Task.CompletedTask,
+            Handler = (_, _, _, _) => Task.CompletedTask,
         });
 
         Assert.Single(registry.Registrations);
@@ -34,7 +34,7 @@ public class RegistrySealTests
         {
             TopicName = "late",
             MessageType = typeof(string),
-            Handler = (_, _, _) => Task.CompletedTask,
+            Handler = (_, _, _, _) => Task.CompletedTask,
         }));
 
         Assert.Contains("MapTopic", ex.Message);
@@ -53,7 +53,7 @@ public class RegistrySealTests
         {
             TopicName = "late",
             MessageType = typeof(string),
-            Handler = (_, _, _) => Task.CompletedTask,
+            Handler = (_, _, _, _) => Task.CompletedTask,
         }));
 
         Assert.True(registry.IsSealed);
@@ -122,7 +122,7 @@ public class RegistrySealTests
                         {
                             TopicName = $"topic-{i}",
                             MessageType = typeof(string),
-                            Handler = (_, _, _) => Task.CompletedTask,
+                            Handler = (_, _, _, _) => Task.CompletedTask,
                         });
                         Interlocked.Increment(ref addedCount);
                     }

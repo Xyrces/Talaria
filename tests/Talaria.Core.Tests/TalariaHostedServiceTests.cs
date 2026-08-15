@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Talaria.Core;
 using Talaria.Core.Abstractions;
+using Talaria.Core.Hosting;
 using Talaria.Core.Registration;
 using Talaria.Transports.InMemory;
 
@@ -42,13 +43,13 @@ public class TalariaHostedServiceTests
 
         // Act
         await host.StartAsync();
-        await Task.Delay(1000);
 
-        // Assert — handler should NOT have been called
+        // Assert — DLQ should have the message; handler should NOT have been called
+        var dlqMessages = await PollUntilAsync(
+            async () => await transport.ReadAllFromTopicAsync<TestMessage>("test.topic.dlq"),
+            m => m.Count == 1,
+            TimeSpan.FromSeconds(5));
         Assert.Empty(received);
-
-        // DLQ should have the message
-        var dlqMessages = await transport.ReadAllFromTopicAsync<TestMessage>("test.topic.dlq");
         Assert.Single(dlqMessages);
         Assert.Equal("MSG-HOP", dlqMessages[0].Payload.Id);
 
@@ -78,9 +79,11 @@ public class TalariaHostedServiceTests
         await producer.ProduceAsync(new TestMessage("MSG-FAIL"));
 
         await host.StartAsync();
-        await Task.Delay(1000);
 
-        var dlqMessages = await transport.ReadAllFromTopicAsync<TestMessage>("test.topic.dlq");
+        var dlqMessages = await PollUntilAsync(
+            async () => await transport.ReadAllFromTopicAsync<TestMessage>("test.topic.dlq"),
+            m => m.Count == 1,
+            TimeSpan.FromSeconds(5));
         Assert.Single(dlqMessages);
 
         await host.StopAsync();
@@ -113,8 +116,8 @@ public class TalariaHostedServiceTests
         await producer.ProduceAsync(new TestMessage("MSG-OK"));
 
         await host.StartAsync();
-        await Task.Delay(500);
 
+        await PollUntilAsync(() => Task.FromResult(received.Count == 1), TimeSpan.FromSeconds(5));
         Assert.Single(received);
         Assert.Equal("MSG-OK", received[0]);
 
@@ -175,6 +178,70 @@ public class TalariaHostedServiceTests
 
         await host.StopAsync();
         host.Dispose();
+    }
+
+    [Fact]
+    public async Task HostedService_Adapter_Forwards_Lifecycle_To_Listener()
+    {
+        var transport = new InMemoryTransport();
+
+        var builder = Host.CreateDefaultBuilder();
+        builder.ConfigureServices(services =>
+        {
+            services.AddTalaria(opts => opts.ApplicationName = "test-app")
+                    .UseInMemoryTransport(transport);
+        });
+
+        var host = builder.Build();
+
+        host.Services.MapTopic<TestMessage>("adapter.topic", (msg, ct) => Task.CompletedTask);
+
+        var listener = host.Services.GetRequiredService<TalariaListener>();
+        Assert.False(listener.IsRunning);
+
+        await host.StartAsync();
+        Assert.True(listener.IsRunning);
+
+        await host.StopAsync();
+        Assert.False(listener.IsRunning);
+
+        host.Dispose();
+    }
+
+    private static async Task<List<T>> PollUntilAsync<T>(
+        Func<Task<List<T>>> poll,
+        Func<List<T>, bool> condition,
+        TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            var result = await poll();
+            if (condition(result))
+            {
+                return result;
+            }
+
+            await Task.Delay(50);
+        }
+
+        return await poll();
+    }
+
+    private static async Task PollUntilAsync(Func<Task<bool>> condition, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (await condition())
+            {
+                return;
+            }
+
+            await Task.Delay(50);
+        }
+
+        await condition();
     }
 }
 

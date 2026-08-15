@@ -10,6 +10,7 @@ using Talaria.Core;
 using Talaria.Core.Abstractions;
 using Talaria.Core.Hosting;
 using Talaria.Core.Registration;
+using Talaria.Core.Sagas;
 using Talaria.Transports.InMemory;
 using Xunit;
 
@@ -34,7 +35,7 @@ public class EngineIdempotencyTests
             => throw new InvalidOperationException("Simulated idempotency store outage.");
     }
 
-    private static TalariaHostedService BuildService(
+    private static TalariaListener BuildService(
         InMemoryTransport transport,
         TopicRegistry topicReg,
         IIdempotencyStore store,
@@ -44,12 +45,14 @@ public class EngineIdempotencyTests
             .AddSingleton(store)
             .BuildServiceProvider();
 
-        return new TalariaHostedService(
+        return new TalariaListener(
             transport,
             topicReg,
-            Options.Create(new TalariaOptions { ApplicationName = AppName }),
-            NullLogger<TalariaHostedService>.Instance,
-            services);
+            new SagaRegistry(),
+            new TalariaOptions { ApplicationName = AppName },
+            NullLogger<TalariaListener>.Instance,
+            services,
+            new TalariaListenerStores(IdempotencyStore: store));
     }
 
     [Fact]
@@ -64,7 +67,7 @@ public class EngineIdempotencyTests
         {
             TopicName = "dup-topic",
             MessageType = typeof(DummyMessage),
-            Handler = (msg, headers, ct) =>
+            Handler = (msg, headers, _, ct) =>
             {
                 Interlocked.Increment(ref handlerCalls);
                 return Task.CompletedTask;
@@ -109,7 +112,7 @@ public class EngineIdempotencyTests
         {
             TopicName = "fail-topic",
             MessageType = typeof(DummyMessage),
-            Handler = (msg, headers, ct) =>
+            Handler = (msg, headers, _, ct) =>
             {
                 // First invocation throws; the retry (same MessageId) succeeds.
                 if (Interlocked.Increment(ref handlerCalls) == 1)
@@ -153,7 +156,7 @@ public class EngineIdempotencyTests
         {
             TopicName = "complete-topic",
             MessageType = typeof(DummyMessage),
-            Handler = (msg, headers, ct) =>
+            Handler = (msg, headers, _, ct) =>
             {
                 Interlocked.Increment(ref handlerCalls);
                 return Task.CompletedTask;
@@ -191,7 +194,7 @@ public class EngineIdempotencyTests
         {
             TopicName = "outage-topic",
             MessageType = typeof(DummyMessage),
-            Handler = (msg, headers, ct) =>
+            Handler = (msg, headers, _, ct) =>
             {
                 Interlocked.Increment(ref handlerCalls);
                 return Task.CompletedTask;

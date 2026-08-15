@@ -7,6 +7,7 @@ using Microsoft.Extensions.Options;
 using Talaria.Core;
 using Talaria.Core.Abstractions;
 using Talaria.Core.Hosting;
+using Talaria.Core.Registration;
 using Talaria.Core.Sagas;
 using Talaria.Transports.InMemory;
 using Xunit;
@@ -52,34 +53,40 @@ public class SagaRetryBehaviorTests
             .AddSingleton<IDeferralStore>(deferralStore)
             .BuildServiceProvider();
 
-        var hostedService = new SagaHostedService(registry, services, Options.Create(new TalariaOptions
-        {
-            ApplicationName = "test-app",
-            DeferralBackoff = TimeSpan.FromMilliseconds(50),
-            MaxDeferralAttempts = 5,
-            MinRetryDelay = TimeSpan.FromMilliseconds(50),
-            DefaultRetryPolicy = new RetryPolicy
+        var listener = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            new TalariaOptions
             {
-                MaxRetryAttempts = 2,
-                RetryInterval = TimeSpan.FromMilliseconds(50),
-                BackoffType = RetryBackoffType.Fixed,
+                ApplicationName = "test-app",
+                DeferralBackoff = TimeSpan.FromMilliseconds(50),
+                MaxDeferralAttempts = 5,
+                MinRetryDelay = TimeSpan.FromMilliseconds(50),
+                DefaultRetryPolicy = new RetryPolicy
+                {
+                    MaxRetryAttempts = 2,
+                    RetryInterval = TimeSpan.FromMilliseconds(50),
+                    BackoffType = RetryBackoffType.Fixed,
+                },
             },
-        }), NullLogger<SagaHostedService>.Instance);
+            NullLogger<TalariaListener>.Instance,
+            services);
 
         using var cts = new CancellationTokenSource();
-        await hostedService.StartAsync(cts.Token);
+        await listener.StartAsync(cts.Token);
 
         var startProducer = await transport.CreateProducerAsync<SagaRetryStart>("sr-start", new ProducerOptions());
         await startProducer.ProduceAsync(new SagaRetryStart { Id = "c1" });
 
         var store = services.GetRequiredService<IStateStore<SagaRetryState>>();
-        var started = await PollUntilAsync(async () => await store.GetAsync("c1") != null, TimeSpan.FromSeconds(5));
+        var started = await TestAsyncHelpers.PollUntilAsync(async () => await store.GetAsync("c1") != null, TimeSpan.FromSeconds(5));
         Assert.True(started, "Saga state was never created by the starter.");
 
         var stepProducer = await transport.CreateProducerAsync<SagaRetryStep>("sr-step", new ProducerOptions());
         await stepProducer.ProduceAsync(new SagaRetryStep { Id = "c1" }, new MessageHeaders { MessageId = "sr-step-1" });
 
-        var succeeded = await PollUntilAsync(async () =>
+        var succeeded = await TestAsyncHelpers.PollUntilAsync(async () =>
         {
             var state = await store.GetAsync("c1");
             return Volatile.Read(ref stepRuns) >= 2 && state is { Transitions: 1 };
@@ -87,7 +94,7 @@ public class SagaRetryBehaviorTests
 
         Assert.True(succeeded, $"Step did not succeed on retry (runs={Volatile.Read(ref stepRuns)}).");
 
-        var stable = await PollStableAsync(async () =>
+        var stable = await TestAsyncHelpers.PollStableAsync(async () =>
         {
             var state = await store.GetAsync("c1");
             return Volatile.Read(ref stepRuns) == 2 && state is { Transitions: 1 };
@@ -98,7 +105,7 @@ public class SagaRetryBehaviorTests
         Assert.Equal(1, (await store.GetAsync("c1"))!.Transitions);
         Assert.Empty(await transport.ReadAllFromTopicAsync<SagaRetryStep>("sr-step.dlq"));
 
-        await hostedService.StopAsync(cts.Token);
+        await listener.StopAsync(cts.Token);
     }
 
     [Fact]
@@ -123,39 +130,45 @@ public class SagaRetryBehaviorTests
             .AddSingleton<IDeferralStore>(deferralStore)
             .BuildServiceProvider();
 
-        var hostedService = new SagaHostedService(registry, services, Options.Create(new TalariaOptions
-        {
-            ApplicationName = "test-app",
-            DeferralBackoff = TimeSpan.FromMilliseconds(50),
-            MaxDeferralAttempts = 5,
-            MinRetryDelay = TimeSpan.FromMilliseconds(50),
-            DefaultRetryPolicy = new RetryPolicy
+        var listener = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            new TalariaOptions
             {
-                MaxRetryAttempts = 1,
-                RetryInterval = TimeSpan.FromMilliseconds(50),
-                BackoffType = RetryBackoffType.Fixed,
+                ApplicationName = "test-app",
+                DeferralBackoff = TimeSpan.FromMilliseconds(50),
+                MaxDeferralAttempts = 5,
+                MinRetryDelay = TimeSpan.FromMilliseconds(50),
+                DefaultRetryPolicy = new RetryPolicy
+                {
+                    MaxRetryAttempts = 1,
+                    RetryInterval = TimeSpan.FromMilliseconds(50),
+                    BackoffType = RetryBackoffType.Fixed,
+                },
             },
-        }), NullLogger<SagaHostedService>.Instance);
+            NullLogger<TalariaListener>.Instance,
+            services);
 
         using var cts = new CancellationTokenSource();
-        await hostedService.StartAsync(cts.Token);
+        await listener.StartAsync(cts.Token);
 
         var startProducer = await transport.CreateProducerAsync<SagaRetryStart>("sr-start", new ProducerOptions());
         await startProducer.ProduceAsync(new SagaRetryStart { Id = "c2" });
 
         var store = services.GetRequiredService<IStateStore<SagaRetryState>>();
-        var started = await PollUntilAsync(async () => await store.GetAsync("c2") != null, TimeSpan.FromSeconds(5));
+        var started = await TestAsyncHelpers.PollUntilAsync(async () => await store.GetAsync("c2") != null, TimeSpan.FromSeconds(5));
         Assert.True(started, "Saga state was never created by the starter.");
 
         var stepProducer = await transport.CreateProducerAsync<SagaRetryStep>("sr-step", new ProducerOptions());
         await stepProducer.ProduceAsync(new SagaRetryStep { Id = "c2" }, new MessageHeaders { MessageId = "sr-step-2" });
 
-        var dlq = await ReadUntilAsync<SagaRetryStep>(transport, "sr-step.dlq", 1);
+        var dlq = await TestAsyncHelpers.ReadUntilAsync<SagaRetryStep>(transport, "sr-step.dlq", 1);
 
         Assert.Single(dlq);
         Assert.Equal("retries_exhausted", dlq[0].Headers.DlqReason);
 
-        await hostedService.StopAsync(cts.Token);
+        await listener.StopAsync(cts.Token);
     }
 
     [Fact]
@@ -178,39 +191,45 @@ public class SagaRetryBehaviorTests
             .AddSingleton(typeof(IStateStore<>), typeof(InMemoryStateStore<>))
             .BuildServiceProvider();
 
-        var hostedService = new SagaHostedService(registry, services, Options.Create(new TalariaOptions
-        {
-            ApplicationName = "test-app",
-            DeferralBackoff = TimeSpan.FromMilliseconds(50),
-            MaxDeferralAttempts = 5,
-            MinRetryDelay = TimeSpan.FromMilliseconds(50),
-            DefaultRetryPolicy = new RetryPolicy
+        var listener = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            new TalariaOptions
             {
-                MaxRetryAttempts = 2,
-                RetryInterval = TimeSpan.FromMilliseconds(50),
-                BackoffType = RetryBackoffType.Fixed,
+                ApplicationName = "test-app",
+                DeferralBackoff = TimeSpan.FromMilliseconds(50),
+                MaxDeferralAttempts = 5,
+                MinRetryDelay = TimeSpan.FromMilliseconds(50),
+                DefaultRetryPolicy = new RetryPolicy
+                {
+                    MaxRetryAttempts = 2,
+                    RetryInterval = TimeSpan.FromMilliseconds(50),
+                    BackoffType = RetryBackoffType.Fixed,
+                },
             },
-        }), NullLogger<SagaHostedService>.Instance);
+            NullLogger<TalariaListener>.Instance,
+            services);
 
         using var cts = new CancellationTokenSource();
-        await hostedService.StartAsync(cts.Token);
+        await listener.StartAsync(cts.Token);
 
         var startProducer = await transport.CreateProducerAsync<SagaRetryStart>("sr-start", new ProducerOptions());
         await startProducer.ProduceAsync(new SagaRetryStart { Id = "c3" });
 
         var store = services.GetRequiredService<IStateStore<SagaRetryState>>();
-        var started = await PollUntilAsync(async () => await store.GetAsync("c3") != null, TimeSpan.FromSeconds(5));
+        var started = await TestAsyncHelpers.PollUntilAsync(async () => await store.GetAsync("c3") != null, TimeSpan.FromSeconds(5));
         Assert.True(started, "Saga state was never created by the starter.");
 
         var stepProducer = await transport.CreateProducerAsync<SagaRetryStep>("sr-step", new ProducerOptions());
         await stepProducer.ProduceAsync(new SagaRetryStep { Id = "c3" }, new MessageHeaders { MessageId = "sr-step-3" });
 
-        var dlq = await ReadUntilAsync<SagaRetryStep>(transport, "sr-step.dlq", 1);
+        var dlq = await TestAsyncHelpers.ReadUntilAsync<SagaRetryStep>(transport, "sr-step.dlq", 1);
 
         Assert.Single(dlq);
         Assert.Equal("retry_unavailable", dlq[0].Headers.DlqReason);
 
-        await hostedService.StopAsync(cts.Token);
+        await listener.StopAsync(cts.Token);
     }
 
     [Fact]
@@ -242,22 +261,28 @@ public class SagaRetryBehaviorTests
             .AddSingleton<IDeferralStore>(deferralStore)
             .BuildServiceProvider();
 
-        var hostedService = new SagaHostedService(registry, services, Options.Create(new TalariaOptions
-        {
-            ApplicationName = "test-app",
-            DeferralBackoff = TimeSpan.FromMilliseconds(50),
-            MaxDeferralAttempts = 5,
-            MinRetryDelay = TimeSpan.FromMilliseconds(50),
-            DefaultRetryPolicy = new RetryPolicy
+        var listener = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            new TalariaOptions
             {
-                MaxRetryAttempts = 2,
-                RetryInterval = TimeSpan.FromMilliseconds(50),
-                BackoffType = RetryBackoffType.Fixed,
+                ApplicationName = "test-app",
+                DeferralBackoff = TimeSpan.FromMilliseconds(50),
+                MaxDeferralAttempts = 5,
+                MinRetryDelay = TimeSpan.FromMilliseconds(50),
+                DefaultRetryPolicy = new RetryPolicy
+                {
+                    MaxRetryAttempts = 2,
+                    RetryInterval = TimeSpan.FromMilliseconds(50),
+                    BackoffType = RetryBackoffType.Fixed,
+                },
             },
-        }), NullLogger<SagaHostedService>.Instance);
+            NullLogger<TalariaListener>.Instance,
+            services);
 
         using var cts = new CancellationTokenSource();
-        await hostedService.StartAsync(cts.Token);
+        await listener.StartAsync(cts.Token);
 
         var producer = await transport.CreateProducerAsync<SagaRetryStart>("sr-start", new ProducerOptions());
         await producer.ProduceAsync(new SagaRetryStart { Id = "c4" }, new MessageHeaders { MessageId = "starter-1" });
@@ -265,7 +290,7 @@ public class SagaRetryBehaviorTests
         var store = services.GetRequiredService<IStateStore<SagaRetryState>>();
 
         // The starter fails once, a retry copy is scheduled, then it succeeds and creates state.
-        var succeeded = await PollUntilAsync(async () =>
+        var succeeded = await TestAsyncHelpers.PollUntilAsync(async () =>
         {
             var state = await store.GetAsync("c4");
             return Volatile.Read(ref starterRuns) >= 2 && state is { Id: "c4" };
@@ -273,7 +298,7 @@ public class SagaRetryBehaviorTests
 
         Assert.True(succeeded, $"Starter retry did not run and transition state (runs={Volatile.Read(ref starterRuns)}).");
 
-        var stable = await PollStableAsync(async () =>
+        var stable = await TestAsyncHelpers.PollStableAsync(async () =>
         {
             var state = await store.GetAsync("c4");
             return Volatile.Read(ref starterRuns) == 2 && state is { Id: "c4" };
@@ -283,60 +308,7 @@ public class SagaRetryBehaviorTests
         Assert.Equal(2, Volatile.Read(ref starterRuns));
         Assert.Empty(await transport.ReadAllFromTopicAsync<SagaRetryStart>("sr-start.dlq"));
 
-        await hostedService.StopAsync(cts.Token);
+        await listener.StopAsync(cts.Token);
     }
 
-    // ---- Helpers (same pattern as SagaEngineBehaviorTests) ----
-
-    private static async Task<List<MessageEnvelope<T>>> ReadUntilAsync<T>(
-        InMemoryTransport transport, string topic, int expectedCount)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        List<MessageEnvelope<T>> messages;
-        do
-        {
-            messages = await transport.ReadAllFromTopicAsync<T>(topic);
-            if (messages.Count >= expectedCount)
-            {
-                break;
-            }
-
-            await Task.Delay(50);
-        }
-        while (DateTime.UtcNow < deadline);
-
-        return messages;
-    }
-
-    private static async Task<bool> PollUntilAsync(Func<Task<bool>> condition, TimeSpan timeout)
-    {
-        var deadline = DateTime.UtcNow + timeout;
-        while (DateTime.UtcNow < deadline)
-        {
-            if (await condition())
-            {
-                return true;
-            }
-
-            await Task.Delay(50);
-        }
-
-        return await condition();
-    }
-
-    private static async Task<bool> PollStableAsync(Func<Task<bool>> condition, TimeSpan window)
-    {
-        var deadline = DateTime.UtcNow + window;
-        while (DateTime.UtcNow < deadline)
-        {
-            if (!await condition())
-            {
-                return false;
-            }
-
-            await Task.Delay(50);
-        }
-
-        return await condition();
-    }
 }
