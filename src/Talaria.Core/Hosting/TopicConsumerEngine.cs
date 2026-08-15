@@ -315,7 +315,17 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
                     .GetMethod(nameof(InvokeClassRequestConsumerAsync), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
                     .MakeGenericMethod(typeof(T), registration.ResponseType!);
 
-                return await (Task<object?>)method.Invoke(this, [scope.ServiceProvider, registration.RequestConsumerType, envelope, ct])!;
+                try
+                {
+                    return await (Task<object?>)method.Invoke(this, [scope.ServiceProvider, registration.RequestConsumerType, envelope, ct])!;
+                }
+                catch (System.Reflection.TargetInvocationException tie) when (tie.InnerException is not null)
+                {
+                    // MethodInfo.Invoke wraps synchronously-thrown consumer exceptions;
+                    // surface the real exception so retry classification and fault headers
+                    // report the consumer's exception type, not the wrapper.
+                    throw tie.InnerException;
+                }
             }
             finally
             {
@@ -395,6 +405,13 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
             headers.TraceState = traceState;
         }
 
+        // Carry the request's hop count so a response in a request/response chain keeps
+        // accumulating hops; the producer adds the +1 for this produce.
+        if (requestHeaders.TryGetValue(MessageHeaders.HopCountKey, out var hopCount))
+        {
+            headers[MessageHeaders.HopCountKey] = hopCount;
+        }
+
         await invoker.Produce(response, headers, null, ct).ConfigureAwait(false);
     }
 
@@ -435,6 +452,12 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
             if (envelope.Headers.TryGetValue(MessageHeaders.TraceStateKey, out var traceState))
             {
                 headers.TraceState = traceState;
+            }
+
+            // Carry the request's hop count; the producer adds the +1 for this produce.
+            if (envelope.Headers.TryGetValue(MessageHeaders.HopCountKey, out var hopCount))
+            {
+                headers[MessageHeaders.HopCountKey] = hopCount;
             }
 
             headers[RequestClientFaultHeaders.ExceptionTypeKey] = ex.GetType().FullName ?? "Unknown";

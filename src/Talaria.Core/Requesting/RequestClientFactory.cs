@@ -91,6 +91,14 @@ public sealed class RequestClientFactory : IAsyncDisposable
         var pending = new PendingRequest(tcs, typeof(TResponse));
         _pending[requestId] = pending;
 
+        // Disposal may have begun between the check above and this insert; the pump is
+        // already cancelled and the dispose loop already ran, so fail fast instead of
+        // hanging until the timeout.
+        if (_disposed && _pending.TryRemove(requestId, out _))
+        {
+            throw new ObjectDisposedException(nameof(RequestClientFactory));
+        }
+
         CancellationTokenSource? timeoutCts = null;
         try
         {
@@ -318,8 +326,9 @@ public sealed class RequestClientFactory : IAsyncDisposable
             }
         }
 
-        _initLock.Dispose();
-        _pumpStartLock.Dispose();
+        // The semaphores are deliberately not disposed: an in-flight RequestAsync may still
+        // be waiting on them when disposal runs, and SemaphoreSlim holds no unmanaged
+        // resources unless AvailableWaitHandle is accessed (it is not).
 
         await _producerCache.DisposeAsync().ConfigureAwait(false);
     }
