@@ -45,9 +45,10 @@ public sealed class TalariaListener : IAsyncDisposable
     /// <param name="options">Global Talaria options.</param>
     /// <param name="logger">Logger for listener diagnostics.</param>
     /// <param name="serviceProvider">
-    /// Required when sagas are registered. Used to resolve state stores and create
-    /// handler scopes. When supplied and <paramref name="stores"/> is omitted, the
-    /// optional stores are resolved from this provider at construction time.
+    /// Required when sagas or class-based topic consumers are registered. Used to resolve
+    /// state stores, create consumer scopes, and resolve <see cref="ITopicConsumer{T}"/>
+    /// instances by concrete type. When supplied and <paramref name="stores"/> is omitted,
+    /// the optional stores are resolved from this provider at construction time.
     /// </param>
     /// <param name="stores">
     /// Optional stores supplied directly. When omitted and a <paramref name="serviceProvider"/>
@@ -123,6 +124,13 @@ public sealed class TalariaListener : IAsyncDisposable
                 throw new InvalidOperationException(
                     "Sagas are registered but no IServiceProvider was supplied to TalariaListener. " +
                     "A service provider is required to resolve IStateStore<TState> instances and create handler scopes.");
+            }
+
+            if (_topicRegistry.Registrations.Any(r => r.ConsumerType is not null) && _serviceProvider is null)
+            {
+                throw new InvalidOperationException(
+                    "One or more topic registrations use class-based consumers but no IServiceProvider was supplied to TalariaListener. " +
+                    "A service provider is required to resolve ITopicConsumer<T> instances and create per-message scopes.");
             }
 
             _runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -236,7 +244,8 @@ public sealed class TalariaListener : IAsyncDisposable
                     _options,
                     _stores.DeferralStore,
                     pipeline,
-                    _logger);
+                    _logger,
+                    _serviceProvider);
                 loopTasks.Add(topicEngine.RunAsync(ct));
             }
 
