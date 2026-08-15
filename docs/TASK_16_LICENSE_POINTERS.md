@@ -1,5 +1,9 @@
 # task-16: License Pointers Audit & Disposition
 
+> **Historical memo:** The body below describes the **AGPL-3.0 state prior to
+> the Apache-2.0 relicense** and is kept for audit trail only. It does not
+> reflect the current license.
+
 > **Dated note (2026-08-15):** Talaria has since been relicensed from
 > AGPL-3.0-or-later to Apache-2.0. The `LICENSE` file, `README.md`,
 > `CONTRIBUTING.md`, `SECURITY.md`, and `docs/LICENSE-RATIONALE.md`
@@ -47,7 +51,7 @@ Per the task brief:
 
 ## Why this is sufficient
 
-- LICENSE itself remains the canonical, unmodified AGPL-3.0 text — no
+- LICENSE itself remains the canonical, unmodified AGPL-3.0 text; no
   inline commercial legalese is added to it.
 - The commercial-terms source-of-truth lives under `docs/`, a clearly
   non-license path, so a reader landing on LICENSE is not confused into
@@ -74,7 +78,7 @@ Per the task brief:
 
 ## Verification (run on the committed branch)
 
-- `md5sum LICENSE` returns `eb1e647870add0502f8f010b19de32af` —
+- `md5sum LICENSE` returns `eb1e647870add0502f8f010b19de32af`:
   byte-identical to the canonical AGPL-3.0 text from gnu.org.
 - `grep -n "LICENSE-RATIONALE" README.md CONTRIBUTING.md` resolves in
   both updated files.

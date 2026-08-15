@@ -30,12 +30,13 @@ Closes #
 ## Verification commands run
 
 <!--
-Tick the commands you ran locally before pushing. CI runs all of these.
+Tick the commands you ran locally before pushing. CI runs build, test, and the
+NuGet vulnerability audit; `dotnet format` is a local-only check.
 -->
 
 - [ ] `dotnet build Talaria.slnx --configuration Release --no-restore` — 0 warnings, 0 errors
 - [ ] `dotnet test Talaria.slnx --configuration Release --no-build`
-- [ ] `dotnet format Talaria.slnx --verify-no-changes`
+- [ ] `dotnet format Talaria.slnx --verify-no-changes` (local-only check; CI does not run this)
 - [ ] `dotnet list package --vulnerable --include-transitive`
 
 ## Compliance checks
