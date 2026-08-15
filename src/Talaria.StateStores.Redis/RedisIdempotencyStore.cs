@@ -6,7 +6,7 @@ using Talaria.Core.Abstractions;
 namespace Talaria.StateStores.Redis;
 
 /// <summary>
-/// A centralized Redis footprint providing exactly-once semantics and multi-node concurrency isolation.
+/// Redis-backed duplicate suppression across nodes using distributed locks scoped per consumer queue.
 /// </summary>
 public sealed class RedisIdempotencyStore : IIdempotencyStore
 {

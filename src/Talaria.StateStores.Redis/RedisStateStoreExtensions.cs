@@ -37,7 +37,8 @@ public static class RedisStateStoreExtensions
     }
 
     /// <summary>
-    /// Configures Talaria to use the Redis Idempotency store for exact-once messaging semantics.
+    /// Configures Talaria to use the Redis Idempotency store for duplicate suppression across
+    /// consumer restarts and replicas.
     /// </summary>
     public static TalariaBuilder UseRedisIdempotencyStore(
         this TalariaBuilder builder,

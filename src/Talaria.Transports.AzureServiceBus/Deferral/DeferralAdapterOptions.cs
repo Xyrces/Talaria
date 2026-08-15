@@ -25,7 +25,7 @@ public sealed class DeferralAdapterOptions
     /// <summary>
     /// Maximum payload size (in bytes) the adapter is willing to schedule as a
     /// short-term deferral. Larger payloads always fall through to the durable store
-    /// so the broker never rejects an oversize message \u2014 the durable sweeper paths
+    /// so the broker never rejects an oversize message; the durable sweeper paths
     /// inherits the same JSON-byte size limit when it republishes via
     /// <see cref="Talaria.Core.Abstractions.IProducer{T}"/>, but the host gets to choose where
     /// (short store vs long store) based on this threshold. Defaults to 256 KB (the
