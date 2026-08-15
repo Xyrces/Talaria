@@ -50,10 +50,21 @@ public sealed class TalariaHostedService : BackgroundService
         _registry.Seal();
         var registrations = _registry.Registrations.ToList();
 
+        var deferralStore = _services.GetService<IDeferralStore>();
+        var retryCoordinator = new RetryCoordinator(deferralStore, _options, _logger);
+
+        if (deferralStore is null && registrations.Any(r => IsRetryEnabled(r)))
+        {
+            _logger.LogWarning(
+                "One or more topic registrations have delayed retries enabled but no IDeferralStore is registered. " +
+                "Retry attempts will be routed to the DLQ with reason 'retry_unavailable'. " +
+                "Register a deferral store via UseInMemoryDeferralStore() or UseRedisDeferralStore().");
+        }
+
         var tasks = registrations.Select(registration =>
             ConsumerSupervision.RunSupervisedAsync(
                 $"topic:{registration.TopicName}",
-                ct => ConsumeTopicAsync(registration, ct),
+                ct => ConsumeTopicAsync(registration, retryCoordinator, ct),
                 _logger,
                 stoppingToken)).ToList();
 
@@ -63,8 +74,15 @@ public sealed class TalariaHostedService : BackgroundService
         }
     }
 
+    private static bool IsRetryEnabled(TopicRegistration registration)
+    {
+        var policy = registration.RetryPolicy;
+        return policy is { MaxRetryAttempts: > 0 } && policy.RetryInterval > TimeSpan.Zero;
+    }
+
     private async Task ConsumeTopicAsync(
         TopicRegistration registration,
+        RetryCoordinator retryCoordinator,
         CancellationToken ct)
     {
         var consumerGroup = registration.ConsumerGroup
@@ -77,11 +95,12 @@ public sealed class TalariaHostedService : BackgroundService
                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
             .MakeGenericMethod(registration.MessageType);
 
-        await (Task)method.Invoke(this, [registration, consumerGroup, ct])!;
+        await (Task)method.Invoke(this, [registration, retryCoordinator, consumerGroup, ct])!;
     }
 
     private async Task ConsumeTopicTypedAsync<T>(
         TopicRegistration registration,
+        RetryCoordinator retryCoordinator,
         string consumerGroup,
         CancellationToken ct)
     {
@@ -132,17 +151,24 @@ public sealed class TalariaHostedService : BackgroundService
                 catch (Exception ex)
                 {
                     _logger.LogError(ex,
-                        "Handler for topic '{Topic}' failed. Routing to DLQ.",
+                        "Handler for topic '{Topic}' failed. Evaluating delayed retry policy.",
                         registration.TopicName);
 
                     activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, ex.Message);
 
                     Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1,
                         new KeyValuePair<string, object?>("messaging.destination.name", registration.TopicName));
-                    Diagnostics.TalariaDiagnostics.DlqRouted.Add(1,
-                        new KeyValuePair<string, object?>("messaging.destination.name", registration.TopicName));
 
-                    await pipeline.FailAsync(gate.Lock, consumer, envelope, ex, null, ct);
+                    var outcome = await retryCoordinator.TryCoordinateTopicRetryAsync(
+                        registration, pipeline, consumer, envelope, ex, gate.Lock, ct);
+
+                    if (outcome == RetryCoordinator.RetryOutcome.NotRetryable)
+                    {
+                        Diagnostics.TalariaDiagnostics.DlqRouted.Add(1,
+                            new KeyValuePair<string, object?>("messaging.destination.name", registration.TopicName));
+                        await pipeline.FailAsync(gate.Lock, consumer, envelope, ex, null, ct);
+                    }
+
                     continue;
                 }
 

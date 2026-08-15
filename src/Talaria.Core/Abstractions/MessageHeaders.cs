@@ -46,6 +46,13 @@ public sealed class MessageHeaders : IDictionary<string, string>
     /// <summary>Header key carrying the unique message id used for idempotency deduplication.</summary>
     public const string MessageIdKey = "talaria.message_id";
 
+    // Retry metadata
+    /// <summary>Header key carrying the current delayed retry attempt count.</summary>
+    public const string RetryAttemptKey = "talaria.retry.attempt";
+
+    /// <summary>Header key carrying the original message id that a retry copy was generated from.</summary>
+    public const string RetryRootMessageIdKey = "talaria.retry.root_message_id";
+
     // Engine-owned transport metadata (not part of the public contract)
     /// <summary>Header key carrying the current deferral attempt count (engine-internal).</summary>
     public const string DeferralAttemptKey = "x-deferral-attempt";
@@ -103,6 +110,20 @@ public sealed class MessageHeaders : IDictionary<string, string>
         set => this[HopCountKey] = value.ToString();
     }
 
+    /// <summary>Current delayed retry attempt count for this message.</summary>
+    public int RetryAttempt
+    {
+        get => TryGetValue(RetryAttemptKey, out var s) && int.TryParse(s, out var v) ? v : 0;
+        set => this[RetryAttemptKey] = value.ToString();
+    }
+
+    /// <summary>Original message id that a retry copy was generated from.</summary>
+    public string? RetryRootMessageId
+    {
+        get => TryGetValue(RetryRootMessageIdKey, out var v) ? v : null;
+        set { if (value is not null) this[RetryRootMessageIdKey] = value; else Remove(RetryRootMessageIdKey); }
+    }
+
     /// <summary>Schema version of the serialized payload.</summary>
     public int SchemaVersion
     {
@@ -122,6 +143,13 @@ public sealed class MessageHeaders : IDictionary<string, string>
     {
         get => TryGetValue(DlqExceptionKey, out var v) ? v : null;
         set { if (value is not null) this[DlqExceptionKey] = value; else Remove(DlqExceptionKey); }
+    }
+
+    /// <summary>Number of delivery attempts recorded before the message was routed to the DLQ.</summary>
+    public int DlqAttempts
+    {
+        get => TryGetValue(DlqAttemptsKey, out var s) && int.TryParse(s, out var v) ? v : 0;
+        set => this[DlqAttemptsKey] = value.ToString();
     }
 
     // IDictionary<string, string> — delegated to the private store.

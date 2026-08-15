@@ -163,4 +163,28 @@ public class InMemoryDeferralStoreTests
         var acquired = Assert.Single(await store.AcquireDueAsync(DateTimeOffset.UtcNow, Lease, maxBatch: 10));
         Assert.Equal("order-42", acquired.Message.PartitionKey);
     }
+
+    [Fact]
+    public async Task EnqueueAsync_RetryShapedMessage_RoundTripsRetryHeaders()
+    {
+        var store = new InMemoryDeferralStore();
+        var headers = new MessageHeaders
+        {
+            MessageId = "root-1:retry:1",
+            [MessageHeaders.RetryAttemptKey] = "1",
+            [MessageHeaders.RetryRootMessageIdKey] = "root-1",
+            [MessageHeaders.MessageTypeKey] = "Talaria.InMemory.Tests.SomeMessage",
+        };
+        var message = new DeferredMessage(
+            Guid.NewGuid(), "orders", typeof(object).AssemblyQualifiedName!, "{\"id\":1}",
+            headers, "corr-1", Attempt: 1, DateTimeOffset.UtcNow.AddSeconds(-1), "part-1");
+
+        await store.EnqueueAsync(message);
+
+        var acquired = Assert.Single(await store.AcquireDueAsync(DateTimeOffset.UtcNow, Lease, maxBatch: 10));
+        Assert.Equal("root-1:retry:1", acquired.Message.Headers.MessageId);
+        Assert.Equal(1, acquired.Message.Headers.RetryAttempt);
+        Assert.Equal("root-1", acquired.Message.Headers.RetryRootMessageId);
+        Assert.Equal("part-1", acquired.Message.PartitionKey);
+    }
 }

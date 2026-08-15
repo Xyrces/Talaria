@@ -22,6 +22,9 @@ public sealed class TopicRegistration
 
     /// <summary>Optional explicit consumer group. Null falls back to <see cref="TalariaOptions.ConsumerGroupOverride"/> then auto-generated.</summary>
     public string? ConsumerGroup { get; init; }
+
+    /// <summary>Optional retry policy for this topic. Null falls back to <see cref="TalariaOptions.DefaultRetryPolicy"/>.</summary>
+    public RetryPolicy? RetryPolicy { get; init; }
 }
 
 /// <summary>

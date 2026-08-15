@@ -116,10 +116,12 @@ public sealed class SagaHostedService : BackgroundService
         if (_deferralStore is null && stepsByTopic.Count > 0)
         {
             _logger.LogWarning(
-                "No IDeferralStore is registered. Out-of-order saga messages and handler-initiated " +
-                "deferrals will be routed to the DLQ instead of being deferred. " +
+                "No IDeferralStore is registered. Out-of-order saga messages, handler-initiated " +
+                "deferrals, and delayed retries will be routed to the DLQ instead of being deferred. " +
                 "Register one via UseRedisDeferralStore() or UseInMemoryDeferralStore().");
         }
+
+        var retryCoordinator = new RetryCoordinator(_deferralStore, _options, _logger);
 
         _outboxStore = _serviceProvider.GetService<IOutboxStore>();
         if (_outboxStore is null && _dispatchRoutes.Count > 0)
@@ -146,7 +148,7 @@ public sealed class SagaHostedService : BackgroundService
         var tasks = stepsByTopic.Select(kvp =>
             ConsumerSupervision.RunSupervisedAsync(
                 $"saga:{kvp.Key}",
-                ct => ConsumeTopicLoopAsync(kvp.Key, kvp.Value, transport, pipeline, ct),
+                ct => ConsumeTopicLoopAsync(kvp.Key, kvp.Value, transport, pipeline, retryCoordinator, ct),
                 _logger,
                 stoppingToken)).ToList();
 
@@ -217,6 +219,7 @@ public sealed class SagaHostedService : BackgroundService
         IReadOnlyList<StepRoute> routes,
         ITransport transport,
         MessageProcessingPipeline pipeline,
+        RetryCoordinator retryCoordinator,
         CancellationToken ct)
     {
         await using var consumer = await transport.CreateConsumerAsync<JsonElement>(
@@ -241,7 +244,7 @@ public sealed class SagaHostedService : BackgroundService
                 continue;
             }
 
-            await ProcessStepMessageAsync(env, route, transport, pipeline, consumer, ct);
+            await ProcessStepMessageAsync(env, route, transport, pipeline, retryCoordinator, consumer, ct);
         }
     }
 
@@ -270,6 +273,7 @@ public sealed class SagaHostedService : BackgroundService
         StepRoute route,
         ITransport transport,
         MessageProcessingPipeline pipeline,
+        RetryCoordinator retryCoordinator,
         IConsumer<JsonElement> consumer,
         CancellationToken ct)
     {
@@ -387,9 +391,16 @@ public sealed class SagaHostedService : BackgroundService
                 activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, ex.Message);
 
                 Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
-                Diagnostics.TalariaDiagnostics.DlqRouted.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
 
-                await pipeline.FailAsync(gate.Lock, consumer, env, ex, null, ct);
+                var outcome = await retryCoordinator.TryCoordinateSagaRetryAsync(
+                    step.TopicName, step.MessageType, pipeline, consumer, env, ex, gate.Lock, ct);
+
+                if (outcome == RetryCoordinator.RetryOutcome.NotRetryable)
+                {
+                    Diagnostics.TalariaDiagnostics.DlqRouted.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
+                    await pipeline.FailAsync(gate.Lock, consumer, env, ex, null, ct);
+                }
+
                 return;
             }
 

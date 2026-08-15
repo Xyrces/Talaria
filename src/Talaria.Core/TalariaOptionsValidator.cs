@@ -48,6 +48,25 @@ internal sealed class TalariaOptionsValidator : IValidateOptions<TalariaOptions>
             return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.OutboxRelayInterval)} must be greater than zero.");
         }
 
+        if (options.DefaultRetryPolicy.MaxRetryAttempts < 0)
+        {
+            return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.DefaultRetryPolicy)}.{nameof(RetryPolicy.MaxRetryAttempts)} must not be negative.");
+        }
+
+        if (options.DefaultRetryPolicy.RetryInterval < TimeSpan.Zero)
+        {
+            return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.DefaultRetryPolicy)}.{nameof(RetryPolicy.RetryInterval)} must not be negative.");
+        }
+
+        if (options.DefaultRetryPolicy.MaxRetryInterval.HasValue && options.DefaultRetryPolicy.MaxRetryInterval.Value < options.DefaultRetryPolicy.RetryInterval)
+        {
+            return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.DefaultRetryPolicy)}.{nameof(RetryPolicy.MaxRetryInterval)} must not be less than {nameof(RetryPolicy.RetryInterval)}.");
+        }
+
+        if (options.MinRetryDelay <= TimeSpan.Zero)
+        {
+            return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.MinRetryDelay)} must be greater than zero.");
+        }
 
         return ValidateOptionsResult.Success;
     }

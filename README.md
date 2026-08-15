@@ -19,8 +19,9 @@ Talaria provides **at-least-once delivery with idempotent processing**:
 - **Idempotency:** fencing-token locks (`SETNX` on Redis) filter duplicate `MessageId`s across a cluster; a stale lock holder can never release another worker's lock.
 - **Transactional outbox:** saga state transitions and their outbound messages are staged atomically (single Lua script on Redis, one lock in-memory); a background relay publishes staged messages with lease + fencing semantics. Registered automatically by `UseRedisStateStore()` / `UseInMemoryStateStore()`.
 - **Durable deferral:** out-of-order saga messages (a step arriving before the starter) are persisted in an `IDeferralStore` (Redis sorted set or in-memory) and republished by a background sweeper using visibility-timeout leases — they survive restarts and sweeper crashes, unlike an in-process timer.
-- **Observability:** OpenTelemetry-native traces and metrics with W3C trace-context propagation across produce/consume boundaries. Includes relay monitoring: `talaria.outbox.*` / `talaria.deferral.*` counters and histograms for published/failed entries, re-acquisitions (lease expiry signal), active leases, and relay lag.
-- **Dead-letter resiliency:** automatic DLQ routing (suffix configurable via `DlqSuffix`, default `.dlq`) for handler exceptions, deserialization failures, missing correlation ids, unmapped dispatches, and exceeded hop/deferral thresholds. Exception detail in DLQ headers is gated behind `TalariaOptions.IncludeExceptionDetailsInDlq` (off by default).
+- **Delayed retries:** topic handlers and saga step handlers can opt in to a configurable number of fixed or exponential backoff retries before routing to the DLQ. Retry copies are persisted in the same `IDeferralStore` as saga deferrals and republished by the sweeper, preserving the original partition key and tracking attempts via `talaria.retry.attempt` / `talaria.retry.root_message_id` headers.
+- **Observability:** OpenTelemetry-native traces and metrics with W3C trace-context propagation across produce/consume boundaries. Includes relay monitoring: `talaria.outbox.*` / `talaria.deferral.*` counters and histograms for published/failed entries, re-acquisitions (lease expiry signal), active leases, and relay lag. Retries emit `talaria.messaging.retry.scheduled`, `talaria.messaging.retry.exhausted`, and `talaria.messaging.retry.delay`.
+- **Dead-letter resiliency:** automatic DLQ routing (suffix configurable via `DlqSuffix`, default `.dlq`) for handler exceptions, deserialization failures, missing correlation ids, unmapped dispatches, exceeded hop/deferral thresholds, exhausted retries (`retries_exhausted`), and retry misconfiguration (`retry_unavailable`). Exception detail in DLQ headers is gated behind `TalariaOptions.IncludeExceptionDetailsInDlq` (off by default).
 
 ---
 
@@ -130,8 +131,9 @@ builder.Services.AddTalaria()
     .UseInMemoryDeferralStore();
 ```
 
-> Without an `IDeferralStore`, out-of-order saga messages are routed to the DLQ
-> (`deferral_unavailable`) instead of being deferred.
+> Without an `IDeferralStore`, out-of-order saga messages and delayed retry copies
+> are routed to the DLQ (`deferral_unavailable` / `retry_unavailable`) instead of
+> being deferred.
 >
 > Without an `IOutboxStore` (registered automatically by both state stores above),
 > saga dispatch falls back to direct transactional produce — the state save and the
@@ -145,6 +147,40 @@ app.Services.MapTopic<SendVerificationEmailCommand>("email-commands", async (msg
     await EmailService.Dispatch(msg.Email);
 });
 ```
+
+### Delayed retries
+
+Opt-in per topic (or globally via `TalariaOptions.DefaultRetryPolicy`). Retry copies are scheduled in the configured `IDeferralStore` and republished by the sweeper; attempts are exhausted to the DLQ with reason `retries_exhausted`. If retries are enabled but no `IDeferralStore` is registered, messages dead-letter with reason `retry_unavailable`.
+
+```csharp
+// Per-topic policy
+app.Services.MapTopic<FetchExternalReportCommand>("report-requests",
+    new RetryPolicy
+    {
+        MaxRetryAttempts = 5,
+        RetryInterval = TimeSpan.FromSeconds(2),
+        BackoffType = RetryBackoffType.Exponential,
+        MaxRetryInterval = TimeSpan.FromMinutes(1),
+    },
+    async (msg, ct) =>
+    {
+        await ReportService.Fetch(msg.ReportId);
+    });
+
+// Global default applied to all topics/saga steps that do not declare their own
+builder.Services.AddTalaria(opts =>
+{
+    opts.DefaultRetryPolicy = new RetryPolicy
+    {
+        MaxRetryAttempts = 3,
+        RetryInterval = TimeSpan.FromSeconds(1),
+        BackoffType = RetryBackoffType.Fixed,
+    };
+    opts.MinRetryDelay = TimeSpan.FromMilliseconds(100); // hard floor for any computed delay
+});
+```
+
+`OperationCanceledException` is never retried — it falls through to the existing DLQ behavior.
 
 ### Executing Sagas
 

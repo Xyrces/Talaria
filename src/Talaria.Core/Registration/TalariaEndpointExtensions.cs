@@ -27,11 +27,31 @@ public static class TalariaEndpointExtensions
         string topic,
         Func<T, CancellationToken, Task> handler)
     {
+        return services.MapTopic(topic, (RetryPolicy?)null, handler);
+    }
+
+    /// <summary>
+    /// Maps a handler delegate to a message topic, similar to app.MapGet() in Minimal APIs.
+    /// The handler receives the deserialized message payload.
+    /// </summary>
+    /// <typeparam name="T">The CLR message type to deserialize from each envelope.</typeparam>
+    /// <param name="services">The application's service provider.</param>
+    /// <param name="topic">The topic name to subscribe to.</param>
+    /// <param name="retryPolicy">Retry policy for this topic. Null falls back to <see cref="TalariaOptions.DefaultRetryPolicy"/>.</param>
+    /// <param name="handler">Async handler invoked for each delivered message.</param>
+    /// <returns>The same <paramref name="services"/>, for chaining.</returns>
+    public static IServiceProvider MapTopic<T>(
+        this IServiceProvider services,
+        string topic,
+        RetryPolicy? retryPolicy,
+        Func<T, CancellationToken, Task> handler)
+    {
         var registry = services.GetRequiredService<TopicRegistry>();
         registry.Add(new TopicRegistration
         {
             TopicName = topic,
             MessageType = typeof(T),
+            RetryPolicy = retryPolicy,
             Handler = async (payload, _, ct) => await handler((T)payload, ct),
         });
         return services;
@@ -54,12 +74,35 @@ public static class TalariaEndpointExtensions
         string consumerGroup,
         Func<T, CancellationToken, Task> handler)
     {
+        return services.MapTopic(topic, consumerGroup, (RetryPolicy?)null, handler);
+    }
+
+    /// <summary>
+    /// Maps a handler delegate to a message topic with an explicit consumer group,
+    /// similar to app.MapGet() in Minimal APIs.
+    /// The handler receives the deserialized message payload.
+    /// </summary>
+    /// <typeparam name="T">The CLR message type to deserialize from each envelope.</typeparam>
+    /// <param name="services">The application's service provider.</param>
+    /// <param name="topic">The topic name to subscribe to.</param>
+    /// <param name="consumerGroup">The consumer group identifier. Overrides <see cref="TalariaOptions.ConsumerGroupOverride"/>.</param>
+    /// <param name="retryPolicy">Retry policy for this topic. Null falls back to <see cref="TalariaOptions.DefaultRetryPolicy"/>.</param>
+    /// <param name="handler">Async handler invoked for each delivered message.</param>
+    /// <returns>The same <paramref name="services"/>, for chaining.</returns>
+    public static IServiceProvider MapTopic<T>(
+        this IServiceProvider services,
+        string topic,
+        string consumerGroup,
+        RetryPolicy? retryPolicy,
+        Func<T, CancellationToken, Task> handler)
+    {
         var registry = services.GetRequiredService<TopicRegistry>();
         registry.Add(new TopicRegistration
         {
             TopicName = topic,
             MessageType = typeof(T),
             ConsumerGroup = consumerGroup,
+            RetryPolicy = retryPolicy,
             Handler = async (payload, _, ct) => await handler((T)payload, ct),
         });
         return services;
@@ -83,11 +126,35 @@ public static class TalariaEndpointExtensions
         string topic,
         Func<MessageEnvelope<T>, CancellationToken, Task> handler)
     {
+        return services.MapTopicWithEnvelope(topic, (RetryPolicy?)null, handler);
+    }
+
+    /// <summary>
+    /// Maps an envelope-aware handler to a message topic.
+    /// The handler receives the full envelope with headers, trace context, etc.
+    /// </summary>
+    /// <typeparam name="T">The CLR message type to deserialize from each envelope.</typeparam>
+    /// <param name="services">The application's service provider.</param>
+    /// <param name="topic">The topic name to subscribe to.</param>
+    /// <param name="retryPolicy">Retry policy for this topic. Null falls back to <see cref="TalariaOptions.DefaultRetryPolicy"/>.</param>
+    /// <param name="handler">Async handler invoked for each delivered message.</param>
+    /// <returns>The same <paramref name="services"/>, for chaining.</returns>
+    /// <remarks>
+    /// Use this overload when the handler must inspect headers (e.g. read trace context,
+    /// propagate baggage) or the source topic / partition metadata.
+    /// </remarks>
+    public static IServiceProvider MapTopicWithEnvelope<T>(
+        this IServiceProvider services,
+        string topic,
+        RetryPolicy? retryPolicy,
+        Func<MessageEnvelope<T>, CancellationToken, Task> handler)
+    {
         var registry = services.GetRequiredService<TopicRegistry>();
         registry.Add(new TopicRegistration
         {
             TopicName = topic,
             MessageType = typeof(T),
+            RetryPolicy = retryPolicy,
             Handler = async (payload, headers, ct) =>
             {
                 var envelope = new MessageEnvelope<T>
@@ -115,7 +182,25 @@ public static class TalariaEndpointExtensions
         string topic,
         Action<T> handler)
     {
-        return services.MapTopic<T>(topic, (msg, _) =>
+        return services.MapTopic<T>(topic, (RetryPolicy?)null, handler);
+    }
+
+    /// <summary>
+    /// Maps a synchronous handler to a message topic.
+    /// </summary>
+    /// <typeparam name="T">The CLR message type to deserialize from each envelope.</typeparam>
+    /// <param name="services">The application's service provider.</param>
+    /// <param name="topic">The topic name to subscribe to.</param>
+    /// <param name="retryPolicy">Retry policy for this topic. Null falls back to <see cref="TalariaOptions.DefaultRetryPolicy"/>.</param>
+    /// <param name="handler">Synchronous handler invoked for each delivered message.</param>
+    /// <returns>The same <paramref name="services"/>, for chaining.</returns>
+    public static IServiceProvider MapTopic<T>(
+        this IServiceProvider services,
+        string topic,
+        RetryPolicy? retryPolicy,
+        Action<T> handler)
+    {
+        return services.MapTopic<T>(topic, retryPolicy, (msg, _) =>
         {
             handler(msg);
             return Task.CompletedTask;

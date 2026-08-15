@@ -77,4 +77,57 @@ public class TalariaEndpointExtensionsTests
         await reg.Handler("payload", new MessageHeaders(), CancellationToken.None);
         Assert.True(called);
     }
+
+    [Fact]
+    public void MapTopic_WithRetryPolicy_LandsOnRegistration()
+    {
+        var provider = CreateProvider();
+        var policy = new RetryPolicy { MaxRetryAttempts = 3, RetryInterval = TimeSpan.FromSeconds(1) };
+
+        provider.MapTopic<string>("test-retry", policy, (m, c) => Task.CompletedTask);
+
+        var registry = provider.GetRequiredService<TopicRegistry>();
+        var reg = registry.Registrations.First();
+        Assert.Same(policy, reg.RetryPolicy);
+    }
+
+    [Fact]
+    public void MapTopic_WithConsumerGroupAndRetryPolicy_LandsOnRegistration()
+    {
+        var provider = CreateProvider();
+        var policy = new RetryPolicy { MaxRetryAttempts = 2, RetryInterval = TimeSpan.FromMilliseconds(100) };
+
+        provider.MapTopic<string>("test-retry-cg", "cg-1", policy, (m, c) => Task.CompletedTask);
+
+        var registry = provider.GetRequiredService<TopicRegistry>();
+        var reg = registry.Registrations.First();
+        Assert.Equal("cg-1", reg.ConsumerGroup);
+        Assert.Same(policy, reg.RetryPolicy);
+    }
+
+    [Fact]
+    public void MapTopicWithEnvelope_WithRetryPolicy_LandsOnRegistration()
+    {
+        var provider = CreateProvider();
+        var policy = new RetryPolicy { MaxRetryAttempts = 1, RetryInterval = TimeSpan.FromMinutes(1) };
+
+        provider.MapTopicWithEnvelope<string>("test-retry-env", policy, (e, c) => Task.CompletedTask);
+
+        var registry = provider.GetRequiredService<TopicRegistry>();
+        var reg = registry.Registrations.First();
+        Assert.Same(policy, reg.RetryPolicy);
+    }
+
+    [Fact]
+    public void MapTopic_Sync_WithRetryPolicy_LandsOnRegistration()
+    {
+        var provider = CreateProvider();
+        var policy = new RetryPolicy { MaxRetryAttempts = 4, RetryInterval = TimeSpan.FromSeconds(5) };
+
+        provider.MapTopic<string>("test-retry-sync", policy, m => { });
+
+        var registry = provider.GetRequiredService<TopicRegistry>();
+        var reg = registry.Registrations.First();
+        Assert.Same(policy, reg.RetryPolicy);
+    }
 }
