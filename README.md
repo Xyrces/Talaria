@@ -342,10 +342,9 @@ await listener.StopAsync();
 
 ## Personal-refs guard
 
-The repository ships a vendored copy of the open-source release sweep at
+The repository ships a personal-references guard at
 [`scripts/check-personal-refs.sh`](scripts/check-personal-refs.sh). Run it
-locally before pushing to catch accidental personal or host-local references
-that task-11 scrubbed from the codebase:
+locally before pushing to catch accidental personal or host-local references:
 
 ```bash
 PERSONAL_REFS_GUARD=deny scripts/check-personal-refs.sh

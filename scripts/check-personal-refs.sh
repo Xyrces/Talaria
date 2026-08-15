@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # scripts/check-personal-refs.sh
 #
-# Personal-refs guard for the Talaria open-source release sweep.
+# Personal-refs guard for the Talaria open-source release.
 #
-# Vendored copy of the patterns documented in docs/TASK_11_AUDIT.md and the
-# audit memory (extraction/task-10). Runs against the working tree by default
-# (so contributors can invoke it locally before pushing) and emits GitHub
-# Actions ::warning:: annotations on stderr when hits are found.
+# Scans the working tree for personal or host-local references (names, emails,
+# LAN IPs, placeholder markers) that must not ship. Runs against the working
+# tree by default (so contributors can invoke it locally before pushing) and
+# emits GitHub Actions ::warning:: annotations on stderr when hits are found.
 #
 # Usage:
 #   scripts/check-personal-refs.sh [--self-test] [--quiet]
@@ -27,9 +27,9 @@
 #     Returns 0 if every expected hit was flagged, 1 otherwise.
 #
 # Out of scope for this script:
-#   - .github/ workflow wiring (owned by the devops agent; tracked as a follow-up)
-#   - Scrubbing the codebase (task-11; one-shot, not a guard)
-#   - History rewrite (task-14; audit-evidence docs explicitly preserved)
+#   - .github/ workflow wiring (lives in ci.yml)
+#   - One-shot scrubbing of existing content (this is a guard, not a scrubber)
+#   - Git history (working tree only)
 #
 # Excludes (intentionally not scanned):
 #   .git/                       Git internals

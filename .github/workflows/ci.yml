@@ -32,14 +32,10 @@ jobs:
             10.0.x
 
       - name: Personal-refs guard
-        # Sprint 6 follow-up: wire scripts/check-personal-refs.sh (vendored by
-        # task-12, PR #17) into CI so personal-ref regressions cannot
-        # re-introduce after task-11/13/14 land. PERSONAL_REFS_GUARD=warn
+        # Guards against personal/host-local references (names, emails, LAN
+        # IPs, placeholder markers) shipping in the repo. Runs in warn mode:
         # emits GitHub-Actions ::warning:: annotations but exits 0; flip to
-        # deny once the codebase is clean (task-11/13/14 have landed on main
-        # but the audit-evidence docs still contain expected hits covered by
-        # the exception list). See docs/TASK_11_AUDIT.md and
-        # docs/TASK_14_HISTORY_SWEEP_CONFIRMATION.md.
+        # deny to make hits a hard failure.
         env:
           PERSONAL_REFS_GUARD: warn
         run: bash scripts/check-personal-refs.sh

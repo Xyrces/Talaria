@@ -7,9 +7,6 @@ best it can while still pre-1.0. Until the `1.0.0` release, breaking
 changes may occur in minor version bumps; patch bumps are reserved for
 backwards-compatible fixes.
 
-This seed is generated from `git log` through commit `98325ac`
-(*Merge pull request #46 from Xyrces/feat/class-based-consumers*).
-
 ---
 
 ## [Unreleased]
