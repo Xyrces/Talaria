@@ -426,7 +426,8 @@ internal sealed class SagaConsumerEngine
                         outboundType.AssemblyQualifiedName ?? outboundType.FullName!,
                         JsonSerializer.Serialize(outbound, outboundType),
                         headers,
-                        DateTimeOffset.UtcNow));
+                        DateTimeOffset.UtcNow,
+                        env.PartitionKey));
                 }
 
                 await stateStore.TransitionAsync(

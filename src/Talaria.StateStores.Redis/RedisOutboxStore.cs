@@ -141,7 +141,8 @@ public sealed class RedisOutboxStore : IOutboxStore
             message.MessageType,
             message.PayloadJson,
             message.Headers.ToDictionary(kvp => kvp.Key, kvp => kvp.Value),
-            message.CreatedAt), SerializerOptions);
+            message.CreatedAt,
+            message.PartitionKey), SerializerOptions);
 
     private static OutboxMessage Deserialize(string json)
     {
@@ -154,15 +155,19 @@ public sealed class RedisOutboxStore : IOutboxStore
             dto.MessageType,
             dto.PayloadJson,
             new MessageHeaders(dto.Headers),
-            dto.CreatedAt);
+            dto.CreatedAt,
+            dto.PartitionKey);
     }
 
     // Flat DTO so the wire format stays stable even if MessageHeaders internals change.
+    // Entries written before the PartitionKey field was introduced deserialize with a null
+    // partition key, so old data is forward-compatible.
     private sealed record OutboxMessageDto(
         Guid Id,
         string Topic,
         string MessageType,
         string PayloadJson,
         Dictionary<string, string> Headers,
-        DateTimeOffset CreatedAt);
+        DateTimeOffset CreatedAt,
+        string? PartitionKey);
 }

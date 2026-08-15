@@ -62,7 +62,8 @@ public class RedisOutboxIntegrationTests : IAsyncLifetime
             "System.String",
             "\"billed\"",
             new MessageHeaders { MessageId = "minted-1" },
-            now);
+            now,
+            PartitionKey: "order-partition-7");
 
         // One atomic unit: state saved + entry staged.
         await stateStore.TransitionAsync("corr-1", new SagaState { Id = "corr-1", Step = 2 }, [entry]);
@@ -81,6 +82,7 @@ public class RedisOutboxIntegrationTests : IAsyncLifetime
         Assert.Equal("orders-billed", acquired.Message.Topic);
         Assert.Equal("\"billed\"", acquired.Message.PayloadJson);
         Assert.Equal("minted-1", acquired.Message.Headers.MessageId);
+        Assert.Equal("order-partition-7", acquired.Message.PartitionKey);
 
         // The lease hides it from a concurrent relay.
         Assert.Empty(await outbox.AcquirePendingAsync(now.AddSeconds(5), lease, 10));
@@ -106,7 +108,8 @@ public class RedisOutboxIntegrationTests : IAsyncLifetime
 
         await stateStore.TransitionAsync("corr-2", new SagaState { Id = "corr-2" }, [new OutboxMessage(
             Guid.NewGuid(), "orders-retry", "System.String", "\"retry\"",
-            new MessageHeaders { MessageId = "minted-2" }, now)]);
+            new MessageHeaders { MessageId = "minted-2" }, now,
+            PartitionKey: null)]);
 
         // Staging stamps visibility with the store-side clock — acquire with fresh time.
         now = DateTimeOffset.UtcNow;

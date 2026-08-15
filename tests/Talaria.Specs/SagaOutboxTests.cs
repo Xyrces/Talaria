@@ -120,6 +120,50 @@ public class SagaOutboxTests
     }
 
     [Fact]
+    public async Task Dispatch_From_Keyed_Inbound_Message_Preserves_PartitionKey()
+    {
+        var (registry, services, transport, outbox) = BuildEngine(config =>
+        {
+            config.StartedBy<PlaceOrder>("pk-start",
+                (msg, ctx) => Task.FromResult(ctx.Transition(new OrderState { Id = msg.Id })),
+                m => m.Id);
+            config.On<BillOrder>("pk-bill",
+                (state, msg, ctx) =>
+                {
+                    state.Billed = true;
+                    ctx.Dispatch(new OrderBilled { Id = msg.Id });
+                    return Task.FromResult(ctx.Transition(state));
+                },
+                m => m.Id);
+            config.DispatchTo<OrderBilled>("pk-billed");
+        });
+
+        var listener = StartHost(registry, services, transport);
+        using var cts = new CancellationTokenSource();
+        await listener.StartAsync(cts.Token);
+
+        await (await transport.CreateProducerAsync<PlaceOrder>("pk-start", new ProducerOptions()))
+            .ProduceAsync(new PlaceOrder { Id = "c1" });
+
+        var stateStore = services.GetRequiredService<IStateStore<OrderState>>();
+        var started = await PollUntilAsync(async () => await stateStore.GetAsync("c1") is not null, TimeSpan.FromSeconds(5));
+        Assert.True(started, "The starter never created saga state.");
+
+        await (await transport.CreateProducerAsync<BillOrder>("pk-bill", new ProducerOptions()))
+            .ProduceAsync(new BillOrder { Id = "c1" }, partitionKey: "order-partition-7");
+
+        var dispatched = await ReadUntilAsync<OrderBilled>(transport, "pk-billed", 1);
+        var envelope = Assert.Single(dispatched);
+        Assert.Equal("c1", envelope.Payload!.Id);
+        Assert.Equal("order-partition-7", envelope.PartitionKey);
+
+        var drained = await PollUntilAsync(() => Task.FromResult(outbox.Count == 0), TimeSpan.FromSeconds(5));
+        Assert.True(drained, "The outbox was not drained after the dispatch was published.");
+
+        await listener.StopAsync(cts.Token);
+    }
+
+    [Fact]
     public async Task Completion_Purges_State_And_Stages_Final_Dispatch_Atomically()
     {
         var (registry, services, transport, outbox) = BuildEngine(config =>

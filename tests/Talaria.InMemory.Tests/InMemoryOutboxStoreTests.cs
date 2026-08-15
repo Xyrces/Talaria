@@ -8,9 +8,9 @@ public class InMemoryOutboxStoreTests
 {
     private static readonly TimeSpan Lease = TimeSpan.FromSeconds(30);
 
-    private static OutboxMessage Message(string topic = "orders-out") =>
+    private static OutboxMessage Message(string topic = "orders-out", string? partitionKey = null) =>
         new(Guid.NewGuid(), topic, typeof(object).AssemblyQualifiedName!, "{}",
-            new MessageHeaders { MessageId = Guid.NewGuid().ToString("N") }, DateTimeOffset.UtcNow);
+            new MessageHeaders { MessageId = Guid.NewGuid().ToString("N") }, DateTimeOffset.UtcNow, partitionKey);
 
     [Fact]
     public async Task AcquirePendingAsync_HidesLeasedEntries_UntilLeaseExpires()
@@ -96,6 +96,30 @@ public class InMemoryOutboxStoreTests
         var batch = await store.AcquirePendingAsync(now, Lease, maxBatch: 2);
         Assert.Equal(2, batch.Count);
         Assert.Equal(3, store.Count);
+    }
+
+    [Fact]
+    public async Task AcquirePendingAsync_RoundTripsPartitionKey_WhenPresent()
+    {
+        var store = new InMemoryOutboxStore();
+        var stateStore = new InMemoryStateStore<State>(store);
+
+        await stateStore.TransitionAsync("c1", new State(), [Message(partitionKey: "order-partition-7")]);
+
+        var leased = Assert.Single(await store.AcquirePendingAsync(DateTimeOffset.UtcNow, Lease, maxBatch: 10));
+        Assert.Equal("order-partition-7", leased.Message.PartitionKey);
+    }
+
+    [Fact]
+    public async Task AcquirePendingAsync_RoundTripsNullPartitionKey_WhenAbsent()
+    {
+        var store = new InMemoryOutboxStore();
+        var stateStore = new InMemoryStateStore<State>(store);
+
+        await stateStore.TransitionAsync("c1", new State(), [Message()]);
+
+        var leased = Assert.Single(await store.AcquirePendingAsync(DateTimeOffset.UtcNow, Lease, maxBatch: 10));
+        Assert.Null(leased.Message.PartitionKey);
     }
 
     private class State { public string Id { get; set; } = ""; }
