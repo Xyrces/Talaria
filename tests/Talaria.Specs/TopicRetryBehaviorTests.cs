@@ -292,6 +292,91 @@ public class TopicRetryBehaviorTests
     }
 
     [Fact]
+    public async Task RetryCommitFailure_ReleasesLock_AndSuppressesDuplicateRetryCopy()
+    {
+        var innerTransport = new InMemoryTransport();
+        var transport = new CommitFailingInMemoryTransport(innerTransport);
+        var idempotencyStore = new InMemoryIdempotencyStore();
+        var deferralStore = new InMemoryDeferralStore();
+        var attempts = 0;
+
+        var topicReg = new TopicRegistry();
+        topicReg.MapTopic<RetryMessage>("retry.topic",
+            (msg, ct) =>
+            {
+                // Fail on odd attempts (original + redelivered original), succeed on even attempts (retry copy).
+                if (Interlocked.Increment(ref attempts) % 2 == 1)
+                {
+                    throw new InvalidOperationException("boom");
+                }
+
+                return Task.CompletedTask;
+            },
+            new RetryPolicy
+            {
+                MaxRetryAttempts = 3,
+                RetryInterval = TimeSpan.FromSeconds(1),
+                BackoffType = RetryBackoffType.Fixed,
+            });
+
+        var options = new TalariaOptions
+        {
+            ApplicationName = "test-app",
+            MinRetryDelay = TimeSpan.FromMilliseconds(50),
+            DeferralBackoff = TimeSpan.FromSeconds(1),
+        };
+
+        var listener = new TalariaListener(
+            transport,
+            topicReg,
+            new SagaRegistry(),
+            options,
+            NullLogger<TalariaListener>.Instance,
+            stores: new TalariaListenerStores(idempotencyStore, deferralStore, null));
+
+        await listener.StartAsync();
+
+        // The first commit of the original envelope will fail after the retry copy is scheduled.
+        transport.SetCommitFailures("retry-commit-1", 1);
+
+        var producer = await transport.CreateProducerAsync<RetryMessage>("retry.topic", new ProducerOptions());
+        await producer.ProduceAsync(new RetryMessage { Id = "MSG-COMMIT-FAIL" }, new MessageHeaders { MessageId = "retry-commit-1" });
+
+        var scheduled = await TestAsyncHelpers.PollUntilAsync(
+            () => Task.FromResult(deferralStore.Count >= 1 && Volatile.Read(ref attempts) >= 1), TimeSpan.FromSeconds(5));
+        Assert.True(scheduled, "Retry was not scheduled after the first handler failure.");
+
+        await listener.StopAsync();
+
+        // The commit-failure path must release the original idempotency lock so the
+        // original message can redeliver promptly.
+        var reacquired = await idempotencyStore.TryAcquireLockAsync(
+            "retry-commit-1", "test-app.retry.topic", TimeSpan.FromMinutes(1));
+        Assert.NotNull(reacquired);
+        await idempotencyStore.ReleaseLockAsync(reacquired);
+
+        // Start a fresh listener. The original redelivers and schedules a duplicate retry copy,
+        // but the deterministic retry MessageId means the duplicate is suppressed by idempotency.
+        var listener2 = new TalariaListener(
+            transport,
+            topicReg,
+            new SagaRegistry(),
+            options,
+            NullLogger<TalariaListener>.Instance,
+            stores: new TalariaListenerStores(idempotencyStore, deferralStore, null));
+
+        await listener2.StartAsync();
+
+        var finished = await TestAsyncHelpers.PollUntilAsync(
+            () => Task.FromResult(Volatile.Read(ref attempts) >= 4), TimeSpan.FromSeconds(15));
+        Assert.True(finished, $"Expected 4 handler invocations (original fail, retry success, redelivered original fail, retry success), got {Volatile.Read(ref attempts)}.");
+
+        Assert.Empty(await innerTransport.ReadAllFromTopicAsync<RetryMessage>("retry.topic.dlq"));
+
+        await listener2.StopAsync();
+    }
+
+    [Fact]
     public async Task OperationCanceledException_IsNotRetried()
     {
         var transport = new InMemoryTransport();
@@ -408,14 +493,13 @@ public class TopicRetryBehaviorTests
     {
         var transport = new InMemoryTransport();
         var attempts = 0;
-        var handlerCts = new CancellationTokenSource();
 
         var topicReg = new TopicRegistry();
         topicReg.MapTopic<RetryMessage>("shutdown.topic",
             async (msg, ct) =>
             {
                 Interlocked.Increment(ref attempts);
-                await Task.Delay(Timeout.Infinite, handlerCts.Token);
+                await Task.Delay(Timeout.Infinite, ct);
             },
             new RetryPolicy
             {
@@ -444,8 +528,7 @@ public class TopicRetryBehaviorTests
         await TestAsyncHelpers.PollUntilAsync(
             () => Task.FromResult(Volatile.Read(ref attempts) >= 1), TimeSpan.FromSeconds(5));
 
-        // Signal the handler to cancel, then stop the listener. The handler will throw OCE.
-        handlerCts.Cancel();
+        // Stopping the listener cancels the loop token, so the handler throws OCE.
         await listener.StopAsync();
 
         // The message must NOT be in the DLQ.

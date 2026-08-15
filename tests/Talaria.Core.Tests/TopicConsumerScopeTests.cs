@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Talaria.Core.Abstractions;
 using Talaria.Core.Hosting;
@@ -199,13 +200,74 @@ public class TopicConsumerScopeTests
     private class ConstructionCountingConsumer : ITopicConsumer<ScopeMessage>
     {
         public static int ConstructionCount;
+        public static int HandlerInvocationCount;
 
         public ConstructionCountingConsumer()
         {
             Interlocked.Increment(ref ConstructionCount);
         }
 
-        public Task ConsumeAsync(ConsumeContext<ScopeMessage> context) => Task.CompletedTask;
+        public Task ConsumeAsync(ConsumeContext<ScopeMessage> context)
+        {
+            Interlocked.Increment(ref HandlerInvocationCount);
+            return Task.CompletedTask;
+        }
+    }
+
+    private class ThrowingDisposeDependency : IAsyncDisposable
+    {
+        public ValueTask DisposeAsync()
+        {
+            throw new InvalidOperationException("scoped disposal failure");
+        }
+    }
+
+    private class SucceedingWithDisposableConsumer : ITopicConsumer<ScopeMessage>
+    {
+        private readonly ThrowingDisposeDependency _dependency;
+        private readonly Action _onHandled;
+
+        public SucceedingWithDisposableConsumer(ThrowingDisposeDependency dependency, Action onHandled)
+        {
+            _dependency = dependency;
+            _onHandled = onHandled;
+        }
+
+        public Task ConsumeAsync(ConsumeContext<ScopeMessage> context)
+        {
+            _ = _dependency;
+            _onHandled();
+            return Task.CompletedTask;
+        }
+    }
+
+    private class CountingIdempotencyStore : IIdempotencyStore
+    {
+        private readonly IIdempotencyStore _inner;
+        private int _acquireCount;
+
+        public CountingIdempotencyStore(IIdempotencyStore inner)
+        {
+            _inner = inner;
+        }
+
+        public int AcquireCount => _acquireCount;
+
+        public async Task<IdempotencyLock?> TryAcquireLockAsync(
+            string messageId,
+            string consumerQueue,
+            TimeSpan expiration,
+            CancellationToken ct = default)
+        {
+            Interlocked.Increment(ref _acquireCount);
+            return await _inner.TryAcquireLockAsync(messageId, consumerQueue, expiration, ct);
+        }
+
+        public Task MarkCompleteAsync(IdempotencyLock @lock, CancellationToken ct = default)
+            => _inner.MarkCompleteAsync(@lock, ct);
+
+        public Task ReleaseLockAsync(IdempotencyLock @lock, CancellationToken ct = default)
+            => _inner.ReleaseLockAsync(@lock, ct);
     }
 
     private class NoIsServiceProvider : IServiceProvider
@@ -413,6 +475,9 @@ public class TopicConsumerScopeTests
         var transport = new InMemoryTransport();
         var deferralStore = new InMemoryDeferralStore();
         var observedOrder = new List<string>();
+        var loggerProvider = new TestLoggerProvider();
+        var loggerFactory = new LoggerFactory();
+        loggerFactory.AddProvider(loggerProvider);
 
         var services = new ServiceCollection()
             .AddSingleton(transport)
@@ -437,7 +502,7 @@ public class TopicConsumerScopeTests
                 ApplicationName = "scope-disposal-fault",
                 IncludeExceptionDetailsInDlq = true,
             },
-            NullLogger<TalariaListener>.Instance,
+            loggerFactory.CreateLogger<TalariaListener>(),
             services,
             new TalariaListenerStores(DeferralStore: deferralStore));
 
@@ -450,6 +515,57 @@ public class TopicConsumerScopeTests
         var envelope = Assert.Single(dlqMessages);
         Assert.Equal("fault-1", envelope.Payload!.Id);
         Assert.Equal("handler failure", envelope.Headers.DlqException);
+
+        Assert.Contains(loggerProvider.Entries, e =>
+            e.Message.Contains("Scope disposal for topic 'scope.disposal-fault.topic' failed while a handler exception was already in flight"));
+
+        await listener.StopAsync();
+    }
+
+    [Fact]
+    public async Task Scope_Disposal_Fault_After_Successful_Handler_Is_Logged_And_Message_Is_Committed()
+    {
+        var transport = new InMemoryTransport();
+        var handled = false;
+        var loggerProvider = new TestLoggerProvider();
+        var loggerFactory = new LoggerFactory();
+        loggerFactory.AddProvider(loggerProvider);
+
+        var services = new ServiceCollection()
+            .AddSingleton(transport)
+            .AddScoped<ThrowingDisposeDependency>()
+            .AddScoped<SucceedingWithDisposableConsumer>(sp =>
+                new SucceedingWithDisposableConsumer(
+                    sp.GetRequiredService<ThrowingDisposeDependency>(),
+                    () => handled = true))
+            .BuildServiceProvider();
+
+        var topicReg = new TopicRegistry();
+        topicReg.MapTopic<ScopeMessage, SucceedingWithDisposableConsumer>("scope.dispose-after-success.topic");
+
+        var listener = new TalariaListener(
+            transport,
+            topicReg,
+            new SagaRegistry(),
+            new TalariaOptions
+            {
+                ApplicationName = "scope-dispose-after-success",
+                IncludeExceptionDetailsInDlq = true,
+            },
+            loggerFactory.CreateLogger<TalariaListener>(),
+            services);
+
+        await listener.StartAsync();
+
+        var producer = await transport.CreateProducerAsync<ScopeMessage>("scope.dispose-after-success.topic", new ProducerOptions());
+        await producer.ProduceAsync(new ScopeMessage { Id = "success-dispose-fault" });
+
+        await TestAsyncHelpers.WaitUntilAsync(() => handled);
+
+        // The handler succeeded, so the message must be committed — no DLQ, no retry.
+        Assert.Empty(await transport.ReadAllFromTopicAsync<ScopeMessage>("scope.dispose-after-success.topic.dlq"));
+        Assert.Contains(loggerProvider.Entries, e =>
+            e.Message.Contains("Scope disposal for topic 'scope.dispose-after-success.topic' failed after the handler succeeded"));
 
         await listener.StopAsync();
     }
@@ -560,7 +676,7 @@ public class TopicConsumerScopeTests
     public async Task Duplicate_Delivery_With_Idempotency_Does_Not_Resolve_Consumer_Instance()
     {
         var transport = new InMemoryTransport();
-        var idempotencyStore = new InMemoryIdempotencyStore();
+        var countingStore = new CountingIdempotencyStore(new InMemoryIdempotencyStore());
         Interlocked.Exchange(ref ConstructionCountingConsumer.ConstructionCount, 0);
 
         var services = new ServiceCollection()
@@ -578,7 +694,7 @@ public class TopicConsumerScopeTests
             new TalariaOptions { ApplicationName = "scope-idempotent" },
             NullLogger<TalariaListener>.Instance,
             services,
-            new TalariaListenerStores(IdempotencyStore: idempotencyStore));
+            new TalariaListenerStores(IdempotencyStore: countingStore));
 
         await listener.StartAsync();
 
@@ -587,7 +703,9 @@ public class TopicConsumerScopeTests
         await producer.ProduceAsync(new ScopeMessage { Id = "dup-1" }, new MessageHeaders { MessageId = messageId });
         await producer.ProduceAsync(new ScopeMessage { Id = "dup-1" }, new MessageHeaders { MessageId = messageId });
 
-        await TestAsyncHelpers.WaitUntilAsync(() => ConstructionCountingConsumer.ConstructionCount == 1);
+        // Wait until the engine has observed both deliveries through the idempotency gate
+        // before asserting that only one consumer instance was constructed.
+        await TestAsyncHelpers.WaitUntilAsync(() => countingStore.AcquireCount >= 2);
         Assert.Equal(1, ConstructionCountingConsumer.ConstructionCount);
 
         await listener.StopAsync();
