@@ -50,8 +50,9 @@ public interface IConsumer<T> : IAsyncDisposable
     /// <exception cref="Exception">
     /// Implementations surface commit failures as exceptions. A failure leaves the
     /// message eligible for redelivery on the next consumer session; callers must
-    /// handle the exception and avoid marking the idempotency record complete until
-    /// the commit has been acknowledged by the transport.
+    /// handle the exception. The engines mark the idempotency record complete once
+    /// the handler has succeeded, so a commit failure after successful handling is
+    /// safe: the redelivered copy is suppressed by the idempotency gate.
     /// </exception>
     Task CommitAsync(MessageEnvelope<T> message, CancellationToken ct = default);
 
