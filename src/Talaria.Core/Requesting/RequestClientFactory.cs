@@ -235,10 +235,9 @@ public sealed class RequestClientFactory : IAsyncDisposable
                 if (envelope.Headers.RequestFault)
                 {
                     var exceptionType = envelope.Headers.TryGetValue(RequestClientFaultHeaders.ExceptionTypeKey, out var et) ? et : null;
-                    var message = _options.IncludeExceptionDetailsInDlq
-                        && envelope.Headers.TryGetValue(RequestClientFaultHeaders.ExceptionMessageKey, out var em)
+                    var message = envelope.Headers.TryGetValue(RequestClientFaultHeaders.ExceptionMessageKey, out var em)
                         ? em
-                        : "The responder faulted while processing the request. Enable IncludeExceptionDetailsInDlq for details.";
+                        : "The responder faulted while processing the request. Enable IncludeExceptionDetailsInDlq on the responder for details.";
                     pending.Tcs.TrySetException(new RequestFaultException(requestId, exceptionType, message));
                 }
                 else

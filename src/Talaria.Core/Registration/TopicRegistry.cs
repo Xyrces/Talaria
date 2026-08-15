@@ -116,7 +116,7 @@ public sealed class TopicRegistry
             {
                 throw new InvalidOperationException(
                     "Topic registrations are captured when the host starts. " +
-                    "Call MapTopic before the host runs (e.g. during startup, before app.Run()).");
+                    "Call MapTopic/MapRequest before the host runs (e.g. during startup, before app.Run()).");
             }
 
             _registrations.Add(registration);
