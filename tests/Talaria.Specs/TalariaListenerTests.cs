@@ -26,7 +26,7 @@ public class TalariaListenerTests
         topicReg.Add(new TopicRegistration {
             TopicName = "test-topic",
             MessageType = typeof(DummyMessage),
-            Handler = (msg, headers, ct) => Task.CompletedTask
+            Handler = (msg, headers, _, ct) => Task.CompletedTask
         });
 
         var opts = Options.Create(new TalariaOptions());

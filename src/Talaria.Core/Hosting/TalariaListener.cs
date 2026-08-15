@@ -302,6 +302,11 @@ public sealed class TalariaListener : IAsyncDisposable
             {
                 await sagaEngine.DisposeAsync();
             }
+
+            if (topicEngine is not null)
+            {
+                await topicEngine.DisposeAsync();
+            }
         }
     }
 }

@@ -67,7 +67,7 @@ public class EngineIdempotencyTests
         {
             TopicName = "dup-topic",
             MessageType = typeof(DummyMessage),
-            Handler = (msg, headers, ct) =>
+            Handler = (msg, headers, _, ct) =>
             {
                 Interlocked.Increment(ref handlerCalls);
                 return Task.CompletedTask;
@@ -112,7 +112,7 @@ public class EngineIdempotencyTests
         {
             TopicName = "fail-topic",
             MessageType = typeof(DummyMessage),
-            Handler = (msg, headers, ct) =>
+            Handler = (msg, headers, _, ct) =>
             {
                 // First invocation throws; the retry (same MessageId) succeeds.
                 if (Interlocked.Increment(ref handlerCalls) == 1)
@@ -156,7 +156,7 @@ public class EngineIdempotencyTests
         {
             TopicName = "complete-topic",
             MessageType = typeof(DummyMessage),
-            Handler = (msg, headers, ct) =>
+            Handler = (msg, headers, _, ct) =>
             {
                 Interlocked.Increment(ref handlerCalls);
                 return Task.CompletedTask;
@@ -194,7 +194,7 @@ public class EngineIdempotencyTests
         {
             TopicName = "outage-topic",
             MessageType = typeof(DummyMessage),
-            Handler = (msg, headers, ct) =>
+            Handler = (msg, headers, _, ct) =>
             {
                 Interlocked.Increment(ref handlerCalls);
                 return Task.CompletedTask;

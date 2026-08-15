@@ -126,6 +126,8 @@ internal sealed class RetryCoordinator
         CancellationToken ct)
     {
         // OperationCanceledException is NEVER retried — it is not a user-handler failure.
+        // The caller is responsible for checking ct.IsCancellationRequested before routing
+        // to the DLQ so that shutdown-time cancellation leaves the message uncommitted.
         if (ex is OperationCanceledException)
         {
             return RetryOutcome.NotRetryable;
@@ -136,7 +138,7 @@ internal sealed class RetryCoordinator
             return RetryOutcome.NotRetryable;
         }
 
-        var attempt = envelope.Headers.RetryAttempt;
+        var attempt = ParseRetryAttempt(envelope.Headers);
         var nextAttempt = attempt + 1;
 
         if (nextAttempt > policy.MaxRetryAttempts)
@@ -163,6 +165,7 @@ internal sealed class RetryCoordinator
                 "Register a deferral store via UseInMemoryDeferralStore() or UseRedisDeferralStore().",
                 topicName);
 
+            envelope.Headers.DlqAttempts = attempt;
             await RouteToDlqAsync(pipeline, consumer, envelope, ex, @lock, "retry_unavailable", ct);
             return RetryOutcome.Unavailable;
         }
@@ -170,6 +173,7 @@ internal sealed class RetryCoordinator
         var delay = ComputeDelay(policy, attempt, _options.MinRetryDelay);
         var headers = BuildRetryHeaders(envelope.Headers, nextAttempt);
         var rootMessageId = headers.RetryRootMessageId ?? headers.MessageId ?? Guid.NewGuid().ToString("N");
+        headers.RetryRootMessageId = rootMessageId;
         headers.MessageId = $"{rootMessageId}:retry:{nextAttempt}";
 
         var payloadJson = SerializePayload(envelope.Payload, messageType);
@@ -196,6 +200,7 @@ internal sealed class RetryCoordinator
                 "Failed to enqueue delayed retry for message {MessageId} on '{Topic}'. Routing to DLQ with reason 'retry_unavailable'.",
                 envelope.Headers.MessageId, topicName);
 
+            envelope.Headers.DlqAttempts = attempt;
             await RouteToDlqAsync(pipeline, consumer, envelope, ex, @lock, "retry_unavailable", ct);
             return RetryOutcome.Unavailable;
         }
@@ -254,6 +259,29 @@ internal sealed class RetryCoordinator
             new KeyValuePair<string, object?>("messaging.destination.name", envelope.SourceTopic ?? "unknown"));
 
         await pipeline.FailAsync(@lock, consumer, envelope, ex, dlqReason, ct);
+    }
+
+    /// <summary>
+    /// Reads the retry attempt header, logging a warning once when it is present but
+    /// malformed. A missing or malformed header is treated as attempt 0 so the engine
+    /// remains total and never throws during header processing.
+    /// </summary>
+    private int ParseRetryAttempt(MessageHeaders headers)
+    {
+        if (!headers.TryGetValue(MessageHeaders.RetryAttemptKey, out var raw))
+        {
+            return 0;
+        }
+
+        if (int.TryParse(raw, out var attempt))
+        {
+            return attempt;
+        }
+
+        _logger.LogWarning(
+            "malformed retry attempt header '{Value}' on message {MessageId}; treating as attempt 0",
+            raw, headers.MessageId);
+        return 0;
     }
 
     /// <summary>

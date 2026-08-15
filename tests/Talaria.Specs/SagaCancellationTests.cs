@@ -32,7 +32,7 @@ public class SagaCancellationTests
         {
             TopicName = "cancel-topic",
             MessageType = typeof(CancelMessage),
-            Handler = async (msg, headers, ct) =>
+            Handler = async (msg, headers, _, ct) =>
             {
                 // Block mid-handler until the test signals completion.
                 handlerEntered.TrySetResult();
