@@ -5,9 +5,13 @@ using Talaria.Core.Abstractions;
 namespace Talaria.Core.Registration;
 
 /// <summary>
-/// Represents a registered topic handler — the binding between a topic name,
-/// a message type, and the handler delegate.
+/// Represents a registered topic subscription — the binding between a topic name,
+/// a message type, and either a handler delegate or a class-based consumer type.
 /// </summary>
+/// <remarks>
+/// Either <see cref="Handler"/> or <see cref="ConsumerType"/> must be set, but not both.
+/// <see cref="TopicRegistry.Add(TopicRegistration)"/> enforces this invariant.
+/// </remarks>
 /// <since>1.0.0</since>
 public sealed class TopicRegistration
 {
@@ -17,8 +21,18 @@ public sealed class TopicRegistration
     /// <summary>The CLR message type each envelope will be deserialized into.</summary>
     public required Type MessageType { get; init; }
 
-    /// <summary>The erased async handler invoked for each delivered message.</summary>
-    public required Func<object, MessageHeaders, EnvelopeMetadata, CancellationToken, Task> Handler { get; init; }
+    /// <summary>
+    /// The erased async handler invoked for each delivered message. Null when
+    /// <see cref="ConsumerType"/> is set and the engine resolves an <see cref="ITopicConsumer{T}"/> from DI.
+    /// </summary>
+    public Func<object, MessageHeaders, EnvelopeMetadata, CancellationToken, Task>? Handler { get; init; }
+
+    /// <summary>
+    /// The concrete consumer type implementing <see cref="ITopicConsumer{T}"/> for this topic.
+    /// When set, the engine creates a per-message DI scope and resolves the consumer by this type.
+    /// Null when a delegate <see cref="Handler"/> is registered.
+    /// </summary>
+    public Type? ConsumerType { get; init; }
 
     /// <summary>Optional explicit consumer group. Null falls back to <see cref="TalariaOptions.ConsumerGroupOverride"/> then auto-generated.</summary>
     public string? ConsumerGroup { get; init; }

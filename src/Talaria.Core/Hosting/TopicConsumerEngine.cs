@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Talaria.Core.Abstractions;
 using Talaria.Core.Registration;
@@ -17,6 +18,7 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
     private readonly IDeferralStore? _deferralStore;
     private readonly MessageProcessingPipeline _pipeline;
     private readonly ILogger _logger;
+    private readonly IServiceProvider? _serviceProvider;
 
     public TopicConsumerEngine(
         ITransport transport,
@@ -24,7 +26,8 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
         TalariaOptions options,
         IDeferralStore? deferralStore,
         MessageProcessingPipeline pipeline,
-        ILogger logger)
+        ILogger logger,
+        IServiceProvider? serviceProvider = null)
     {
         _transport = transport;
         _registrations = registry.Registrations;
@@ -32,6 +35,15 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
         _deferralStore = deferralStore;
         _pipeline = pipeline;
         _logger = logger;
+        _serviceProvider = serviceProvider;
+
+        var classConsumerWithoutProvider = _registrations.FirstOrDefault(r => r.ConsumerType is not null && serviceProvider is null);
+        if (classConsumerWithoutProvider is not null)
+        {
+            throw new InvalidOperationException(
+                $"Topic '{classConsumerWithoutProvider.TopicName}' uses a class-based consumer but no IServiceProvider was supplied to {nameof(TopicConsumerEngine)}. " +
+                "A service provider is required to resolve ITopicConsumer<T> instances and create per-message scopes.");
+        }
     }
 
     public async Task RunAsync(CancellationToken ct)
@@ -126,17 +138,67 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
                     continue;
                 }
 
+                activity?.SetTag("talaria.consumer.type", registration.ConsumerType?.FullName ?? "delegate");
+
+                Exception? handlerException = null;
                 try
                 {
-                    var metadata = new EnvelopeMetadata(
-                        envelope.PartitionKey,
-                        envelope.Partition,
-                        envelope.Offset,
-                        envelope.Timestamp,
-                        envelope.CorrelationId);
-                    await registration.Handler(envelope.Payload!, envelope.Headers, metadata, ct);
+                    if (registration.ConsumerType is not null)
+                    {
+                        var scope = _serviceProvider!.CreateAsyncScope();
+                        try
+                        {
+                            var topicConsumer = (ITopicConsumer<T>)scope.ServiceProvider.GetRequiredService(registration.ConsumerType);
+                            var context = new ConsumeContext<T>
+                            {
+                                Envelope = envelope,
+                                CancellationToken = ct,
+                                Services = scope.ServiceProvider,
+                            };
+                            await topicConsumer.ConsumeAsync(context);
+                        }
+                        catch (Exception ex)
+                        {
+                            handlerException = ex;
+                        }
+                        finally
+                        {
+                            try
+                            {
+                                await scope.DisposeAsync();
+                            }
+                            catch (Exception disposeEx)
+                            {
+                                if (handlerException is not null)
+                                {
+                                    _logger.LogError(disposeEx,
+                                        "Scope disposal for topic '{Topic}' failed while a handler exception was already in flight; preserving the original handler exception.",
+                                        registration.TopicName);
+                                }
+                                else
+                                {
+                                    handlerException = disposeEx;
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        var metadata = new EnvelopeMetadata(
+                            envelope.PartitionKey,
+                            envelope.Partition,
+                            envelope.Offset,
+                            envelope.Timestamp,
+                            envelope.CorrelationId);
+                        await registration.Handler!(envelope.Payload!, envelope.Headers, metadata, ct);
+                    }
                 }
                 catch (Exception ex)
+                {
+                    handlerException = ex;
+                }
+
+                if (handlerException is not null)
                 {
                     // During shutdown the handler may observe OperationCanceledException (or any
                     // exception while the loop token is already canceled). Do not DLQ in that
@@ -144,33 +206,33 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
                     if (ct.IsCancellationRequested)
                     {
                         _logger.LogDebug(
-                            ex,
+                            handlerException,
                             "Handler for topic '{Topic}' threw during shutdown; leaving message uncommitted for redelivery.",
                             registration.TopicName);
                         continue;
                     }
 
-                    _logger.LogError(ex,
+                    _logger.LogError(handlerException,
                         "Handler for topic '{Topic}' failed. Evaluating delayed retry policy.",
                         registration.TopicName);
 
-                    activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, ex.Message);
+                    activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, handlerException.Message);
 
                     Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1,
                         new KeyValuePair<string, object?>("messaging.destination.name", registration.TopicName));
 
                     var outcome = await retryCoordinator.TryCoordinateTopicRetryAsync(
-                        registration, pipeline, consumer, envelope, ex, gate.Lock, ct);
+                        registration, pipeline, consumer, envelope, handlerException, gate.Lock, ct);
 
                     if (outcome == RetryCoordinator.RetryOutcome.NotRetryable)
                     {
-                        _logger.LogError(ex,
+                        _logger.LogError(handlerException,
                             "Handler for topic '{Topic}' failed. Routing to DLQ.",
                             registration.TopicName);
 
                         Diagnostics.TalariaDiagnostics.DlqRouted.Add(1,
                             new KeyValuePair<string, object?>("messaging.destination.name", registration.TopicName));
-                        await pipeline.FailAsync(gate.Lock, consumer, envelope, ex, null, ct);
+                        await pipeline.FailAsync(gate.Lock, consumer, envelope, handlerException, null, ct);
                     }
 
                     continue;

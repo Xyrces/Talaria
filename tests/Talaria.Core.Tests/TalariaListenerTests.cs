@@ -171,8 +171,7 @@ public class TalariaListenerTests
         var producer = await transport.CreateProducerAsync<DummyMessage>("manual.topic", new ProducerOptions());
         await producer.ProduceAsync(new DummyMessage { Id = "MSG-1" });
 
-        var processed = await PollUntilAsync(() => Task.FromResult(received.Count == 1), TimeSpan.FromSeconds(1));
-        Assert.True(processed, "Message was not processed.");
+        await TestAsyncHelpers.WaitUntilAsync(() => received.Count == 1, TimeSpan.FromSeconds(1));
         Assert.Equal("MSG-1", received[0]);
 
         await listener.StopAsync();
@@ -203,7 +202,7 @@ public class TalariaListenerTests
         var producer = await transport.CreateProducerAsync<DummyMessage>("hop.topic", new ProducerOptions());
         await producer.ProduceAsync(new DummyMessage { Id = "HOP" }, new MessageHeaders { HopCount = 2 });
 
-        var dlq = await ReadUntilAsync<DummyMessage>(transport, "hop.topic.dlq", 1);
+        var dlq = await TestAsyncHelpers.ReadUntilAsync<DummyMessage>(transport, "hop.topic.dlq", 1);
         Assert.Single(dlq);
         Assert.Equal("HOP", dlq[0].Payload!.Id);
         Assert.Equal("max_hops_exceeded", dlq[0].Headers.DlqReason);
@@ -253,7 +252,7 @@ public class TalariaListenerTests
 
         await deferralStore.EnqueueAsync(deferred);
 
-        await WaitUntilAsync(() => received.Count == 1);
+        await TestAsyncHelpers.WaitUntilAsync(() => received.Count == 1);
         Assert.Equal("DEF", received[0]);
 
         await listener.StopAsync();
@@ -295,7 +294,7 @@ public class TalariaListenerTests
         await producer.ProduceAsync(new ManualSagaStart { Id = "saga-1" });
 
         var store = services.GetRequiredService<IStateStore<ManualSagaState>>();
-        await WaitUntilAsync(async () => await store.GetAsync("saga-1") is not null);
+        await TestAsyncHelpers.WaitUntilAsync(async () => await store.GetAsync("saga-1") is not null);
 
         var state = await store.GetAsync("saga-1");
         Assert.NotNull(state);
@@ -320,6 +319,31 @@ public class TalariaListenerTests
             transport,
             new TopicRegistry(),
             registry,
+            new TalariaOptions { ApplicationName = "test-app" },
+            NullLogger<TalariaListener>.Instance);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => listener.StartAsync());
+        Assert.Contains("IServiceProvider", ex.Message);
+    }
+
+    private class ClassConsumerMessage { public string Id { get; set; } = ""; }
+    private class DummyClassConsumer : ITopicConsumer<ClassConsumerMessage>
+    {
+        public Task ConsumeAsync(ConsumeContext<ClassConsumerMessage> context) => Task.CompletedTask;
+    }
+
+    [Fact]
+    public async Task ClassConsumer_Registered_Without_ServiceProvider_Throws_InvalidOperationException()
+    {
+        var transport = new InMemoryTransport();
+
+        var topicReg = new TopicRegistry();
+        topicReg.MapTopic<ClassConsumerMessage, DummyClassConsumer>("class-consumer.topic");
+
+        var listener = new TalariaListener(
+            transport,
+            topicReg,
+            new SagaRegistry(),
             new TalariaOptions { ApplicationName = "test-app" },
             NullLogger<TalariaListener>.Instance);
 
@@ -459,7 +483,7 @@ public class TalariaListenerTests
         await serviceProviderStore.MarkCompleteAsync(lck);
 
         await listener.StartAsync();
-        await WaitUntilAsync(() => received.Count == 1);
+        await TestAsyncHelpers.WaitUntilAsync(() => received.Count == 1);
 
         Assert.Single(received);
         Assert.Equal("PREC", received[0]);
@@ -485,74 +509,6 @@ public class TalariaListenerTests
     private class FaultSagaStart
     {
         public string Id { get; set; } = "";
-    }
-
-    private static async Task<List<MessageEnvelope<T>>> ReadUntilAsync<T>(
-        InMemoryTransport transport, string topic, int expectedCount)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        List<MessageEnvelope<T>> messages;
-        do
-        {
-            messages = await transport.ReadAllFromTopicAsync<T>(topic);
-            if (messages.Count >= expectedCount)
-            {
-                break;
-            }
-
-            await Task.Delay(50);
-        }
-        while (DateTime.UtcNow < deadline);
-
-        return messages;
-    }
-
-    private static async Task WaitUntilAsync(Func<bool> condition)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        while (DateTime.UtcNow < deadline)
-        {
-            if (condition())
-            {
-                return;
-            }
-
-            await Task.Delay(25);
-        }
-
-        Assert.True(condition(), "Condition was not met within the timeout.");
-    }
-
-    private static async Task WaitUntilAsync(Func<Task<bool>> condition)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        while (DateTime.UtcNow < deadline)
-        {
-            if (await condition())
-            {
-                return;
-            }
-
-            await Task.Delay(25);
-        }
-
-        Assert.True(await condition(), "Condition was not met within the timeout.");
-    }
-
-    private static async Task<bool> PollUntilAsync(Func<Task<bool>> condition, TimeSpan timeout)
-    {
-        var deadline = DateTime.UtcNow + timeout;
-        while (DateTime.UtcNow < deadline)
-        {
-            if (await condition())
-            {
-                return true;
-            }
-
-            await Task.Delay(25);
-        }
-
-        return await condition();
     }
 
     private class FaultingTransport : ITransport
