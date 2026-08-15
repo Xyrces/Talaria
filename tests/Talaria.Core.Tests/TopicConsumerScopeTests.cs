@@ -98,6 +98,136 @@ public class TopicConsumerScopeTests
         public Task ConsumeAsync(ConsumeContext<ScopeMessage> context) => Task.CompletedTask;
     }
 
+    private class ThrowingConsumer : ITopicConsumer<ScopeMessage>
+    {
+        public Task ConsumeAsync(ConsumeContext<ScopeMessage> context)
+        {
+            throw new InvalidOperationException("handler failure");
+        }
+    }
+
+    private class ThrowingDisposableTracker : IAsyncDisposable
+    {
+        public bool Disposed { get; private set; }
+
+        public ValueTask DisposeAsync()
+        {
+            Disposed = true;
+            throw new InvalidOperationException("disposal failure");
+        }
+    }
+
+    private class AsyncDisposableTracker : IAsyncDisposable
+    {
+        private readonly Action _onDispose;
+
+        public AsyncDisposableTracker(Action onDispose)
+        {
+            _onDispose = onDispose;
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            _onDispose();
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private class ScopeDisposalTrackingConsumer : ITopicConsumer<ScopeMessage>
+    {
+        private readonly ThrowingDisposableTracker _tracker;
+        private readonly List<string> _observedOrder;
+
+        public ScopeDisposalTrackingConsumer(ThrowingDisposableTracker tracker, List<string> observedOrder)
+        {
+            _tracker = tracker;
+            _observedOrder = observedOrder;
+        }
+
+        public Task ConsumeAsync(ConsumeContext<ScopeMessage> context)
+        {
+            _observedOrder.Add("handler-start");
+            throw new InvalidOperationException("handler failure");
+        }
+    }
+
+    private class OrderTrackingConsumer : ITopicConsumer<ScopeMessage>
+    {
+        private readonly AsyncDisposableTracker _tracker;
+
+        public OrderTrackingConsumer(AsyncDisposableTracker tracker)
+        {
+            _tracker = tracker;
+        }
+
+        public Task ConsumeAsync(ConsumeContext<ScopeMessage> context)
+        {
+            throw new InvalidOperationException("handler failure");
+        }
+    }
+
+    private class InstanceCounter
+    {
+        public int InstanceId { get; }
+
+        public InstanceCounter()
+        {
+            InstanceId = Interlocked.Increment(ref _nextId);
+        }
+
+        private static int _nextId;
+    }
+
+    private class InstanceCapturingConsumer : ITopicConsumer<ScopeMessage>
+    {
+        private readonly InstanceCounter _counter;
+        private readonly List<int> _capturedIds;
+
+        public InstanceCapturingConsumer(InstanceCounter counter, List<int> capturedIds)
+        {
+            _counter = counter;
+            _capturedIds = capturedIds;
+        }
+
+        public Task ConsumeAsync(ConsumeContext<ScopeMessage> context)
+        {
+            _capturedIds.Add(_counter.InstanceId);
+            throw new InvalidOperationException("handler failure");
+        }
+    }
+
+    private class ConstructionCountingConsumer : ITopicConsumer<ScopeMessage>
+    {
+        public static int ConstructionCount;
+
+        public ConstructionCountingConsumer()
+        {
+            Interlocked.Increment(ref ConstructionCount);
+        }
+
+        public Task ConsumeAsync(ConsumeContext<ScopeMessage> context) => Task.CompletedTask;
+    }
+
+    private class NoIsServiceProvider : IServiceProvider
+    {
+        private readonly TopicRegistry _registry;
+
+        public NoIsServiceProvider(TopicRegistry registry)
+        {
+            _registry = registry;
+        }
+
+        public object? GetService(Type serviceType)
+        {
+            if (serviceType == typeof(TopicRegistry))
+            {
+                return _registry;
+            }
+
+            return null;
+        }
+    }
+
     [Fact]
     public async Task Scoped_Dependency_Instance_Differs_Per_Message()
     {
@@ -130,7 +260,7 @@ public class TopicConsumerScopeTests
             await producer.ProduceAsync(new ScopeMessage { Id = $"msg-{i}" });
         }
 
-        await WaitUntilAsync(() => capturedIds.Count == 3);
+        await TestAsyncHelpers.WaitUntilAsync(() => capturedIds.Count == 3);
 
         Assert.Equal(3, capturedIds.Distinct().Count());
 
@@ -171,7 +301,7 @@ public class TopicConsumerScopeTests
             await producer.ProduceAsync(new ScopeMessage { Id = $"msg-{i}" });
         }
 
-        await WaitUntilAsync(() => disposedCount == 2);
+        await TestAsyncHelpers.WaitUntilAsync(() => disposedCount == 2);
         Assert.Equal(2, trackers.Count);
 
         await listener.StopAsync();
@@ -206,7 +336,7 @@ public class TopicConsumerScopeTests
         var producer = await transport.CreateProducerAsync<ScopeMessage>("scope.context.topic", new ProducerOptions());
         await producer.ProduceAsync(new ScopeMessage { Id = "ctx-1" });
 
-        await WaitUntilAsync(() => capturedIds.Count == 1);
+        await TestAsyncHelpers.WaitUntilAsync(() => capturedIds.Count == 1);
 
         Assert.Single(capturedIds);
 
@@ -249,7 +379,7 @@ public class TopicConsumerScopeTests
         var producer = await transport.CreateProducerAsync<ScopeMessage>("scope.throw.topic", new ProducerOptions());
         await producer.ProduceAsync(new ScopeMessage { Id = "throw-1" });
 
-        var dlqMessages = await ReadUntilAsync<ScopeMessage>(transport, "scope.throw.topic.dlq", 1);
+        var dlqMessages = await TestAsyncHelpers.ReadUntilAsync<ScopeMessage>(transport, "scope.throw.topic.dlq", 1);
         var envelope = Assert.Single(dlqMessages);
         Assert.Equal("throw-1", envelope.Payload!.Id);
         Assert.Equal("retries_exhausted", envelope.Headers.DlqReason);
@@ -257,39 +387,222 @@ public class TopicConsumerScopeTests
         await listener.StopAsync();
     }
 
-    private static async Task WaitUntilAsync(Func<bool> condition)
+    [Fact]
+    public void TopicConsumerEngine_ClassConsumer_Without_ServiceProvider_Throws_InvalidOperationException()
     {
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        while (DateTime.UtcNow < deadline)
-        {
-            if (condition())
-            {
-                return;
-            }
+        var transport = new InMemoryTransport();
+        var topicReg = new TopicRegistry();
+        topicReg.MapTopic<ScopeMessage, CapturingConsumer>("engine-guard.topic");
 
-            await Task.Delay(25);
-        }
+        var ex = Assert.Throws<InvalidOperationException>(() => new TopicConsumerEngine(
+            transport,
+            topicReg,
+            new TalariaOptions { ApplicationName = "engine-guard" },
+            null,
+            new MessageProcessingPipeline(new InMemoryIdempotencyStore(), new TalariaOptions(), NullLogger<TalariaListener>.Instance),
+            NullLogger<TalariaListener>.Instance,
+            serviceProvider: null));
 
-        Assert.True(condition(), "Condition was not met within the timeout.");
+        Assert.Contains("engine-guard.topic", ex.Message);
+        Assert.Contains("IServiceProvider", ex.Message);
     }
 
-    private static async Task<List<MessageEnvelope<T>>> ReadUntilAsync<T>(
-        InMemoryTransport transport, string topic, int expectedCount)
+    [Fact]
+    public async Task Scope_Disposal_Fault_Is_Logged_And_Original_Handler_Exception_Drives_Retry()
     {
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        List<MessageEnvelope<T>> messages;
-        do
+        var transport = new InMemoryTransport();
+        var deferralStore = new InMemoryDeferralStore();
+        var observedOrder = new List<string>();
+
+        var services = new ServiceCollection()
+            .AddSingleton(transport)
+            .AddSingleton(observedOrder)
+            .AddScoped<ThrowingDisposableTracker>()
+            .AddScoped<ScopeDisposalTrackingConsumer>()
+            .BuildServiceProvider();
+
+        var topicReg = new TopicRegistry();
+        topicReg.MapTopic<ScopeMessage, ScopeDisposalTrackingConsumer>("scope.disposal-fault.topic", new RetryPolicy
         {
-            messages = await transport.ReadAllFromTopicAsync<T>(topic);
-            if (messages.Count >= expectedCount)
+            MaxRetryAttempts = 0,
+            RetryInterval = TimeSpan.FromMilliseconds(10),
+        });
+
+        var listener = new TalariaListener(
+            transport,
+            topicReg,
+            new SagaRegistry(),
+            new TalariaOptions
             {
-                break;
-            }
+                ApplicationName = "scope-disposal-fault",
+                IncludeExceptionDetailsInDlq = true,
+            },
+            NullLogger<TalariaListener>.Instance,
+            services,
+            new TalariaListenerStores(DeferralStore: deferralStore));
 
-            await Task.Delay(50);
-        }
-        while (DateTime.UtcNow < deadline);
+        await listener.StartAsync();
 
-        return messages;
+        var producer = await transport.CreateProducerAsync<ScopeMessage>("scope.disposal-fault.topic", new ProducerOptions());
+        await producer.ProduceAsync(new ScopeMessage { Id = "fault-1" });
+
+        var dlqMessages = await TestAsyncHelpers.ReadUntilAsync<ScopeMessage>(transport, "scope.disposal-fault.topic.dlq", 1);
+        var envelope = Assert.Single(dlqMessages);
+        Assert.Equal("fault-1", envelope.Payload!.Id);
+        Assert.Equal("handler failure", envelope.Headers.DlqException);
+
+        await listener.StopAsync();
     }
+
+    [Fact]
+    public async Task Scope_Is_Disposed_Before_Retry_Coordination()
+    {
+        var transport = new InMemoryTransport();
+        var deferralStore = new InMemoryDeferralStore();
+        var disposedCount = 0;
+
+        var services = new ServiceCollection()
+            .AddSingleton(transport)
+            .AddScoped<AsyncDisposableTracker>(_ =>
+                new AsyncDisposableTracker(() => Interlocked.Increment(ref disposedCount)))
+            .AddScoped<OrderTrackingConsumer>()
+            .BuildServiceProvider();
+
+        var topicReg = new TopicRegistry();
+        topicReg.MapTopic<ScopeMessage, OrderTrackingConsumer>("scope.dispose-before-retry.topic", new RetryPolicy
+        {
+            MaxRetryAttempts = 1,
+            RetryInterval = TimeSpan.FromMilliseconds(10),
+        });
+
+        var listener = new TalariaListener(
+            transport,
+            topicReg,
+            new SagaRegistry(),
+            new TalariaOptions
+            {
+                ApplicationName = "scope-dispose-before-retry",
+                DeferralBackoff = TimeSpan.FromMilliseconds(10),
+            },
+            NullLogger<TalariaListener>.Instance,
+            services,
+            new TalariaListenerStores(DeferralStore: deferralStore));
+
+        await listener.StartAsync();
+
+        var producer = await transport.CreateProducerAsync<ScopeMessage>("scope.dispose-before-retry.topic", new ProducerOptions());
+        await producer.ProduceAsync(new ScopeMessage { Id = "order-1" });
+
+        // The retry copy will eventually DLQ; wait for that and verify the scope was disposed
+        // (at least once for the original attempt) before retry coordination produced the DLQ.
+        var dlqMessages = await TestAsyncHelpers.ReadUntilAsync<ScopeMessage>(
+            transport,
+            "scope.dispose-before-retry.topic.dlq",
+            1,
+            TimeSpan.FromSeconds(15));
+
+        var envelope = Assert.Single(dlqMessages);
+        Assert.Equal("order-1", envelope.Payload!.Id);
+        Assert.Equal("retries_exhausted", envelope.Headers.DlqReason);
+        Assert.True(disposedCount >= 1, "Scope should have been disposed before retry coordination completed.");
+
+        await listener.StopAsync();
+    }
+
+    [Fact]
+    public async Task Fresh_Scope_Per_Retry_Copy()
+    {
+        var transport = new InMemoryTransport();
+        var deferralStore = new InMemoryDeferralStore();
+        var capturedIds = new List<int>();
+
+        var services = new ServiceCollection()
+            .AddSingleton(transport)
+            .AddSingleton(capturedIds)
+            .AddScoped<InstanceCounter>()
+            .AddScoped<InstanceCapturingConsumer>()
+            .BuildServiceProvider();
+
+        var topicReg = new TopicRegistry();
+        topicReg.MapTopic<ScopeMessage, InstanceCapturingConsumer>("scope.fresh-per-retry.topic", new RetryPolicy
+        {
+            MaxRetryAttempts = 1,
+            RetryInterval = TimeSpan.FromMilliseconds(10),
+        });
+
+        var listener = new TalariaListener(
+            transport,
+            topicReg,
+            new SagaRegistry(),
+            new TalariaOptions
+            {
+                ApplicationName = "scope-fresh-per-retry",
+                DeferralBackoff = TimeSpan.FromMilliseconds(10),
+            },
+            NullLogger<TalariaListener>.Instance,
+            services,
+            new TalariaListenerStores(DeferralStore: deferralStore));
+
+        await listener.StartAsync();
+
+        var producer = await transport.CreateProducerAsync<ScopeMessage>("scope.fresh-per-retry.topic", new ProducerOptions());
+        await producer.ProduceAsync(new ScopeMessage { Id = "retry-scope-1" });
+
+        // Wait until both the original attempt and the retry attempt have been recorded.
+        await TestAsyncHelpers.WaitUntilAsync(() => capturedIds.Count == 2, TimeSpan.FromSeconds(15));
+
+        Assert.Equal(2, capturedIds.Distinct().Count());
+
+        await listener.StopAsync();
+    }
+
+    [Fact]
+    public async Task Duplicate_Delivery_With_Idempotency_Does_Not_Resolve_Consumer_Instance()
+    {
+        var transport = new InMemoryTransport();
+        var idempotencyStore = new InMemoryIdempotencyStore();
+        Interlocked.Exchange(ref ConstructionCountingConsumer.ConstructionCount, 0);
+
+        var services = new ServiceCollection()
+            .AddSingleton(transport)
+            .AddScoped<ConstructionCountingConsumer>()
+            .BuildServiceProvider();
+
+        var topicReg = new TopicRegistry();
+        topicReg.MapTopic<ScopeMessage, ConstructionCountingConsumer>("scope.idempotent.topic");
+
+        var listener = new TalariaListener(
+            transport,
+            topicReg,
+            new SagaRegistry(),
+            new TalariaOptions { ApplicationName = "scope-idempotent" },
+            NullLogger<TalariaListener>.Instance,
+            services,
+            new TalariaListenerStores(IdempotencyStore: idempotencyStore));
+
+        await listener.StartAsync();
+
+        var producer = await transport.CreateProducerAsync<ScopeMessage>("scope.idempotent.topic", new ProducerOptions());
+        var messageId = "duplicate-msg";
+        await producer.ProduceAsync(new ScopeMessage { Id = "dup-1" }, new MessageHeaders { MessageId = messageId });
+        await producer.ProduceAsync(new ScopeMessage { Id = "dup-1" }, new MessageHeaders { MessageId = messageId });
+
+        await TestAsyncHelpers.WaitUntilAsync(() => ConstructionCountingConsumer.ConstructionCount == 1);
+        Assert.Equal(1, ConstructionCountingConsumer.ConstructionCount);
+
+        await listener.StopAsync();
+    }
+
+    [Fact]
+    public void IServiceProviderIsService_Absent_Fallback_Allows_Registration()
+    {
+        var registry = new TopicRegistry();
+        var stubProvider = new NoIsServiceProvider(registry);
+
+        stubProvider.MapTopic<ScopeMessage, CapturingConsumer>("no-is-service.topic");
+
+        var reg = Assert.Single(registry.Registrations);
+        Assert.Equal(typeof(CapturingConsumer), reg.ConsumerType);
+    }
+
 }

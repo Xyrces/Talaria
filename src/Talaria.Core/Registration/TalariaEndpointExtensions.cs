@@ -117,12 +117,9 @@ public static class TalariaEndpointExtensions
         this IServiceProvider services,
         string topic,
         RetryPolicy? retryPolicy = null)
-        where TConsumer : ITopicConsumer<TMessage>
+        where TConsumer : class, ITopicConsumer<TMessage>
     {
-        ThrowIfConsumerNotRegistered<TMessage, TConsumer>(services);
-        var registry = services.GetRequiredService<TopicRegistry>();
-        registry.MapTopic<TMessage, TConsumer>(topic, retryPolicy);
-        return services;
+        return MapTopicCore<TMessage, TConsumer>(services, topic, null, retryPolicy);
     }
 
     /// <summary>
@@ -142,16 +139,17 @@ public static class TalariaEndpointExtensions
         string topic,
         string consumerGroup,
         RetryPolicy? retryPolicy = null)
-        where TConsumer : ITopicConsumer<TMessage>
+        where TConsumer : class, ITopicConsumer<TMessage>
     {
-        ThrowIfConsumerNotRegistered<TMessage, TConsumer>(services);
-        var registry = services.GetRequiredService<TopicRegistry>();
-        registry.MapTopic<TMessage, TConsumer>(topic, consumerGroup, retryPolicy);
-        return services;
+        return MapTopicCore<TMessage, TConsumer>(services, topic, consumerGroup, retryPolicy);
     }
 
-    private static void ThrowIfConsumerNotRegistered<TMessage, TConsumer>(IServiceProvider services)
-        where TConsumer : ITopicConsumer<TMessage>
+    private static IServiceProvider MapTopicCore<TMessage, TConsumer>(
+        IServiceProvider services,
+        string topic,
+        string? consumerGroup,
+        RetryPolicy? retryPolicy)
+        where TConsumer : class, ITopicConsumer<TMessage>
     {
         var isService = services.GetService<IServiceProviderIsService>();
         if (isService is not null && !isService.IsService(typeof(TConsumer)))
@@ -160,6 +158,18 @@ public static class TalariaEndpointExtensions
                 $"Consumer '{typeof(TConsumer).FullName}' is not registered in the service provider. " +
                 "Register it before calling MapTopic, e.g. services.AddScoped<TConsumer>().");
         }
+
+        var registry = services.GetRequiredService<TopicRegistry>();
+        if (consumerGroup is null)
+        {
+            registry.MapTopic<TMessage, TConsumer>(topic, retryPolicy);
+        }
+        else
+        {
+            registry.MapTopic<TMessage, TConsumer>(topic, consumerGroup, retryPolicy);
+        }
+
+        return services;
     }
 
     /// <summary>

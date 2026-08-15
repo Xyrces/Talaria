@@ -45,9 +45,10 @@ public sealed class TalariaListener : IAsyncDisposable
     /// <param name="options">Global Talaria options.</param>
     /// <param name="logger">Logger for listener diagnostics.</param>
     /// <param name="serviceProvider">
-    /// Required when sagas are registered. Used to resolve state stores and create
-    /// handler scopes. When supplied and <paramref name="stores"/> is omitted, the
-    /// optional stores are resolved from this provider at construction time.
+    /// Required when sagas or class-based topic consumers are registered. Used to resolve
+    /// state stores, create consumer scopes, and resolve <see cref="ITopicConsumer{T}"/>
+    /// instances by concrete type. When supplied and <paramref name="stores"/> is omitted,
+    /// the optional stores are resolved from this provider at construction time.
     /// </param>
     /// <param name="stores">
     /// Optional stores supplied directly. When omitted and a <paramref name="serviceProvider"/>

@@ -122,7 +122,7 @@ public static class TopicRegistryExtensions
         this TopicRegistry registry,
         string topic,
         RetryPolicy? retryPolicy = null)
-        where TConsumer : ITopicConsumer<TMessage>
+        where TConsumer : class, ITopicConsumer<TMessage>
     {
         return AddTopicRegistration(registry, topic, typeof(TMessage), retryPolicy, null, typeof(TConsumer), null);
     }
@@ -143,7 +143,7 @@ public static class TopicRegistryExtensions
         string topic,
         string consumerGroup,
         RetryPolicy? retryPolicy = null)
-        where TConsumer : ITopicConsumer<TMessage>
+        where TConsumer : class, ITopicConsumer<TMessage>
     {
         return AddTopicRegistration(registry, topic, typeof(TMessage), retryPolicy, consumerGroup, typeof(TConsumer), null);
     }

@@ -36,6 +36,14 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
         _pipeline = pipeline;
         _logger = logger;
         _serviceProvider = serviceProvider;
+
+        var classConsumerWithoutProvider = _registrations.FirstOrDefault(r => r.ConsumerType is not null && serviceProvider is null);
+        if (classConsumerWithoutProvider is not null)
+        {
+            throw new InvalidOperationException(
+                $"Topic '{classConsumerWithoutProvider.TopicName}' uses a class-based consumer but no IServiceProvider was supplied to {nameof(TopicConsumerEngine)}. " +
+                "A service provider is required to resolve ITopicConsumer<T> instances and create per-message scopes.");
+        }
     }
 
     public async Task RunAsync(CancellationToken ct)
@@ -132,7 +140,63 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
 
                 activity?.SetTag("talaria.consumer.type", registration.ConsumerType?.FullName ?? "delegate");
 
-                var handlerException = await TryInvokeHandlerAsync(registration, envelope, ct);
+                Exception? handlerException = null;
+                try
+                {
+                    if (registration.ConsumerType is not null)
+                    {
+                        var scope = _serviceProvider!.CreateAsyncScope();
+                        try
+                        {
+                            var topicConsumer = (ITopicConsumer<T>)scope.ServiceProvider.GetRequiredService(registration.ConsumerType);
+                            var context = new ConsumeContext<T>
+                            {
+                                Envelope = envelope,
+                                CancellationToken = ct,
+                                Services = scope.ServiceProvider,
+                            };
+                            await topicConsumer.ConsumeAsync(context);
+                        }
+                        catch (Exception ex)
+                        {
+                            handlerException = ex;
+                        }
+                        finally
+                        {
+                            try
+                            {
+                                await scope.DisposeAsync();
+                            }
+                            catch (Exception disposeEx)
+                            {
+                                if (handlerException is not null)
+                                {
+                                    _logger.LogError(disposeEx,
+                                        "Scope disposal for topic '{Topic}' failed while a handler exception was already in flight; preserving the original handler exception.",
+                                        registration.TopicName);
+                                }
+                                else
+                                {
+                                    handlerException = disposeEx;
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        var metadata = new EnvelopeMetadata(
+                            envelope.PartitionKey,
+                            envelope.Partition,
+                            envelope.Offset,
+                            envelope.Timestamp,
+                            envelope.CorrelationId);
+                        await registration.Handler!(envelope.Payload!, envelope.Headers, metadata, ct);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    handlerException = ex;
+                }
 
                 if (handlerException is not null)
                 {
@@ -188,44 +252,6 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
         }
 
         _logger.LogInformation("Talaria: consumer for '{Topic}' shut down.", registration.TopicName);
-    }
-
-    private async Task<Exception?> TryInvokeHandlerAsync<T>(
-        TopicRegistration registration,
-        MessageEnvelope<T> envelope,
-        CancellationToken ct)
-    {
-        try
-        {
-            if (registration.ConsumerType is not null)
-            {
-                await using var scope = _serviceProvider!.CreateAsyncScope();
-                var consumer = (ITopicConsumer<T>)scope.ServiceProvider.GetRequiredService(registration.ConsumerType);
-                var context = new ConsumeContext<T>
-                {
-                    Envelope = envelope,
-                    CancellationToken = ct,
-                    Services = scope.ServiceProvider,
-                };
-                await consumer.ConsumeAsync(context);
-            }
-            else
-            {
-                var metadata = new EnvelopeMetadata(
-                    envelope.PartitionKey,
-                    envelope.Partition,
-                    envelope.Offset,
-                    envelope.Timestamp,
-                    envelope.CorrelationId);
-                await registration.Handler!(envelope.Payload!, envelope.Headers, metadata, ct);
-            }
-
-            return null;
-        }
-        catch (Exception ex)
-        {
-            return ex;
-        }
     }
 
     public ValueTask DisposeAsync()

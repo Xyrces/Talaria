@@ -5,9 +5,13 @@ using Talaria.Core.Abstractions;
 namespace Talaria.Core.Registration;
 
 /// <summary>
-/// Represents a registered topic handler — the binding between a topic name,
-/// a message type, and the handler delegate.
+/// Represents a registered topic subscription — the binding between a topic name,
+/// a message type, and either a handler delegate or a class-based consumer type.
 /// </summary>
+/// <remarks>
+/// Either <see cref="Handler"/> or <see cref="ConsumerType"/> must be set, but not both.
+/// <see cref="TopicRegistry.Add(TopicRegistration)"/> enforces this invariant.
+/// </remarks>
 /// <since>1.0.0</since>
 public sealed class TopicRegistration
 {
