@@ -1,0 +1,46 @@
+name: Kafka Contract Tests
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'src/Talaria.Transports.Kafka/**'
+      - 'src/Talaria.Core/**'
+      - 'tests/Talaria.Tests.TransportContract/**'
+      - 'tests/Talaria.Transports.Kafka.Tests/**'
+      - 'tests/Talaria.InMemory.Tests/**'
+
+jobs:
+  kafka_contract:
+    name: Kafka Contract Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore Dependencies
+        run: dotnet restore Talaria.slnx
+
+      - name: Build Solution
+        run: dotnet build Talaria.slnx --configuration Release --no-restore
+
+      - name: Run Kafka Transport Contract Tests
+        env:
+          TALARIA_RUN_KAFKA_TRANSPORT_CONTRACT: 1
+        run: dotnet test tests/Talaria.Tests.TransportContract/Talaria.Tests.TransportContract.csproj --configuration Release --no-build --verbosity normal
+
+      - name: Run Kafka Transport Tests
+        env:
+          TALARIA_RUN_KAFKA_TRANSPORT_CONTRACT: 1
+        run: dotnet test tests/Talaria.Transports.Kafka.Tests/Talaria.Transports.Kafka.Tests.csproj --configuration Release --no-build --verbosity normal
