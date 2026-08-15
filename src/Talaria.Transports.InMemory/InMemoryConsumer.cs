@@ -161,6 +161,5 @@ internal sealed class InMemoryConsumer<T> : IConsumer<T>
         }
 
         _pending.Clear();
-        await ValueTask.CompletedTask;
     }
 }

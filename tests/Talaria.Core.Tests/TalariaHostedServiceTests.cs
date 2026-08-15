@@ -179,7 +179,7 @@ public class TalariaHostedServiceTests
     }
 
     [Fact]
-    public async Task HostedService_Adapters_Forward_Lifecycle_To_Listener()
+    public async Task HostedService_Adapter_Forwards_Lifecycle_To_Listener()
     {
         var transport = new InMemoryTransport();
 
