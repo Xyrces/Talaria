@@ -14,7 +14,7 @@ Talaria provides **at-least-once delivery with idempotent processing**:
 
 ## Core Features
 
-- **Decoupled architecture:** provider-agnostic abstractions (`ITransport`, `IStateStore<TState>`, `IIdempotencyStore`, `IDeferralStore`, `IOutboxStore`, `IIdempotencyVerifier`, `ITopologyProvisioner`, `IDeadLetterHandler`) with Kafka, Azure Service Bus, Redis, and in-memory implementations.
+- **Decoupled architecture:** provider-agnostic abstractions (`ITransport`, `IStateStore<TState>`, `IIdempotencyStore`, `IDeferralStore`, `IOutboxStore`, `ITopologyProvisioner`, `IDeadLetterHandler`) with Kafka, Azure Service Bus, Redis, and in-memory implementations.
 - **Saga orchestration:** strongly typed state machines via `MapSaga<TState>` with explicit correlation and explicit dispatch routing (`DispatchTo`).
 - **Idempotency:** fencing-token locks (`SET ... NX` via StackExchange.Redis `When.NotExists`) filter duplicate `MessageId`s across a cluster; a stale lock holder can never release another worker's lock.
 - **Transactional outbox:** saga state transitions and their outbound messages are staged atomically (single Lua script on Redis, one lock in-memory); a background relay publishes staged messages with lease + fencing semantics. Registered automatically by `UseRedisStateStore()` / `UseInMemoryStateStore()`.
@@ -116,7 +116,7 @@ builder.Services.AddTalaria()
 >
 > Entity provisioning (queues, topics, subscriptions) is the host's responsibility and is exposed through the `ITopologyProvisioner` abstraction. The transport exposes a convenience `EnsureEntityAsync(name, kind, ct)` helper for the saga sample; production deployments should call `ITopologyProvisioner.ProvisionAsync(declarations, ct)` from their startup code so the host's full topology is declared in one place.
 >
-> `IIdempotencyVerifier` is a reserved extension point for future transport-native deduplication; it is not currently wired into the default consumer pipeline and no transport implements it. ASB surfaces a built-in `MessageId`-based duplicate detection window on queues and topics, but the engine still deserializes and invokes handlers for messages that pass the idempotency gate.
+> ASB surfaces a built-in `MessageId`-based duplicate detection window on queues and topics; the engine does not use it, so deserialization and handler invocation still run for messages that pass the idempotency gate.
 
 ```csharp
 // Zero-dependency configuration (in-memory): lightweight single-process
