@@ -48,11 +48,11 @@ public class DeferralAdapterTests
             Topic: topic,
             MessageType: typeof(object).AssemblyQualifiedName!,
             PayloadJson: new string('x', payloadBytes),
-            PartitionKey: partitionKey,
             Headers: new MessageHeaders { MessageId = "msg-1" },
             CorrelationId: "corr-1",
             Attempt: 1,
-            DueAt: dueAt);
+            DueAt: dueAt,
+            PartitionKey: partitionKey);
 
     [Fact]
     public async Task EnqueueAsync_DueAtWithinCutoff_CallsSchedulerWithScheduledEnqueueTime()
@@ -184,6 +184,44 @@ public class DeferralAdapterTests
         var scheduled = Assert.Single(sender.Scheduled);
         Assert.Equal("pk-1", scheduled.Message.SessionId);
         Assert.Equal(dueAt, scheduled.ScheduledEnqueueTime);
+    }
+
+    [Fact]
+    public async Task ServiceBusMessageScheduler_WithoutPartitionKey_UsesCorrelationIdHeaderAsSessionId()
+    {
+        var sender = new RecordingSender();
+        await using var client = new FakeServiceBusClient(sender);
+        var scheduler = new ServiceBusMessageScheduler(client);
+        var dueAt = new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.Zero);
+        var properties = new Dictionary<string, object>
+        {
+            [MessageHeaders.MessageTypeKey] = typeof(object).FullName!,
+            [MessageHeaders.CorrelationIdKey] = "corr-1",
+        };
+
+        await scheduler.ScheduleAsync("topic-a", BinaryData.FromString("{}"), properties, dueAt, partitionKey: null);
+
+        var scheduled = Assert.Single(sender.Scheduled);
+        Assert.Equal("corr-1", scheduled.Message.SessionId);
+    }
+
+    [Fact]
+    public async Task ServiceBusMessageScheduler_WithEmptyPartitionKey_FallsBackToCorrelationIdHeader()
+    {
+        var sender = new RecordingSender();
+        await using var client = new FakeServiceBusClient(sender);
+        var scheduler = new ServiceBusMessageScheduler(client);
+        var dueAt = new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.Zero);
+        var properties = new Dictionary<string, object>
+        {
+            [MessageHeaders.MessageTypeKey] = typeof(object).FullName!,
+            [MessageHeaders.CorrelationIdKey] = "corr-1",
+        };
+
+        await scheduler.ScheduleAsync("topic-a", BinaryData.FromString("{}"), properties, dueAt, partitionKey: "");
+
+        var scheduled = Assert.Single(sender.Scheduled);
+        Assert.Equal("corr-1", scheduled.Message.SessionId);
     }
 
     private sealed class FakeServiceBusClient : ServiceBusClient

@@ -9,8 +9,8 @@ public class InMemoryDeferralStoreTests
     private static readonly TimeSpan Lease = TimeSpan.FromSeconds(30);
 
     private static DeferredMessage Message(DateTimeOffset dueAt, string topic = "orders", string? partitionKey = null) =>
-        new(Guid.NewGuid(), topic, typeof(object).AssemblyQualifiedName!, "{}", partitionKey,
-            new MessageHeaders(), "corr-1", Attempt: 1, dueAt);
+        new(Guid.NewGuid(), topic, typeof(object).AssemblyQualifiedName!, "{}",
+            new MessageHeaders(), "corr-1", Attempt: 1, dueAt, partitionKey);
 
     [Fact]
     public async Task AcquireDueAsync_ReturnsOnlyDueMessages_InDueOrder()
@@ -125,8 +125,8 @@ public class InMemoryDeferralStoreTests
         var headers = new MessageHeaders { MessageId = "msg-1:defer:2", [MessageHeaders.DeferralAttemptKey] = "2" };
         var dueAt = DateTimeOffset.UtcNow.AddSeconds(-1);
         var message = new DeferredMessage(
-            Guid.NewGuid(), "orders", typeof(object).AssemblyQualifiedName!, "{\"x\":1}", "part-9",
-            headers, "corr-9", Attempt: 2, dueAt);
+            Guid.NewGuid(), "orders", typeof(object).AssemblyQualifiedName!, "{\"x\":1}",
+            headers, "corr-9", Attempt: 2, dueAt, "part-9");
 
         await store.EnqueueAsync(message);
 

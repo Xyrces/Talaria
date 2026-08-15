@@ -78,13 +78,13 @@ public class DeferralAdapterDiTests
             Topic: "topic-a",
             MessageType: typeof(object).AssemblyQualifiedName!,
             PayloadJson: "{}",
-            PartitionKey: null,
             Headers: new MessageHeaders { MessageId = "msg-1" },
             CorrelationId: "corr-1",
             Attempt: 1,
             // 1 day out: well beyond the adapter's 10-minute default short-term cutoff,
             // so the adapter must hand it to the durable store, not the scheduler.
-            DueAt: DateTimeOffset.UtcNow.AddDays(1));
+            DueAt: DateTimeOffset.UtcNow.AddDays(1),
+            PartitionKey: null);
 
         // Act: route a long-term deferral through the resolved adapter.
         await resolved.EnqueueAsync(message);
@@ -120,13 +120,13 @@ public class DeferralAdapterDiTests
             Topic: "topic-a",
             MessageType: typeof(object).AssemblyQualifiedName!,
             PayloadJson: "{}",
-            PartitionKey: null,
             Headers: new MessageHeaders { MessageId = "msg-1" },
             CorrelationId: "corr-1",
             Attempt: 1,
             // Due in the past: the short-term cutoff (10 min) admits it to the
             // broker-side schedule path immediately.
-            DueAt: DateTimeOffset.UtcNow);
+            DueAt: DateTimeOffset.UtcNow,
+            PartitionKey: null);
 
         // Act.
         await resolved.EnqueueAsync(message);

@@ -152,11 +152,11 @@ public sealed class RedisDeferralStore : IDeferralStore
             message.Topic,
             message.MessageType,
             message.PayloadJson,
-            message.PartitionKey,
             message.Headers.ToDictionary(kvp => kvp.Key, kvp => kvp.Value),
             message.CorrelationId,
             message.Attempt,
-            message.DueAt), SerializerOptions);
+            message.DueAt,
+            message.PartitionKey), SerializerOptions);
 
     private static DeferredMessage Deserialize(string json)
     {
@@ -168,11 +168,11 @@ public sealed class RedisDeferralStore : IDeferralStore
             dto.Topic,
             dto.MessageType,
             dto.PayloadJson,
-            dto.PartitionKey,
             new MessageHeaders(dto.Headers),
             dto.CorrelationId,
             dto.Attempt,
-            dto.DueAt);
+            dto.DueAt,
+            dto.PartitionKey);
     }
 
     // Flat DTO so the wire format stays stable even if MessageHeaders internals change.
@@ -183,9 +183,9 @@ public sealed class RedisDeferralStore : IDeferralStore
         string Topic,
         string MessageType,
         string PayloadJson,
-        string? PartitionKey,
         Dictionary<string, string> Headers,
         string? CorrelationId,
         int Attempt,
-        DateTimeOffset DueAt);
+        DateTimeOffset DueAt,
+        string? PartitionKey);
 }

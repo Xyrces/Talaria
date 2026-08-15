@@ -69,22 +69,19 @@ internal sealed class ServiceBusMessageScheduler : IServiceBusMessageScheduler, 
             ScheduledEnqueueTime = scheduledEnqueueTime,
         };
 
+        // ASB's closest analogue to a Kafka partition key is SessionId. Setting it pins
+        // the scheduled message to the same session-aware receiver as the original delivery.
+        // This must happen even when applicationProperties is null, because partitionKey
+        // can be set independently of the header bag.
+        var sessionId = ServiceBusMessageSessionIdHelper.ResolveSessionId(partitionKey, applicationProperties);
+        if (!string.IsNullOrEmpty(sessionId))
+        {
+            message.SessionId = sessionId;
+        }
+
         if (applicationProperties is null)
         {
             return message;
-        }
-
-        // ASB's closest analogue to a Kafka partition key is SessionId. Setting it pins
-        // the scheduled message to the same session-aware receiver as the original delivery.
-        if (!string.IsNullOrEmpty(partitionKey))
-        {
-            message.SessionId = partitionKey;
-        }
-        else if (applicationProperties.TryGetValue(Talaria.Core.Abstractions.MessageHeaders.CorrelationIdKey, out var sessionCid)
-            && sessionCid is string sessionCorrelationId
-            && !string.IsNullOrEmpty(sessionCorrelationId))
-        {
-            message.SessionId = sessionCorrelationId;
         }
 
         var target = message.ApplicationProperties;

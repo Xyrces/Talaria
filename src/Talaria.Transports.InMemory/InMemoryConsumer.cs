@@ -93,6 +93,7 @@ internal sealed class InMemoryConsumer<T> : IConsumer<T>
                 Payload = payload,
                 Headers = raw.Headers,
                 SourceTopic = _topic,
+                PartitionKey = raw.PartitionKey,
                 CorrelationId = raw.Headers.TryGetValue(MessageHeaders.CorrelationIdKey, out var cid) ? cid : null,
                 Offset = raw.Offset,
                 Timestamp = raw.Timestamp,
@@ -118,6 +119,7 @@ internal sealed class InMemoryConsumer<T> : IConsumer<T>
         {
             PayloadJson = raw.PayloadJson, // keep the raw payload — it failed deserialization
             Headers = headers,
+            PartitionKey = raw.PartitionKey,
             Timestamp = raw.Timestamp,
         };
 
@@ -138,6 +140,7 @@ internal sealed class InMemoryConsumer<T> : IConsumer<T>
         {
             PayloadJson = JsonSerializer.Serialize(message.Payload),
             Headers = new MessageHeaders(message.Headers),
+            PartitionKey = message.PartitionKey,
             Timestamp = message.Timestamp,
         };
 

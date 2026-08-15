@@ -637,11 +637,11 @@ public sealed class SagaHostedService : BackgroundService
             env.SourceTopic!,
             step.MessageType.AssemblyQualifiedName ?? step.MessageType.FullName!,
             JsonSerializer.Serialize(payload, step.MessageType),
-            env.PartitionKey,
             headers,
             correlationId,
             attempt,
-            DateTimeOffset.UtcNow + TimeSpan.FromMilliseconds(_options.DeferralBackoff.TotalMilliseconds * attempt));
+            DateTimeOffset.UtcNow + TimeSpan.FromMilliseconds(_options.DeferralBackoff.TotalMilliseconds * attempt),
+            env.PartitionKey);
 
         await _deferralStore.EnqueueAsync(deferred, ct);
     }

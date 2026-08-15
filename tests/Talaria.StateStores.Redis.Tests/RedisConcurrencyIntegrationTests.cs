@@ -115,11 +115,11 @@ public class RedisConcurrencyIntegrationTests : IAsyncLifetime
             "orders-topic",
             "System.String",
             "\"hello-deferred\"",
-            "order-partition-7",
             headers,
             "corr-123",
             2,
-            now.AddSeconds(-5));
+            now.AddSeconds(-5),
+            "order-partition-7");
 
         await store.EnqueueAsync(message);
 

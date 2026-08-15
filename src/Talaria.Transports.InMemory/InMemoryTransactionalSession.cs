@@ -118,7 +118,7 @@ internal sealed class InMemoryBufferedProducer<T> : IProducer<T>
         string? partitionKey = null,
         CancellationToken ct = default)
     {
-        var msg = InMemoryProducer<T>.CreateMessage(message, headers);
+        var msg = InMemoryProducer<T>.CreateMessage(message, headers, partitionKey);
 
         if (System.Diagnostics.Activity.Current != null)
         {
