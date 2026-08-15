@@ -50,7 +50,7 @@ public sealed class TalariaOptions
     public TimeSpan OutboxRelayInterval { get; set; } = TimeSpan.FromMilliseconds(250);
 
     /// <summary>
-    /// Application name used for consumer group auto-generation and DLQ naming.
+    /// Application name used for consumer group auto-generation.
     /// Defaults to the entry assembly name.
     /// </summary>
     public string ApplicationName { get; set; } =

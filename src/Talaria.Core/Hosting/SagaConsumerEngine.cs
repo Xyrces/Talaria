@@ -273,11 +273,10 @@ internal sealed class SagaConsumerEngine
                     await HandleDeferralAsync(env, payload, step, correlationId, ct);
 
                     // Commit the original envelope BEFORE releasing the idempotency lock.
-                    // The deferred copy carries a freshly minted MessageId, so it is NOT
-                    // gated by the original lock. Committing first ensures the original
-                    // cannot redeliver and re-run the handler concurrently with the deferred
-                    // copy. If commit fails we leave the lock held: it expires via TTL and
-                    // the transport redelivers the original, which is safe.
+                    // The deferred copy carries a deterministic MessageId ({original}:defer:{attempt}),
+                    // so any duplicate copies produced by a redelivery are suppressed by the
+                    // idempotency gate. If commit fails, release the lock best-effort so the
+                    // original can redeliver promptly rather than waiting for the lock TTL to expire.
                     try
                     {
                         await consumer.CommitAsync(env, ct);
@@ -285,6 +284,7 @@ internal sealed class SagaConsumerEngine
                     catch (Exception commitEx)
                     {
                         _logger.LogError(commitEx, "Failed to commit original envelope after deferring saga message {MessageId}; it remains uncommitted for redelivery.", env.Headers.MessageId);
+                        await ReleaseLockBestEffortAsync(gate.Lock, ct);
                         return;
                     }
 
@@ -312,7 +312,7 @@ internal sealed class SagaConsumerEngine
                 return;
             }
 
-            var context = new Core.Sagas.SagaContext<object>();
+            var context = new Core.Sagas.SagaContext<object> { CancellationToken = ct };
             Core.Sagas.SagaResult<object> result;
             try
             {
@@ -357,11 +357,10 @@ internal sealed class SagaConsumerEngine
                     await HandleDeferralAsync(env, payload, step, correlationId, ct);
 
                     // Commit the original envelope BEFORE releasing the idempotency lock.
-                    // The deferred copy carries a freshly minted MessageId, so it is NOT
-                    // gated by the original lock. Committing first ensures the original
-                    // cannot redeliver and re-run the handler concurrently with the deferred
-                    // copy. If commit fails we leave the lock held: it expires via TTL and
-                    // the transport redelivers the original, which is safe.
+                    // The deferred copy carries a deterministic MessageId ({original}:defer:{attempt}),
+                    // so any duplicate copies produced by a redelivery are suppressed by the
+                    // idempotency gate. If commit fails, release the lock best-effort so the
+                    // original can redeliver promptly rather than waiting for the lock TTL to expire.
                     try
                     {
                         await consumer.CommitAsync(env, ct);
@@ -369,6 +368,7 @@ internal sealed class SagaConsumerEngine
                     catch (Exception commitEx)
                     {
                         _logger.LogError(commitEx, "Failed to commit original envelope after deferring saga message {MessageId}; it remains uncommitted for redelivery.", env.Headers.MessageId);
+                        await ReleaseLockBestEffortAsync(gate.Lock, ct);
                         return;
                     }
 

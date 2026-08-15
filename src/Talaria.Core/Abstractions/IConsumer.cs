@@ -45,9 +45,14 @@ public interface IConsumer<T> : IAsyncDisposable
     /// <param name="ct">Cancellation token; cancels the commit.</param>
     /// <remarks>
     /// On Kafka this advances the committed offset of the consumer group; on InMemory it
-    /// drops the message from the uncommitted-redelivery set. A commit failure leaves the
-    /// message eligible for redelivery on the next consumer session.
+    /// drops the message from the uncommitted-redelivery set.
     /// </remarks>
+    /// <exception cref="Exception">
+    /// Implementations surface commit failures as exceptions. A failure leaves the
+    /// message eligible for redelivery on the next consumer session; callers must
+    /// handle the exception and avoid marking the idempotency record complete until
+    /// the commit has been acknowledged by the transport.
+    /// </exception>
     Task CommitAsync(MessageEnvelope<T> message, CancellationToken ct = default);
 
     /// <summary>
@@ -58,8 +63,9 @@ public interface IConsumer<T> : IAsyncDisposable
     /// <param name="ct">Cancellation token; cancels the nack.</param>
     /// <remarks>
     /// TalariaListener uses NackAsync to route handler exceptions, missing
-    /// correlation IDs, and deserialization failures to the configured DLQ topic
-    /// (<see cref="TalariaOptions.ApplicationName"/> suffixed with <c>DlqSuffix</c>).
+    /// correlation IDs, and deserialization failures to the dead-letter queue.
+    /// The DLQ entity name is derived from the source topic suffixed with the
+    /// transport-specific DLQ suffix.
     /// </remarks>
     Task NackAsync(MessageEnvelope<T> message, CancellationToken ct = default);
 }

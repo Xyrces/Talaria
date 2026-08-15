@@ -177,7 +177,9 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
                                 }
                                 else
                                 {
-                                    handlerException = disposeEx;
+                                    _logger.LogError(disposeEx,
+                                        "Scope disposal for topic '{Topic}' failed after the handler succeeded; the message will still be committed.",
+                                        registration.TopicName);
                                 }
                             }
                         }

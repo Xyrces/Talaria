@@ -11,7 +11,7 @@ namespace Talaria.Transports.Kafka.Tests;
 /// <summary>
 /// Verifies the single-enumeration contract of <see cref="IConsumer{T}.ConsumeAsync"/>
 /// against a real Kafka broker. The guard must trip on a second enumeration while still
-/// allowing the legitimate single-enumeration path used by the hosted services.
+/// allowing the legitimate single-enumeration path used by the hosted service.
 /// </summary>
 public class KafkaConsumerEnumerationGuardTests : IAsyncLifetime
 {
