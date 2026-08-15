@@ -226,6 +226,70 @@ Notes:
 - Dispatching a message type with no `DispatchTo` mapping dead-letters the triggering message (`unmapped_dispatch`) without saving state.
 - Multiple saga steps (and stateless handlers) may share one topic — messages are fanned out by a `talaria.message_type` header.
 
+### Host-agnostic usage (console apps / custom composition roots)
+
+Talaria can run without `IHost` via `TalariaListener`. It exposes explicit `StartAsync` / `StopAsync` and supports the full supervision, hop-guard, idempotency, retry, deferral-sweeper, and outbox-relay pipeline.
+
+```csharp
+using Talaria.Core;
+using Talaria.Core.Abstractions;
+using Talaria.Core.Hosting;
+using Talaria.Core.Registration;
+using Talaria.Core.Sagas;
+using Talaria.Transports.InMemory;
+
+var transport = new InMemoryTransport();
+var topicRegistry = new TopicRegistry();
+var sagaRegistry = new SagaRegistry();
+
+topicRegistry.MapTopic<SendVerificationEmailCommand>("email-commands", async (msg, ct) =>
+{
+    await EmailService.Dispatch(msg.Email);
+});
+
+sagaRegistry.MapSaga<OnboardingState>(saga =>
+{
+    saga.StartedBy<CreateAccountCommand>("onboarding-commands", async (msg, ctx) =>
+    {
+        var state = new OnboardingState { AccountId = msg.AccountId };
+        ctx.Dispatch(new SendVerificationEmailCommand { AccountId = msg.AccountId });
+        return ctx.Transition(state);
+    }, correlateBy: msg => msg.AccountId);
+
+    saga.DispatchTo<SendVerificationEmailCommand>("email-commands");
+});
+
+// Sagas require an IServiceProvider that can resolve IStateStore<TState>.
+var services = new ServiceCollection()
+    .AddSingleton<ITransport>(transport)
+    .AddSingleton(typeof(IStateStore<>), typeof(InMemoryStateStore<>))
+    .BuildServiceProvider();
+
+await using var listener = new TalariaListener(
+    transport,
+    topicRegistry,
+    sagaRegistry,
+    new TalariaOptions { ApplicationName = "my-console-app" },
+    LoggerFactory.Create(b => b.AddConsole()).CreateLogger<TalariaListener>(),
+    services);
+
+await listener.StartAsync();
+Console.WriteLine("Press enter to stop...");
+Console.ReadLine();
+await listener.StopAsync();
+```
+
+In a DI-based app you can still grab the singleton listener manually:
+
+```csharp
+var listener = app.Services.BuildTalariaListener();
+await listener.StartAsync();
+// ...
+await listener.StopAsync();
+```
+
+`TalariaListener` is single-cycle: `StartAsync` after `StopAsync` throws `InvalidOperationException`. Double-start and double-stop are idempotent no-ops. Disposing the listener stops it if running but does not dispose caller-owned transports or stores.
+
 ---
 
 ## ⚠️ Sample API

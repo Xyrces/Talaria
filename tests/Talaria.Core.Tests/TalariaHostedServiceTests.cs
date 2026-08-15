@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Talaria.Core;
 using Talaria.Core.Abstractions;
+using Talaria.Core.Hosting;
 using Talaria.Core.Registration;
 using Talaria.Transports.InMemory;
 
@@ -174,6 +175,34 @@ public class TalariaHostedServiceTests
         Assert.Contains("before the host runs", ex.Message);
 
         await host.StopAsync();
+        host.Dispose();
+    }
+
+    [Fact]
+    public async Task HostedService_Adapters_Forward_Lifecycle_To_Listener()
+    {
+        var transport = new InMemoryTransport();
+
+        var builder = Host.CreateDefaultBuilder();
+        builder.ConfigureServices(services =>
+        {
+            services.AddTalaria(opts => opts.ApplicationName = "test-app")
+                    .UseInMemoryTransport(transport);
+        });
+
+        var host = builder.Build();
+
+        host.Services.MapTopic<TestMessage>("adapter.topic", (msg, ct) => Task.CompletedTask);
+
+        var listener = host.Services.GetRequiredService<TalariaListener>();
+        Assert.False(listener.IsRunning);
+
+        await host.StartAsync();
+        Assert.True(listener.IsRunning);
+
+        await host.StopAsync();
+        Assert.False(listener.IsRunning);
+
         host.Dispose();
     }
 }

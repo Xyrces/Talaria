@@ -57,7 +57,7 @@ public interface IConsumer<T> : IAsyncDisposable
     /// <param name="message">The envelope to negatively acknowledge.</param>
     /// <param name="ct">Cancellation token; cancels the nack.</param>
     /// <remarks>
-    /// Talaria's hosted services use NackAsync to route handler exceptions, missing
+    /// TalariaListener uses NackAsync to route handler exceptions, missing
     /// correlation IDs, and deserialization failures to the configured DLQ topic
     /// (<see cref="TalariaOptions.ApplicationName"/> suffixed with <c>DlqSuffix</c>).
     /// </remarks>

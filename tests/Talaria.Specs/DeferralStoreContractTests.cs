@@ -9,6 +9,7 @@ using Microsoft.Extensions.Options;
 using Talaria.Core;
 using Talaria.Core.Abstractions;
 using Talaria.Core.Hosting;
+using Talaria.Core.Registration;
 using Talaria.Core.Sagas;
 using Talaria.Transports.InMemory;
 using Xunit;
@@ -52,10 +53,16 @@ public class DeferralStoreContractTests
         // sweeper republishes it, and ensures the starter creates state before the first sweep.
         var opts = Options.Create(new TalariaOptions { DeferralBackoff = TimeSpan.FromMilliseconds(200) });
 
-        var hostedService = new SagaHostedService(registry, services, opts, NullLogger<SagaHostedService>.Instance);
+        var listener = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            opts.Value,
+            NullLogger<TalariaListener>.Instance,
+            services);
 
         using var cts = new CancellationTokenSource();
-        await hostedService.StartAsync(cts.Token);
+        await listener.StartAsync(cts.Token);
 
         // 1. Produce the non-starter step message BEFORE any state exists → deferred.
         var stepProducer = await transport.CreateProducerAsync<StepMessage>("step-topic", new ProducerOptions());
@@ -86,7 +93,7 @@ public class DeferralStoreContractTests
         Assert.Empty(await transport.ReadAllFromTopicAsync<StarterMessage>("starter-topic.dlq"));
         Assert.Empty(await transport.ReadAllFromTopicAsync<StepMessage>("step-topic.dlq"));
 
-        await hostedService.StopAsync(cts.Token);
+        await listener.StopAsync(cts.Token);
     }
 
     [Fact]
@@ -118,10 +125,16 @@ public class DeferralStoreContractTests
 
         var opts = Options.Create(new TalariaOptions { DeferralBackoff = TimeSpan.FromMilliseconds(200) });
 
-        var hostedService = new SagaHostedService(registry, services, opts, NullLogger<SagaHostedService>.Instance);
+        var listener = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            opts.Value,
+            NullLogger<TalariaListener>.Instance,
+            services);
 
         using var cts = new CancellationTokenSource();
-        await hostedService.StartAsync(cts.Token);
+        await listener.StartAsync(cts.Token);
 
         // 1. Produce the non-starter step message with a partition key BEFORE any state exists → deferred.
         var stepProducer = await transport.CreateProducerAsync<StepMessage>("step-topic", new ProducerOptions());
@@ -146,7 +159,7 @@ public class DeferralStoreContractTests
         var stepTopicMessages = await ReadUntilAsync<StepMessage>(transport, "step-topic", 2);
         Assert.All(stepTopicMessages, m => Assert.Equal("order-42", m.PartitionKey));
 
-        await hostedService.StopAsync(cts.Token);
+        await listener.StopAsync(cts.Token);
     }
 
     [Fact]

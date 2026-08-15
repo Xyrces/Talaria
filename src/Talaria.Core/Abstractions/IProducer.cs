@@ -8,8 +8,8 @@ namespace Talaria.Core.Abstractions;
 /// <typeparam name="T">The CLR message type the producer serializes.</typeparam>
 /// <remarks>
 /// Producers are created by <see cref="ITransport.CreateProducerAsync{T}"/> and are
-/// typically cached per (topic, message type) — Talaria's hosted services reuse a single
-/// producer instance for the lifetime of the host rather than creating one per message.
+/// typically cached per (topic, message type) — TalariaListener reuses a single
+/// producer instance for the lifetime of the listener rather than creating one per message.
 /// </remarks>
 /// <since>1.0.0</since>
 public interface IProducer<T> : IAsyncDisposable

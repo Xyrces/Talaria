@@ -8,12 +8,13 @@ using Talaria.Core;
 using Talaria.Core.Abstractions;
 using Talaria.Core.Hosting;
 using Talaria.Core.Registration;
+using Talaria.Core.Sagas;
 using Talaria.Transports.InMemory;
 using Xunit;
 
 namespace Talaria.Specs.Tests;
 
-public class TalariaHostedServiceTests
+public class TalariaListenerTests
 {
     private class DummyMessage { }
 
@@ -31,13 +32,19 @@ public class TalariaHostedServiceTests
         var opts = Options.Create(new TalariaOptions());
         var services = new ServiceCollection().BuildServiceProvider();
 
-        var hostedService = new TalariaHostedService(transport, topicReg, opts, NullLogger<TalariaHostedService>.Instance, services);
-        
+        var listener = new TalariaListener(
+            transport,
+            topicReg,
+            new SagaRegistry(),
+            opts.Value,
+            NullLogger<TalariaListener>.Instance,
+            services);
+
         using var cts = new CancellationTokenSource();
-        await hostedService.StartAsync(cts.Token);
+        await listener.StartAsync(cts.Token);
 
         // Ensure starting and stopping covers the dispose paths; stopping twice must not throw.
-        await hostedService.StopAsync(cts.Token);
-        await hostedService.StopAsync(cts.Token);
+        await listener.StopAsync(cts.Token);
+        await listener.StopAsync(cts.Token);
     }
 }

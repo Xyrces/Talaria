@@ -10,6 +10,7 @@ using Talaria.Core;
 using Talaria.Core.Abstractions;
 using Talaria.Core.Hosting;
 using Talaria.Core.Registration;
+using Talaria.Core.Sagas;
 using Talaria.Transports.InMemory;
 using Xunit;
 
@@ -34,7 +35,7 @@ public class EngineIdempotencyTests
             => throw new InvalidOperationException("Simulated idempotency store outage.");
     }
 
-    private static TalariaHostedService BuildService(
+    private static TalariaListener BuildService(
         InMemoryTransport transport,
         TopicRegistry topicReg,
         IIdempotencyStore store,
@@ -44,12 +45,14 @@ public class EngineIdempotencyTests
             .AddSingleton(store)
             .BuildServiceProvider();
 
-        return new TalariaHostedService(
+        return new TalariaListener(
             transport,
             topicReg,
-            Options.Create(new TalariaOptions { ApplicationName = AppName }),
-            NullLogger<TalariaHostedService>.Instance,
-            services);
+            new SagaRegistry(),
+            new TalariaOptions { ApplicationName = AppName },
+            NullLogger<TalariaListener>.Instance,
+            services,
+            new TalariaListenerStores(IdempotencyStore: store));
     }
 
     [Fact]
