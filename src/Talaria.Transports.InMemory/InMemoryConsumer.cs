@@ -33,6 +33,7 @@ internal sealed class InMemoryConsumer<T> : IConsumer<T>
     private readonly System.Collections.Concurrent.ConcurrentDictionary<long, InMemoryMessage> _pending = new();
 
     private int _consuming;
+    private int _enumerating;
 
     public InMemoryConsumer(
         string topic,
@@ -50,22 +51,16 @@ internal sealed class InMemoryConsumer<T> : IConsumer<T>
         _includeDlqExceptionDetails = includeDlqExceptionDetails;
     }
 
-    private const string SingleEnumerationMessage =
-        "ConsumeAsync may only be enumerated once per consumer instance. Create a new consumer to restart consumption.";
-
     public IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsync(CancellationToken ct = default)
     {
-        if (Interlocked.Exchange(ref _consuming, 1) != 0)
-        {
-            throw new InvalidOperationException(SingleEnumerationMessage);
-        }
-
+        SingleEnumerationGuard.ThrowIfAlreadyStarted(ref _consuming);
         return ConsumeAsyncCore(ct);
     }
 
     private async IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsyncCore(
         [EnumeratorCancellation] CancellationToken ct = default)
     {
+        SingleEnumerationGuard.ThrowIfAlreadyStarted(ref _enumerating);
         await foreach (var raw in _groupChannel.Reader.ReadAllAsync(ct))
         {
             if (_options.SimulatedLatency > TimeSpan.Zero)

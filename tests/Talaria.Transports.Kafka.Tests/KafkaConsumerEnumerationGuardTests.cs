@@ -100,4 +100,40 @@ public class KafkaConsumerEnumerationGuardTests : IAsyncLifetime
             "ConsumeAsync may only be enumerated once per consumer instance. Create a new consumer to restart consumption.",
             ex.Message);
     }
+
+    [DockerFact]
+    public async Task ReEnumerateReturnedInstance_Throws()
+    {
+        var transport = _serviceProvider.GetRequiredService<ITransport>();
+        string topic = $"test-guard-reenum-{Guid.NewGuid():N}";
+
+        var producer = await transport.CreateProducerAsync<string>(topic, new ProducerOptions());
+        await using var consumer = await transport.CreateConsumerAsync<string>(
+            topic,
+            new ConsumerOptions { ConsumerGroup = $"guard-reenum-group-{Guid.NewGuid():N}" });
+
+        await producer.ProduceAsync("guard-message", new MessageHeaders { MessageId = "g-re-1" });
+
+        // Capture the single IAsyncEnumerable returned by ConsumeAsync.
+        var enumerable = consumer.ConsumeAsync();
+
+        // First enumeration yields the message normally.
+        MessageEnvelope<string>? received = null;
+        await foreach (var env in enumerable)
+        {
+            received = env;
+            await consumer.CommitAsync(env);
+            break;
+        }
+        Assert.NotNull(received);
+        Assert.Equal("guard-message", received!.Payload);
+
+        // Re-enumerating the SAME returned instance is also forbidden. For async
+        // iterators the guard runs when MoveNextAsync first advances the enumerator.
+        var second = enumerable.GetAsyncEnumerator();
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => second.MoveNextAsync().AsTask());
+        Assert.Equal(
+            "ConsumeAsync may only be enumerated once per consumer instance. Create a new consumer to restart consumption.",
+            ex.Message);
+    }
 }

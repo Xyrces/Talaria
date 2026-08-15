@@ -90,6 +90,31 @@ public class InMemoryConsumerTests
     }
 
     [Fact]
+    public async Task ConsumeAsync_ReEnumerateReturnedInstance_ThrowsInvalidOperationException()
+    {
+        var (ch, _, _, consumer) = CreateSut();
+        await ch.Writer.WriteAsync(new InMemoryMessage { PayloadJson = "\"first\"", Headers = new MessageHeaders() });
+        ch.Writer.Complete();
+
+        // Capture the single IAsyncEnumerable returned by ConsumeAsync.
+        var enumerable = consumer.ConsumeAsync();
+
+        // First enumeration completes normally.
+        var first = new List<MessageEnvelope<string>>();
+        await foreach (var env in enumerable)
+        {
+            first.Add(env);
+        }
+        Assert.Single(first);
+
+        // Re-enumerating the SAME returned instance is also forbidden. For async
+        // iterators the guard runs when MoveNextAsync first advances the enumerator.
+        var second = enumerable.GetAsyncEnumerator();
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => second.MoveNextAsync().AsTask());
+        Assert.Equal("ConsumeAsync may only be enumerated once per consumer instance. Create a new consumer to restart consumption.", ex.Message);
+    }
+
+    [Fact]
     public async Task NackAsync_SendsToDlqAndAppDlq()
     {
         var (_, dlqBus, appDlqBus, consumer) = CreateSut();
