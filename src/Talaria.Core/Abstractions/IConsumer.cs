@@ -26,8 +26,15 @@ public interface IConsumer<T> : IAsyncDisposable
     /// </returns>
     /// <remarks>
     /// The returned sequence is single-consumer; concurrent iteration is not supported.
+    /// Each <see cref="IConsumer{T}"/> instance may be enumerated exactly once: a second
+    /// call to <c>ConsumeAsync</c> on the same instance throws <see cref="InvalidOperationException"/>.
+    /// Callers that need to restart consumption must create a new consumer via
+    /// <see cref="ITransport.CreateConsumerAsync{T}"/>.
     /// Transports may buffer ahead per <see cref="ConsumerOptions.BufferCapacity"/>.
     /// </remarks>
+    /// <exception cref="InvalidOperationException">
+    /// Thrown when this method is called more than once on the same consumer instance.
+    /// </exception>
     IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsync(CancellationToken ct = default);
 
     /// <summary>

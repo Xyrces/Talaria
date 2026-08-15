@@ -4,6 +4,7 @@ using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Channels;
 using Azure.Messaging.ServiceBus;
 using Microsoft.Extensions.Logging;
@@ -18,11 +19,18 @@ namespace Talaria.Transports.AzureServiceBus;
 /// <para>
 /// ASB delivers messages via an event-driven <see cref="ServiceBusProcessor"/>
 /// pump; we marshal them into a bounded <see cref="Channel{T}"/> so the host
-/// pipeline can iterate via the consumer enumeration. This
-/// mirrors the Talaria Kafka consumer's
-/// single-pump-thread model: there is exactly one writer (the processor
-/// handler) and one reader (the enumerator), so <c>SingleWriter = true</c>
-/// and <c>SingleReader = true</c> enable the lock-free fast path.
+/// pipeline can iterate via the consumer enumeration. This mirrors the
+/// Talaria Kafka consumer's single-pump-thread model: there is exactly one
+/// writer (the processor handler) and one reader (the enumerator), so
+/// <c>SingleWriter = true</c> and <c>SingleReader = true</c> enable the
+/// lock-free fast path.
+/// </para>
+/// <para>
+/// A consumer instance supports exactly one enumeration. The host restarts
+/// consumption by creating a new consumer via
+/// <see cref="ITransport.CreateConsumerAsync{T}"/>. Reusing a consumer
+/// instance, or enumerating the returned <see cref="IAsyncEnumerable{T}"/>
+/// more than once, throws <see cref="InvalidOperationException"/>.
 /// </para>
 /// <para>
 /// Acknowledgement semantics: <see cref="CommitAsync"/> calls
@@ -53,6 +61,8 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
     private Channel<MessageEnvelope<T>>? _activeChannel;
     private CancellationTokenSource? _activeReaderCts;
     private int _disposed;
+    private int _consuming;
+    private int _enumerating;
 
     public AzureServiceBusConsumer(
         ServiceBusProcessor processor,
@@ -75,9 +85,16 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
     private readonly record struct PendingEntry(ServiceBusReceivedMessage Message, ProcessMessageEventArgs Args, MessageEnvelope<T> Envelope);
 
     /// <inheritdoc />
-    public async IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsync(
+    public IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsync(CancellationToken ct = default)
+    {
+        SingleEnumerationGuard.ThrowIfAlreadyStarted(ref _consuming);
+        return ConsumeAsyncCore(ct);
+    }
+
+    private async IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsyncCore(
         [EnumeratorCancellation] CancellationToken ct = default)
     {
+        SingleEnumerationGuard.ThrowIfAlreadyStarted(ref _enumerating);
         var channel = Channel.CreateBounded<MessageEnvelope<T>>(new BoundedChannelOptions(_bufferCapacity)
         {
             SingleWriter = true,
@@ -85,12 +102,9 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
             FullMode = BoundedChannelFullMode.Wait,
         });
 
-        // Lazily subscribe to the processor on the first enumeration. The
-        // SDK's ServiceBusProcessor is started once and torn down with the
-        // consumer's disposal; re-subscription across enumerations is not
-        // reliable across SDK versions, so we subscribe/unsubscribe once for
-        // the consumer's lifetime and switch the active channel each time
-        // the host starts a new enumeration.
+        // Subscribe to the processor on the first (and only) enumeration.
+        // The SDK's ServiceBusProcessor is started once and torn down with
+        // the consumer's disposal.
         await EnsureSubscribedAsync().ConfigureAwait(false);
         var previous = Interlocked.Exchange(ref _activeChannel, channel);
         previous?.Writer.TryComplete();
@@ -107,10 +121,9 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
         }
         finally
         {
-            // Detach this enumeration's channel so a subsequent enumeration
-            // can install a fresh one. The processor keeps running until
-            // DisposeAsync so a host restart can re-enumerate without
-            // recreating the AMQP link.
+            // Detach this enumeration's channel. The processor keeps running
+            // until DisposeAsync; a host restart must create a new consumer
+            // instance via ITransport.CreateConsumerAsync.
             Interlocked.CompareExchange(ref _activeChannel, null, channel);
             channel.Writer.TryComplete();
         }
@@ -366,8 +379,12 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
             // Best effort — host is shutting down
         }
 
-        _processor.ProcessMessageAsync -= OnProcessorMessageAsync;
-        _processor.ProcessErrorAsync -= OnProcessorErrorAsync;
+        // EnsureSubscribedAsync may never have run (e.g. the consumer was disposed
+        // before enumeration started), so handler removal is best-effort.
+        try { _processor.ProcessMessageAsync -= OnProcessorMessageAsync; }
+        catch (ArgumentException) { /* handler was never attached */ }
+        try { _processor.ProcessErrorAsync -= OnProcessorErrorAsync; }
+        catch (ArgumentException) { /* handler was never attached */ }
 
         // Close any still-pending messages: rather than calling
         // Complete/Abandon explicitly, we let the broker's peek-lock

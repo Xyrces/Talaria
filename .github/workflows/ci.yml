@@ -90,6 +90,7 @@ jobs:
           dotnet pack src/Talaria.Transports.Kafka/Talaria.Transports.Kafka.csproj -c Release -o ./out
           dotnet pack src/Talaria.StateStores.Redis/Talaria.StateStores.Redis.csproj -c Release -o ./out
           dotnet pack src/Talaria.Transports.InMemory/Talaria.Transports.InMemory.csproj -c Release -o ./out
+          dotnet pack src/Talaria.Transports.AzureServiceBus/Talaria.Transports.AzureServiceBus.csproj -c Release -o ./out
 
       - name: Publish to GitHub Packages
         run: dotnet nuget push "./out/*.nupkg" --api-key ${{ secrets.GITHUB_TOKEN }} --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" --skip-duplicate

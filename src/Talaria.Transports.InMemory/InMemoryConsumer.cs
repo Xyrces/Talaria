@@ -2,6 +2,7 @@
 
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Channels;
 using Talaria.Core.Abstractions;
 
@@ -31,6 +32,9 @@ internal sealed class InMemoryConsumer<T> : IConsumer<T>
     // Unsettled envelopes by offset, mirroring Kafka's uncommitted offsets.
     private readonly System.Collections.Concurrent.ConcurrentDictionary<long, InMemoryMessage> _pending = new();
 
+    private int _consuming;
+    private int _enumerating;
+
     public InMemoryConsumer(
         string topic,
         Channel<InMemoryMessage> groupChannel,
@@ -47,9 +51,16 @@ internal sealed class InMemoryConsumer<T> : IConsumer<T>
         _includeDlqExceptionDetails = includeDlqExceptionDetails;
     }
 
-    public async IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsync(
+    public IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsync(CancellationToken ct = default)
+    {
+        SingleEnumerationGuard.ThrowIfAlreadyStarted(ref _consuming);
+        return ConsumeAsyncCore(ct);
+    }
+
+    private async IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsyncCore(
         [EnumeratorCancellation] CancellationToken ct = default)
     {
+        SingleEnumerationGuard.ThrowIfAlreadyStarted(ref _enumerating);
         await foreach (var raw in _groupChannel.Reader.ReadAllAsync(ct))
         {
             if (_options.SimulatedLatency > TimeSpan.Zero)

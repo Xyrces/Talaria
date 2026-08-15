@@ -121,6 +121,71 @@ public class TalariaHostedServiceTests
         await host.StopAsync();
         host.Dispose();
     }
+
+    [Fact]
+    public async Task MapTopic_AfterStart_ThrowsInvalidOperationException()
+    {
+        var transport = new InMemoryTransport();
+
+        var builder = Host.CreateDefaultBuilder();
+        builder.ConfigureServices(services =>
+        {
+            services.AddTalaria(opts => opts.ApplicationName = "test-app")
+                    .UseInMemoryTransport(transport);
+        });
+
+        var host = builder.Build();
+
+        await host.StartAsync();
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            host.Services.MapTopic<TestMessage>("test.topic", (msg, ct) => Task.CompletedTask));
+
+        Assert.Contains("MapTopic", ex.Message);
+        Assert.Contains("before the host runs", ex.Message);
+
+        await host.StopAsync();
+        host.Dispose();
+    }
+
+    [Fact]
+    public async Task MapSaga_AfterStart_ThrowsInvalidOperationException()
+    {
+        var transport = new InMemoryTransport();
+
+        var builder = Host.CreateDefaultBuilder();
+        builder.ConfigureServices(services =>
+        {
+            services.AddTalaria(opts => opts.ApplicationName = "test-app")
+                    .UseInMemoryTransport(transport);
+        });
+
+        var host = builder.Build();
+
+        await host.StartAsync();
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            host.Services.MapSaga<AfterStartSagaState>(s =>
+                s.StartedBy<AfterStartSagaMessage>("after-start.saga",
+                    (msg, ctx) => Task.FromResult(ctx.Transition(new AfterStartSagaState { Id = msg.Id })),
+                    m => m.Id)));
+
+        Assert.Contains("MapSaga", ex.Message);
+        Assert.Contains("before the host runs", ex.Message);
+
+        await host.StopAsync();
+        host.Dispose();
+    }
 }
 
 public record TestMessage(string Id);
+
+public class AfterStartSagaState
+{
+    public string Id { get; set; } = "";
+}
+
+public class AfterStartSagaMessage
+{
+    public string Id { get; set; } = "";
+}

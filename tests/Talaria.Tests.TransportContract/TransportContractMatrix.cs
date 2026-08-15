@@ -224,8 +224,12 @@ public class TransportContractMatrix
 
         var topicDlq = await row.ReadAllFromTopicAsync<Msg>(harness, $"{topic}.dlq", TimeSpan.FromSeconds(5));
         Assert.Single(topicDlq);
-        var appDlq = await row.ReadAllFromTopicAsync<Msg>(harness, "__app.dlq", TimeSpan.FromSeconds(5));
-        Assert.Single(appDlq);
+
+        if (row.SupportsApplicationDeadLetterQueue)
+        {
+            var appDlq = await row.ReadAllFromTopicAsync<Msg>(harness, "__app.dlq", TimeSpan.FromSeconds(5));
+            Assert.Single(appDlq);
+        }
     }
 
     private async Task RunUncommittedMessageIsRedeliveredAfterConsumerRestartAsync(TransportContractRow row)

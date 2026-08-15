@@ -31,12 +31,57 @@ public sealed class TopicRegistration
 public sealed class TopicRegistry
 {
     private readonly List<TopicRegistration> _registrations = new();
+    private readonly object _lock = new();
+    private bool _sealed;
+
+    /// <summary>True if the registry has been sealed and no further registrations can be added.</summary>
+    public bool IsSealed
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _sealed;
+            }
+        }
+    }
 
     /// <summary>The registrations added so far, in insertion order.</summary>
-    public IReadOnlyList<TopicRegistration> Registrations => _registrations;
+    public IReadOnlyList<TopicRegistration> Registrations
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _registrations.ToList();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Seals the registry so no further topic registrations can be added.
+    /// Idempotent: subsequent calls have no effect.
+    /// </summary>
+    internal void Seal()
+    {
+        lock (_lock)
+        {
+            _sealed = true;
+        }
+    }
 
     internal void Add(TopicRegistration registration)
     {
-        _registrations.Add(registration);
+        lock (_lock)
+        {
+            if (_sealed)
+            {
+                throw new InvalidOperationException(
+                    "Topic registrations are captured when the host starts. " +
+                    "Call MapTopic before the host runs (e.g. during startup, before app.Run()).");
+            }
+
+            _registrations.Add(registration);
+        }
     }
 }
