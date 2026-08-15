@@ -17,8 +17,18 @@ public sealed class TopicRegistration
     /// <summary>The CLR message type each envelope will be deserialized into.</summary>
     public required Type MessageType { get; init; }
 
-    /// <summary>The erased async handler invoked for each delivered message.</summary>
-    public required Func<object, MessageHeaders, EnvelopeMetadata, CancellationToken, Task> Handler { get; init; }
+    /// <summary>
+    /// The erased async handler invoked for each delivered message. Null when
+    /// <see cref="ConsumerType"/> is set and the engine resolves an <see cref="ITopicConsumer{T}"/> from DI.
+    /// </summary>
+    public Func<object, MessageHeaders, EnvelopeMetadata, CancellationToken, Task>? Handler { get; init; }
+
+    /// <summary>
+    /// The concrete consumer type implementing <see cref="ITopicConsumer{T}"/> for this topic.
+    /// When set, the engine creates a per-message DI scope and resolves the consumer by this type.
+    /// Null when a delegate <see cref="Handler"/> is registered.
+    /// </summary>
+    public Type? ConsumerType { get; init; }
 
     /// <summary>Optional explicit consumer group. Null falls back to <see cref="TalariaOptions.ConsumerGroupOverride"/> then auto-generated.</summary>
     public string? ConsumerGroup { get; init; }

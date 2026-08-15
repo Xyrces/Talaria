@@ -148,6 +148,43 @@ app.Services.MapTopic<SendVerificationEmailCommand>("email-commands", async (msg
 });
 ```
 
+### Class-based Consumers
+
+For handlers that benefit from dependency injection, implement `ITopicConsumer<T>` and register the concrete type with the DI container. Talaria resolves the consumer from a **per-message DI scope** and supplies the full envelope, headers, and scoped service provider via `ConsumeContext<T>`.
+
+```csharp
+// Implement the consumer
+public class OrderCreatedConsumer : ITopicConsumer<OrderCreatedEvent>
+{
+    private readonly IOrderRepository _orders;
+    private readonly ILogger<OrderCreatedConsumer> _logger;
+
+    public OrderCreatedConsumer(IOrderRepository orders, ILogger<OrderCreatedConsumer> logger)
+    {
+        _orders = orders;
+        _logger = logger;
+    }
+
+    public async Task ConsumeAsync(ConsumeContext<OrderCreatedEvent> context)
+    {
+        _logger.LogInformation("Received order {OrderId}", context.Message.OrderId);
+        await _orders.UpsertAsync(context.Message, context.CancellationToken);
+    }
+}
+
+// Register and map
+builder.Services.AddScoped<OrderCreatedConsumer>();
+app.Services.MapTopic<OrderCreatedEvent, OrderCreatedConsumer>("order-events");
+```
+
+Notes:
+
+- The consumer is resolved by its **concrete type**, so register it explicitly (e.g. `AddScoped<OrderCreatedConsumer>()`).
+- A new DI scope is created for each message after the hop-guard and idempotency gate, and disposed before retry/DLQ decisions.
+- `context.Services` is the scoped service provider and can resolve any service registered in that scope.
+- Delegate consumers remain the lightweight option when no per-message scope or DI is needed.
+- Singleton-registered consumers share state across messages; prefer scoped registration.
+
 ### Delayed retries
 
 Opt-in per topic (or globally via `TalariaOptions.DefaultRetryPolicy`). Retry copies are scheduled in the configured `IDeferralStore` and republished by the sweeper; attempts are exhausted to the DLQ with reason `retries_exhausted`. If retries are enabled but no `IDeferralStore` is registered, messages dead-letter with reason `retry_unavailable`.

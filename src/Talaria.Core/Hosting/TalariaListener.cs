@@ -125,6 +125,13 @@ public sealed class TalariaListener : IAsyncDisposable
                     "A service provider is required to resolve IStateStore<TState> instances and create handler scopes.");
             }
 
+            if (_topicRegistry.Registrations.Any(r => r.ConsumerType is not null) && _serviceProvider is null)
+            {
+                throw new InvalidOperationException(
+                    "One or more topic registrations use class-based consumers but no IServiceProvider was supplied to TalariaListener. " +
+                    "A service provider is required to resolve ITopicConsumer<T> instances and create per-message scopes.");
+            }
+
             _runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             _runTask = RunAsync(_runCts.Token);
 
@@ -236,7 +243,8 @@ public sealed class TalariaListener : IAsyncDisposable
                     _options,
                     _stores.DeferralStore,
                     pipeline,
-                    _logger);
+                    _logger,
+                    _serviceProvider);
                 loopTasks.Add(topicEngine.RunAsync(ct));
             }
 

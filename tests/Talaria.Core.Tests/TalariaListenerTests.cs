@@ -327,6 +327,31 @@ public class TalariaListenerTests
         Assert.Contains("IServiceProvider", ex.Message);
     }
 
+    private class ClassConsumerMessage { public string Id { get; set; } = ""; }
+    private class DummyClassConsumer : ITopicConsumer<ClassConsumerMessage>
+    {
+        public Task ConsumeAsync(ConsumeContext<ClassConsumerMessage> context) => Task.CompletedTask;
+    }
+
+    [Fact]
+    public async Task ClassConsumer_Registered_Without_ServiceProvider_Throws_InvalidOperationException()
+    {
+        var transport = new InMemoryTransport();
+
+        var topicReg = new TopicRegistry();
+        topicReg.MapTopic<ClassConsumerMessage, DummyClassConsumer>("class-consumer.topic");
+
+        var listener = new TalariaListener(
+            transport,
+            topicReg,
+            new SagaRegistry(),
+            new TalariaOptions { ApplicationName = "test-app" },
+            NullLogger<TalariaListener>.Instance);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => listener.StartAsync());
+        Assert.Contains("IServiceProvider", ex.Message);
+    }
+
     [Fact]
     public async Task StartAsync_Throws_When_RunAsync_FaultsSynchronously()
     {

@@ -103,6 +103,66 @@ public static class TalariaEndpointExtensions
     }
 
     /// <summary>
+    /// Maps a class-based consumer to a message topic. The consumer is resolved from
+    /// a per-message DI scope by its concrete type <typeparamref name="TConsumer"/>.
+    /// </summary>
+    /// <typeparam name="TMessage">The CLR message type to deserialize from each envelope.</typeparam>
+    /// <typeparam name="TConsumer">The concrete consumer type implementing <see cref="ITopicConsumer{TMessage}"/>.</typeparam>
+    /// <param name="services">The application's service provider.</param>
+    /// <param name="topic">The topic name to subscribe to.</param>
+    /// <param name="retryPolicy">Optional retry policy for this topic. Null falls back to <see cref="TalariaOptions.DefaultRetryPolicy"/>.</param>
+    /// <returns>The same <paramref name="services"/>, for chaining.</returns>
+    /// <exception cref="InvalidOperationException">The <typeparamref name="TConsumer"/> is not registered in the service provider and <see cref="IServiceProviderIsService"/> is available.</exception>
+    public static IServiceProvider MapTopic<TMessage, TConsumer>(
+        this IServiceProvider services,
+        string topic,
+        RetryPolicy? retryPolicy = null)
+        where TConsumer : ITopicConsumer<TMessage>
+    {
+        ThrowIfConsumerNotRegistered<TMessage, TConsumer>(services);
+        var registry = services.GetRequiredService<TopicRegistry>();
+        registry.MapTopic<TMessage, TConsumer>(topic, retryPolicy);
+        return services;
+    }
+
+    /// <summary>
+    /// Maps a class-based consumer to a message topic with an explicit consumer group.
+    /// The consumer is resolved from a per-message DI scope by its concrete type <typeparamref name="TConsumer"/>.
+    /// </summary>
+    /// <typeparam name="TMessage">The CLR message type to deserialize from each envelope.</typeparam>
+    /// <typeparam name="TConsumer">The concrete consumer type implementing <see cref="ITopicConsumer{TMessage}"/>.</typeparam>
+    /// <param name="services">The application's service provider.</param>
+    /// <param name="topic">The topic name to subscribe to.</param>
+    /// <param name="consumerGroup">The consumer group identifier. Overrides <see cref="TalariaOptions.ConsumerGroupOverride"/>.</param>
+    /// <param name="retryPolicy">Optional retry policy for this topic. Null falls back to <see cref="TalariaOptions.DefaultRetryPolicy"/>.</param>
+    /// <returns>The same <paramref name="services"/>, for chaining.</returns>
+    /// <exception cref="InvalidOperationException">The <typeparamref name="TConsumer"/> is not registered in the service provider and <see cref="IServiceProviderIsService"/> is available.</exception>
+    public static IServiceProvider MapTopic<TMessage, TConsumer>(
+        this IServiceProvider services,
+        string topic,
+        string consumerGroup,
+        RetryPolicy? retryPolicy = null)
+        where TConsumer : ITopicConsumer<TMessage>
+    {
+        ThrowIfConsumerNotRegistered<TMessage, TConsumer>(services);
+        var registry = services.GetRequiredService<TopicRegistry>();
+        registry.MapTopic<TMessage, TConsumer>(topic, consumerGroup, retryPolicy);
+        return services;
+    }
+
+    private static void ThrowIfConsumerNotRegistered<TMessage, TConsumer>(IServiceProvider services)
+        where TConsumer : ITopicConsumer<TMessage>
+    {
+        var isService = services.GetService<IServiceProviderIsService>();
+        if (isService is not null && !isService.IsService(typeof(TConsumer)))
+        {
+            throw new InvalidOperationException(
+                $"Consumer '{typeof(TConsumer).FullName}' is not registered in the service provider. " +
+                "Register it before calling MapTopic, e.g. services.AddScoped<TConsumer>().");
+        }
+    }
+
+    /// <summary>
     /// Configures a saga workflow.
     /// </summary>
     /// <typeparam name="TState">The CLR saga state type. Must be a reference type with a public parameterless constructor.</typeparam>

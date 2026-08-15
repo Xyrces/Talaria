@@ -28,7 +28,7 @@ public static class TopicRegistryExtensions
         Func<T, CancellationToken, Task> handler,
         RetryPolicy? retryPolicy = null)
     {
-        return AddTopicRegistration(registry, topic, typeof(T), retryPolicy, null,
+        return AddTopicRegistration(registry, topic, typeof(T), retryPolicy, null, null,
             async (payload, _, _, ct) => await handler((T)payload, ct));
     }
 
@@ -49,7 +49,7 @@ public static class TopicRegistryExtensions
         Func<T, CancellationToken, Task> handler,
         RetryPolicy? retryPolicy = null)
     {
-        return AddTopicRegistration(registry, topic, typeof(T), retryPolicy, consumerGroup,
+        return AddTopicRegistration(registry, topic, typeof(T), retryPolicy, consumerGroup, null,
             async (payload, _, _, ct) => await handler((T)payload, ct));
     }
 
@@ -68,7 +68,7 @@ public static class TopicRegistryExtensions
         Func<MessageEnvelope<T>, CancellationToken, Task> handler,
         RetryPolicy? retryPolicy = null)
     {
-        return AddTopicRegistration(registry, topic, typeof(T), retryPolicy, null,
+        return AddTopicRegistration(registry, topic, typeof(T), retryPolicy, null, null,
             async (payload, headers, metadata, ct) =>
             {
                 var envelope = new MessageEnvelope<T>
@@ -108,13 +108,54 @@ public static class TopicRegistryExtensions
         }, retryPolicy);
     }
 
+    /// <summary>
+    /// Maps a class-based consumer to a message topic. The consumer is resolved from
+    /// a per-message DI scope by its concrete type <typeparamref name="TConsumer"/>.
+    /// </summary>
+    /// <typeparam name="TMessage">The CLR message type to deserialize from each envelope.</typeparam>
+    /// <typeparam name="TConsumer">The concrete consumer type implementing <see cref="ITopicConsumer{TMessage}"/>.</typeparam>
+    /// <param name="registry">The topic registry to mutate.</param>
+    /// <param name="topic">The topic name to subscribe to.</param>
+    /// <param name="retryPolicy">Optional retry policy for this topic. Null falls back to <see cref="TalariaOptions.DefaultRetryPolicy"/>.</param>
+    /// <returns>The same <paramref name="registry"/>, for chaining.</returns>
+    public static TopicRegistry MapTopic<TMessage, TConsumer>(
+        this TopicRegistry registry,
+        string topic,
+        RetryPolicy? retryPolicy = null)
+        where TConsumer : ITopicConsumer<TMessage>
+    {
+        return AddTopicRegistration(registry, topic, typeof(TMessage), retryPolicy, null, typeof(TConsumer), null);
+    }
+
+    /// <summary>
+    /// Maps a class-based consumer to a message topic with an explicit consumer group.
+    /// The consumer is resolved from a per-message DI scope by its concrete type <typeparamref name="TConsumer"/>.
+    /// </summary>
+    /// <typeparam name="TMessage">The CLR message type to deserialize from each envelope.</typeparam>
+    /// <typeparam name="TConsumer">The concrete consumer type implementing <see cref="ITopicConsumer{TMessage}"/>.</typeparam>
+    /// <param name="registry">The topic registry to mutate.</param>
+    /// <param name="topic">The topic name to subscribe to.</param>
+    /// <param name="consumerGroup">The consumer group identifier. Overrides <see cref="TalariaOptions.ConsumerGroupOverride"/>.</param>
+    /// <param name="retryPolicy">Optional retry policy for this topic. Null falls back to <see cref="TalariaOptions.DefaultRetryPolicy"/>.</param>
+    /// <returns>The same <paramref name="registry"/>, for chaining.</returns>
+    public static TopicRegistry MapTopic<TMessage, TConsumer>(
+        this TopicRegistry registry,
+        string topic,
+        string consumerGroup,
+        RetryPolicy? retryPolicy = null)
+        where TConsumer : ITopicConsumer<TMessage>
+    {
+        return AddTopicRegistration(registry, topic, typeof(TMessage), retryPolicy, consumerGroup, typeof(TConsumer), null);
+    }
+
     internal static TopicRegistry AddTopicRegistration(
         TopicRegistry registry,
         string topic,
         Type messageType,
         RetryPolicy? retryPolicy,
         string? consumerGroup,
-        Func<object, MessageHeaders, EnvelopeMetadata, CancellationToken, Task> handler)
+        Type? consumerType,
+        Func<object, MessageHeaders, EnvelopeMetadata, CancellationToken, Task>? handler)
     {
         if (retryPolicy is not null)
         {
@@ -125,12 +166,25 @@ public static class TopicRegistryExtensions
             }
         }
 
+        if (consumerType is null && handler is null)
+        {
+            throw new ArgumentException(
+                "A topic registration must specify either a delegate handler or a class consumer type.");
+        }
+
+        if (consumerType is not null && handler is not null)
+        {
+            throw new ArgumentException(
+                "A topic registration cannot specify both a delegate handler and a class consumer type.");
+        }
+
         registry.Add(new TopicRegistration
         {
             TopicName = topic,
             MessageType = messageType,
             ConsumerGroup = consumerGroup,
             RetryPolicy = retryPolicy,
+            ConsumerType = consumerType,
             Handler = handler,
         });
         return registry;

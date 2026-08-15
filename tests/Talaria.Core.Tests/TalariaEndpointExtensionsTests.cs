@@ -31,7 +31,7 @@ public class TalariaEndpointExtensionsTests
         Assert.Equal("test", reg.TopicName);
         Assert.Equal(typeof(string), reg.MessageType);
         
-        await reg.Handler("payload", new MessageHeaders(), EnvelopeMetadata.Empty, CancellationToken.None);
+        await reg.Handler!("payload", new MessageHeaders(), EnvelopeMetadata.Empty, CancellationToken.None);
         Assert.True(called);
     }
 
@@ -53,7 +53,7 @@ public class TalariaEndpointExtensionsTests
         var headers = new MessageHeaders();
         headers["some-key"] = "test";
         var metadata = new EnvelopeMetadata("part-key", 7, 42L, DateTimeOffset.UtcNow, "corr-1");
-        await reg.Handler("hello", headers, metadata, CancellationToken.None);
+        await reg.Handler!("hello", headers, metadata, CancellationToken.None);
 
         Assert.NotNull(received);
         Assert.Equal("hello", received!.Payload);
@@ -79,7 +79,7 @@ public class TalariaEndpointExtensionsTests
         var registry = provider.GetRequiredService<TopicRegistry>();
         var reg = registry.Registrations.First();
 
-        await reg.Handler("payload", new MessageHeaders(), EnvelopeMetadata.Empty, CancellationToken.None);
+        await reg.Handler!("payload", new MessageHeaders(), EnvelopeMetadata.Empty, CancellationToken.None);
         Assert.True(called);
     }
 
