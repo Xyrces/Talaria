@@ -5,13 +5,12 @@ to set up a development environment, run the build and tests, follow the
 project's coding conventions, and submit a pull request.
 
 Talaria is an open-source library distributed under the
-**GNU Affero General Public License, version 3 or later (AGPL-3.0-or-later)**
-(see [`LICENSE`](LICENSE)). By contributing, you agree that your contributions
-will be released under the same license. The rationale behind this choice and
-the commercial-licensing posture are documented in
-[`docs/LICENSE-RATIONALE.md`](docs/LICENSE-RATIONALE.md); the commercial
-offering itself is delivered under a separate repository and separate terms
-and is intentionally out of scope for this repo.
+**Apache License, Version 2.0 (Apache-2.0)** (see [`LICENSE`](LICENSE)). By
+contributing, you agree that your contributions will be released under the
+same license. The rationale behind this choice and the commercial-licensing
+posture are documented in [`docs/LICENSE-RATIONALE.md`](docs/LICENSE-RATIONALE.md);
+the commercial offering itself is delivered under a separate repository and
+separate terms and is intentionally out of scope for this repo.
 
 ---
 
@@ -149,7 +148,7 @@ focused unit tests alongside the production code under `tests/Talaria.*Tests/`.
   ships the XML doc file in its NuGet package. CS1591 is suppressed, but
   adding the comments is still expected for any user-visible API.
 - **SPDX headers**: every hand-written `.cs` file under `src/` must start
-  with `// SPDX-License-Identifier: AGPL-3.0-or-later`. Generated files in
+  with `// SPDX-License-Identifier: Apache-2.0`. Generated files in
   `obj/` and `bin/` are excluded.
 - **Allocation discipline**: the saga pipeline is hot-path. Avoid `new` in
   message dispatch, the relay loop, and the deferred-sweeper tick. Reuse

@@ -40,14 +40,14 @@ Tick the commands you ran locally before pushing. CI runs all of these.
 
 ## Compliance checks
 
-- [ ] New/modified `.cs` files under `src/` start with `// SPDX-License-Identifier: AGPL-3.0-or-later`
+- [ ] New/modified `.cs` files under `src/` start with `// SPDX-License-Identifier: Apache-2.0`
 - [ ] New public/protected members carry XML doc comments (`summary`, parameter notes, `since` where appropriate)
-- [ ] No new dependencies introduced; or, if introduced, they are AGPL-compatible and discussed here
+- [ ] No new dependencies introduced; or, if introduced, they are Apache-2.0-compatible and discussed here
 
 ## Notes for reviewers
 
 <!-- Anything reviewers should pay extra attention to: race conditions,
-     lock ordering, idempotency contract, public-API contract, AGPL impact. -->
+     lock ordering, idempotency contract, public-API contract, licensing impact. -->
 
 ## Risk and rollback
 

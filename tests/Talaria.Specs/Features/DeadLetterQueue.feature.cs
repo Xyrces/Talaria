@@ -24,8 +24,8 @@ namespace Talaria.Specs.Features
         
         private static string[] featureTags = ((string[])(null));
         
-        private static global::Reqnroll.FeatureInfo featureInfo = new global::Reqnroll.FeatureInfo(new global::System.Globalization.CultureInfo("en-US"), "Features", "Dead Letter Queue", "  As a system operator\n  I want failed messages to be routed to dead-letter queue" +
-                "s\n  So that I can investigate and replay them", global::Reqnroll.ProgrammingLanguage.CSharp, featureTags, InitializeCucumberMessages());
+        private static global::Reqnroll.FeatureInfo featureInfo = new global::Reqnroll.FeatureInfo(new global::System.Globalization.CultureInfo("en-US"), "Features", "Dead Letter Queue", "  As a system operator\r\n  I want failed messages to be routed to dead-letter queu" +
+                "es\r\n  So that I can investigate and replay them", global::Reqnroll.ProgrammingLanguage.CSharp, featureTags, InitializeCucumberMessages());
         
         private global::Xunit.Abstractions.ITestOutputHelper _testOutputHelper;
         

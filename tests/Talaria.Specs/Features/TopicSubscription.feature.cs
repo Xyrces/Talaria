@@ -24,8 +24,8 @@ namespace Talaria.Specs.Features
         
         private static string[] featureTags = ((string[])(null));
         
-        private static global::Reqnroll.FeatureInfo featureInfo = new global::Reqnroll.FeatureInfo(new global::System.Globalization.CultureInfo("en-US"), "Features", "Topic Subscription", "  As a developer\n  I want to subscribe to a message topic using MapTopic\n  So tha" +
-                "t I can process messages as they arrive", global::Reqnroll.ProgrammingLanguage.CSharp, featureTags, InitializeCucumberMessages());
+        private static global::Reqnroll.FeatureInfo featureInfo = new global::Reqnroll.FeatureInfo(new global::System.Globalization.CultureInfo("en-US"), "Features", "Topic Subscription", "  As a developer\r\n  I want to subscribe to a message topic using MapTopic\r\n  So t" +
+                "hat I can process messages as they arrive", global::Reqnroll.ProgrammingLanguage.CSharp, featureTags, InitializeCucumberMessages());
         
         private global::Xunit.Abstractions.ITestOutputHelper _testOutputHelper;
         
