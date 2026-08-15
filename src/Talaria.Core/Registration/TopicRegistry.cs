@@ -10,7 +10,7 @@ namespace Talaria.Core.Registration;
 /// </summary>
 /// <remarks>
 /// Either <see cref="Handler"/> or <see cref="ConsumerType"/> must be set, but not both.
-/// <see cref="TopicRegistry.Add(TopicRegistration)"/> enforces this invariant.
+/// <see cref="TopicRegistryExtensions.AddTopicRegistration"/> enforces this invariant.
 /// </remarks>
 /// <since>1.0.0</since>
 public sealed class TopicRegistration

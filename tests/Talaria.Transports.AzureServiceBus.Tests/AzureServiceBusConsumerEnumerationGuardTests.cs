@@ -8,7 +8,7 @@ namespace Talaria.Transports.AzureServiceBus.Tests;
 /// <summary>
 /// Verifies the single-enumeration contract of <see cref="IConsumer{T}.ConsumeAsync"/>
 /// against the Azure Service Bus emulator. The guard must trip on a second enumeration
-/// while still allowing the legitimate single-enumeration path used by the hosted services.
+/// while still allowing the legitimate single-enumeration path used by the hosted service.
 /// </summary>
 public class AzureServiceBusConsumerEnumerationGuardTests : IAsyncLifetime
 {

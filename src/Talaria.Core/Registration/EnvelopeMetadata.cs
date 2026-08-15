@@ -20,8 +20,9 @@ public sealed record EnvelopeMetadata(
     string? CorrelationId)
 {
     /// <summary>
-    /// An empty metadata instance for use by plain <c>MapTopic</c> handlers that do not
-    /// inspect envelope metadata.
+    /// An empty metadata instance for tests and infrastructure code that need a placeholder.
+    /// The consumer engines always construct real <see cref="EnvelopeMetadata"/> values
+    /// for actual deliveries; plain <c>MapTopic</c> handlers simply receive defaults.
     /// </summary>
     public static EnvelopeMetadata Empty { get; } = new(null, null, 0, default, null);
 }
