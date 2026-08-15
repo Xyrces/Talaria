@@ -46,7 +46,7 @@ public sealed class SagaHostedService : BackgroundService
     private IReadOnlyDictionary<Type, string> _dispatchRoutes = new Dictionary<Type, string>();
 
     private sealed record ProducerInvoker(
-        Func<object, MessageHeaders?, CancellationToken, Task> Produce,
+        Func<object, MessageHeaders?, string?, CancellationToken, Task> Produce,
         IAsyncDisposable Producer);
 
     private sealed record StepRoute(
@@ -640,7 +640,8 @@ public sealed class SagaHostedService : BackgroundService
             headers,
             correlationId,
             attempt,
-            DateTimeOffset.UtcNow + TimeSpan.FromMilliseconds(_options.DeferralBackoff.TotalMilliseconds * attempt));
+            DateTimeOffset.UtcNow + TimeSpan.FromMilliseconds(_options.DeferralBackoff.TotalMilliseconds * attempt),
+            env.PartitionKey);
 
         await _deferralStore.EnqueueAsync(deferred, ct);
     }
@@ -715,7 +716,7 @@ public sealed class SagaHostedService : BackgroundService
                 ?? throw new JsonException($"Deferred payload deserialized to null for {type.Name}.");
 
             var invoker = await GetOrCreateProducerAsync(transport, message.Topic, type, ct);
-            await invoker.Produce(payload, new MessageHeaders(message.Headers), ct);
+            await invoker.Produce(payload, new MessageHeaders(message.Headers), message.PartitionKey, ct);
 
             await _deferralStore!.CompleteAsync(leased.Lease, ct);
 
@@ -818,7 +819,7 @@ public sealed class SagaHostedService : BackgroundService
                 ?? throw new JsonException($"Outbox payload deserialized to null for {type.Name}.");
 
             var invoker = await GetOrCreateProducerAsync(transport, message.Topic, type, ct);
-            await invoker.Produce(payload, new MessageHeaders(message.Headers), ct);
+            await invoker.Produce(payload, new MessageHeaders(message.Headers), null, ct);
 
             await _outboxStore!.CompleteAsync(leased.Lease, ct);
 
@@ -875,7 +876,7 @@ public sealed class SagaHostedService : BackgroundService
     {
         var producer = await transport.CreateProducerAsync<T>(topic, new ProducerOptions(), ct);
         return new ProducerInvoker(
-            async (msg, headers, token) => await producer.ProduceAsync((T)msg, headers, null, token),
+            async (msg, headers, partitionKey, token) => await producer.ProduceAsync((T)msg, headers, partitionKey, token),
             producer);
     }
 

@@ -233,13 +233,10 @@ internal sealed class AzureServiceBusBufferedProducer<T> : IProducer<T>
             ContentType = "application/json",
         };
 
-        if (!string.IsNullOrEmpty(partitionKey))
+        var sessionId = ServiceBusMessageSessionIdHelper.ResolveSessionId(partitionKey, finalHeaders);
+        if (!string.IsNullOrEmpty(sessionId))
         {
-            sbMessage.SessionId = partitionKey;
-        }
-        else if (finalHeaders.TryGetValue(MessageHeaders.CorrelationIdKey, out var cid) && !string.IsNullOrEmpty(cid))
-        {
-            sbMessage.SessionId = cid;
+            sbMessage.SessionId = sessionId;
         }
 
         if (finalHeaders.TryGetValue(MessageHeaders.CorrelationIdKey, out var corrId) && !string.IsNullOrEmpty(corrId))

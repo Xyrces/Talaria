@@ -30,10 +30,11 @@ internal sealed class ServiceBusMessageScheduler : IServiceBusMessageScheduler, 
         BinaryData body,
         IReadOnlyDictionary<string, object> applicationProperties,
         DateTimeOffset scheduledEnqueueTime,
+        string? partitionKey,
         CancellationToken ct = default)
     {
         var sender = GetOrCreateSender(topic);
-        var message = BuildMessage(body, applicationProperties, scheduledEnqueueTime);
+        var message = BuildMessage(body, applicationProperties, scheduledEnqueueTime, partitionKey);
         return await sender.ScheduleMessageAsync(message, scheduledEnqueueTime, ct).ConfigureAwait(false);
     }
 
@@ -60,12 +61,23 @@ internal sealed class ServiceBusMessageScheduler : IServiceBusMessageScheduler, 
     private static ServiceBusMessage BuildMessage(
         BinaryData body,
         IReadOnlyDictionary<string, object> applicationProperties,
-        DateTimeOffset scheduledEnqueueTime)
+        DateTimeOffset scheduledEnqueueTime,
+        string? partitionKey)
     {
         var message = new ServiceBusMessage(body)
         {
             ScheduledEnqueueTime = scheduledEnqueueTime,
         };
+
+        // ASB's closest analogue to a Kafka partition key is SessionId. Setting it pins
+        // the scheduled message to the same session-aware receiver as the original delivery.
+        // This must happen even when applicationProperties is null, because partitionKey
+        // can be set independently of the header bag.
+        var sessionId = ServiceBusMessageSessionIdHelper.ResolveSessionId(partitionKey, applicationProperties);
+        if (!string.IsNullOrEmpty(sessionId))
+        {
+            message.SessionId = sessionId;
+        }
 
         if (applicationProperties is null)
         {

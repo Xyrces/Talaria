@@ -135,10 +135,19 @@ public sealed class DeferralAdapter : IDeferralStore
             properties[kvp.Key] = kvp.Value;
         }
 
+        // Promote the deferred record's CorrelationId into the application properties so
+        // the ASB scheduler's SessionId fallback (partitionKey ?? correlationId) works even
+        // when the source transport did not stamp the correlation id into headers.
+        if (!string.IsNullOrEmpty(message.CorrelationId)
+            && !properties.ContainsKey(MessageHeaders.CorrelationIdKey))
+        {
+            properties[MessageHeaders.CorrelationIdKey] = message.CorrelationId;
+        }
+
         var body = BinaryData.FromString(message.PayloadJson ?? string.Empty);
 
         await _scheduler
-            .ScheduleAsync(message.Topic, body, properties, message.DueAt, ct)
+            .ScheduleAsync(message.Topic, body, properties, message.DueAt, message.PartitionKey, ct)
             .ConfigureAwait(false);
     }
 }

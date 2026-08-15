@@ -13,6 +13,7 @@ namespace Talaria.Core.Abstractions;
 /// <param name="CorrelationId">The saga correlation id, if one was resolved.</param>
 /// <param name="Attempt">The deferral attempt number (1-based).</param>
 /// <param name="DueAt">When the message becomes eligible for republishing.</param>
+/// <param name="PartitionKey">Optional partition key used to preserve routing affinity when the message is republished.</param>
 /// <since>1.0.0</since>
 public sealed record DeferredMessage(
     Guid Id,
@@ -22,7 +23,8 @@ public sealed record DeferredMessage(
     MessageHeaders Headers,
     string? CorrelationId,
     int Attempt,
-    DateTimeOffset DueAt);
+    DateTimeOffset DueAt,
+    string? PartitionKey);
 
 /// <summary>
 /// A lease on a deferred message. Carries a fencing token so that only the current

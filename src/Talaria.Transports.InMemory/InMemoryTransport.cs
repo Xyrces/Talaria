@@ -22,8 +22,10 @@ namespace Talaria.Transports.InMemory;
 /// <para>
 /// Remaining divergences from Kafka: the retained backlog is capped at ChannelCapacity
 /// (oldest dropped, and requeue-on-dispose drops overflow on a full channel), there is
-/// no partition key ordering, and offsets do not join transactional sessions (produces
-/// are buffered until commit; the offset commit itself is per-consumer).
+/// no partition key ordering, offsets do not join transactional sessions (produces
+/// are buffered until commit; the offset commit itself is per-consumer), and the
+/// partition key is carried on messages/envelopes but is not used for routing or
+/// ordering.
 /// </para>
 /// </summary>
 public sealed class InMemoryTransport : ITransport
@@ -125,6 +127,7 @@ public sealed class InMemoryTransport : ITransport
                 Payload = payload,
                 Headers = raw.Headers,
                 SourceTopic = topic,
+                PartitionKey = raw.PartitionKey,
                 Offset = raw.Offset,
                 Timestamp = raw.Timestamp,
             });

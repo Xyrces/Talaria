@@ -90,6 +90,66 @@ public class DeferralStoreContractTests
     }
 
     [Fact]
+    public async Task Out_Of_Order_Step_Deferred_And_Republished_Preserves_PartitionKey()
+    {
+        var transport = new InMemoryTransport();
+        var deferralStore = new InMemoryDeferralStore();
+        var stepHandlerCalls = 0;
+
+        var registry = new SagaRegistry();
+        var config = new SagaConfigurator<TestState>(registry);
+        config.StartedBy<StarterMessage>("starter-topic",
+            async (msg, ctx) => ctx.Transition(new TestState { Id = msg.Id }),
+            correlateBy: m => m.Id);
+        config.On<StepMessage>("step-topic",
+            async (state, msg, ctx) =>
+            {
+                Interlocked.Increment(ref stepHandlerCalls);
+                return ctx.Transition(state);
+            },
+            correlateBy: m => m.Id);
+        config.Complete();
+
+        var services = new ServiceCollection()
+            .AddSingleton<ITransport>(transport)
+            .AddSingleton(typeof(IStateStore<>), typeof(InMemoryStateStore<>))
+            .AddSingleton<IDeferralStore>(deferralStore)
+            .BuildServiceProvider();
+
+        var opts = Options.Create(new TalariaOptions { DeferralBackoff = TimeSpan.FromMilliseconds(200) });
+
+        var hostedService = new SagaHostedService(registry, services, opts, NullLogger<SagaHostedService>.Instance);
+
+        using var cts = new CancellationTokenSource();
+        await hostedService.StartAsync(cts.Token);
+
+        // 1. Produce the non-starter step message with a partition key BEFORE any state exists → deferred.
+        var stepProducer = await transport.CreateProducerAsync<StepMessage>("step-topic", new ProducerOptions());
+        await stepProducer.ProduceAsync(
+            new StepMessage { Id = "corr-1" },
+            new MessageHeaders { MessageId = "step-msg-1" },
+            partitionKey: "order-42");
+
+        await WaitUntilAsync(() => deferralStore.Count == 1);
+        Assert.Equal(1, deferralStore.Count);
+        Assert.Equal(0, Volatile.Read(ref stepHandlerCalls));
+
+        // 2. Produce the starter for the same correlation → state now exists.
+        var starterProducer = await transport.CreateProducerAsync<StarterMessage>("starter-topic", new ProducerOptions());
+        await starterProducer.ProduceAsync(new StarterMessage { Id = "corr-1" });
+
+        // 3. The sweeper republishes the deferred copy once due; the step handler fires.
+        await WaitUntilAsync(() => Volatile.Read(ref stepHandlerCalls) == 1);
+        await WaitUntilAsync(() => deferralStore.Count == 0);
+
+        // 4. Both the original delivery and the republished deferred copy carry the partition key.
+        var stepTopicMessages = await ReadUntilAsync<StepMessage>(transport, "step-topic", 2);
+        Assert.All(stepTopicMessages, m => Assert.Equal("order-42", m.PartitionKey));
+
+        await hostedService.StopAsync(cts.Token);
+    }
+
+    [Fact]
     public async Task Acquire_Leases_Without_Removing_And_Complete_Is_Fenced()
     {
         var store = new InMemoryDeferralStore();
@@ -97,10 +157,10 @@ public class DeferralStoreContractTests
 
         var due = new DeferredMessage(
             Guid.NewGuid(), "topic-a", typeof(StepMessage).AssemblyQualifiedName!,
-            "{}", new MessageHeaders(), "corr-1", 1, DateTimeOffset.UtcNow.AddMilliseconds(-1));
+            "{}", new MessageHeaders(), "corr-1", 1, DateTimeOffset.UtcNow.AddMilliseconds(-1), null);
         var notDue = new DeferredMessage(
             Guid.NewGuid(), "topic-a", typeof(StepMessage).AssemblyQualifiedName!,
-            "{}", new MessageHeaders(), "corr-2", 1, DateTimeOffset.UtcNow.AddHours(1));
+            "{}", new MessageHeaders(), "corr-2", 1, DateTimeOffset.UtcNow.AddHours(1), null);
 
         await store.EnqueueAsync(due);
         await store.EnqueueAsync(notDue);

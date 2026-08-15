@@ -28,7 +28,7 @@ internal sealed class InMemoryProducer<T> : IProducer<T>
         string? partitionKey = null,
         CancellationToken ct = default)
     {
-        var msg = CreateMessage(message, headers);
+        var msg = CreateMessage(message, headers, partitionKey);
 
         if (System.Diagnostics.Activity.Current != null)
         {
@@ -44,7 +44,7 @@ internal sealed class InMemoryProducer<T> : IProducer<T>
     /// hop counter, trace context). Shared with the transactional session's buffering producer.
     /// The offset is assigned by the bus at publish time.
     /// </summary>
-    internal static InMemoryMessage CreateMessage(T message, MessageHeaders? headers)
+    internal static InMemoryMessage CreateMessage(T message, MessageHeaders? headers, string? partitionKey = null)
     {
         // Clone incoming headers: never mutate or store the caller's instance.
         var finalHeaders = headers is null ? new MessageHeaders() : new MessageHeaders(headers);
@@ -75,6 +75,7 @@ internal sealed class InMemoryProducer<T> : IProducer<T>
         {
             PayloadJson = JsonSerializer.Serialize(message),
             Headers = finalHeaders,
+            PartitionKey = partitionKey,
             Timestamp = DateTimeOffset.UtcNow,
         };
     }

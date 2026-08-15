@@ -79,17 +79,10 @@ internal sealed class AzureServiceBusProducer<T> : IProducer<T>
         // pins all messages with the same session to the same receiver when
         // sessions are enabled on the entity. Setting it here is harmless when
         // sessions are disabled.
-        if (!string.IsNullOrEmpty(partitionKey))
+        var sessionId = ServiceBusMessageSessionIdHelper.ResolveSessionId(partitionKey, finalHeaders);
+        if (!string.IsNullOrEmpty(sessionId))
         {
-            sbMessage.SessionId = partitionKey;
-        }
-        else
-        {
-            var correlationId = finalHeaders.TryGetValue(MessageHeaders.CorrelationIdKey, out var cid) ? cid : null;
-            if (!string.IsNullOrEmpty(correlationId))
-            {
-                sbMessage.SessionId = correlationId;
-            }
+            sbMessage.SessionId = sessionId;
         }
 
         if (finalHeaders.TryGetValue(MessageHeaders.CorrelationIdKey, out var corrId) && !string.IsNullOrEmpty(corrId))

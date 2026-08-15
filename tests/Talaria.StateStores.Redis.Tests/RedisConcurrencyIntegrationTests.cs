@@ -118,7 +118,8 @@ public class RedisConcurrencyIntegrationTests : IAsyncLifetime
             headers,
             "corr-123",
             2,
-            now.AddSeconds(-5));
+            now.AddSeconds(-5),
+            "order-partition-7");
 
         await store.EnqueueAsync(message);
 
@@ -129,6 +130,7 @@ public class RedisConcurrencyIntegrationTests : IAsyncLifetime
         Assert.Equal("orders-topic", acquired.Message.Topic);
         Assert.Equal("System.String", acquired.Message.MessageType);
         Assert.Equal("\"hello-deferred\"", acquired.Message.PayloadJson);
+        Assert.Equal("order-partition-7", acquired.Message.PartitionKey);
         Assert.Equal("corr-123", acquired.Message.CorrelationId);
         Assert.Equal(2, acquired.Message.Attempt);
         Assert.Equal("defer-1", acquired.Message.Headers.MessageId);
@@ -148,6 +150,7 @@ public class RedisConcurrencyIntegrationTests : IAsyncLifetime
         var reacquired = Assert.Single(dueAgain);
         Assert.Equal(message.Id, reacquired.Message.Id);
         Assert.Equal("defer-1", reacquired.Message.Headers.MessageId);
+        Assert.Equal("order-partition-7", reacquired.Message.PartitionKey);
         Assert.Equal("corr-123", reacquired.Message.CorrelationId);
         Assert.Equal(2, reacquired.Message.Attempt);
         Assert.True(reacquired.Lease.Token > acquired.Lease.Token);
