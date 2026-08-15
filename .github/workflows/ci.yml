@@ -31,15 +31,6 @@ jobs:
             9.0.x
             10.0.x
 
-      - name: Personal-refs guard
-        # Guards against personal/host-local references (names, emails, LAN
-        # IPs, placeholder markers) shipping in the repo. Runs in warn mode:
-        # emits GitHub-Actions ::warning:: annotations but exits 0; flip to
-        # deny to make hits a hard failure.
-        env:
-          PERSONAL_REFS_GUARD: warn
-        run: bash scripts/check-personal-refs.sh
-
       - name: Restore Dependencies
         run: dotnet restore Talaria.slnx
 

@@ -340,27 +340,6 @@ await listener.StopAsync();
 
 ---
 
-## Personal-refs guard
-
-The repository ships a personal-references guard at
-[`scripts/check-personal-refs.sh`](scripts/check-personal-refs.sh). Run it
-locally before pushing to catch accidental personal or host-local references:
-
-```bash
-PERSONAL_REFS_GUARD=deny scripts/check-personal-refs.sh
-```
-
-`PERSONAL_REFS_GUARD` accepts `allow` (suppress), `warn` (default, emit
-GitHub-Actions-style `::warning::` annotations), or `deny` (fail the run).
-The script's `--self-test` flag plants known hits in a temp dir and asserts
-every pattern fires; `tests/Talaria.Ci.Tests` exercises the script end-to-end.
-
-The script is wired into `.github/workflows/ci.yml` (lines 34-45) with
-`PERSONAL_REFS_GUARD=warn` on every push and PR; it can also be run locally
-from any shell that supports `bash`.
-
----
-
 ## License
 
 Talaria is released under the **Apache License, Version 2.0** ([`LICENSE`](LICENSE) at the repo root). You are free to use, modify, and redistribute the source, including in proprietary applications and hosted services, subject to the Apache-2.0 attribution and patent-grant terms.

@@ -17,7 +17,6 @@
     <Project Path="tests/Talaria.StateStores.Redis.Tests/Talaria.StateStores.Redis.Tests.csproj" />
     <Project Path="tests/Talaria.Transports.Kafka.Tests/Talaria.Transports.Kafka.Tests.csproj" />
     <Project Path="tests/Talaria.Transports.AzureServiceBus.Tests/Talaria.Transports.AzureServiceBus.Tests.csproj" />
-    <Project Path="tests/Talaria.Ci.Tests/Talaria.Ci.Tests.csproj" />
     <Project Path="tests/Talaria.Tests.TransportContract/Talaria.Tests.TransportContract.csproj" />
   </Folder>
 </Solution>
