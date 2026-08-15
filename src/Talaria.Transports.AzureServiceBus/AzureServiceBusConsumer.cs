@@ -105,7 +105,13 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
         // Subscribe to the processor on the first (and only) enumeration.
         // The SDK's ServiceBusProcessor is started once and torn down with
         // the consumer's disposal.
-        await EnsureSubscribedAsync().ConfigureAwait(false);
+        //
+        // IMPORTANT: the active channel must be assigned BEFORE the processor
+        // can raise ProcessErrorAsync. A non-transient error raised during
+        // startup (e.g. an AMQP link failure or credential expiry) completes
+        // this channel so the host's supervised loop can restart with backoff.
+        // If EnsureSubscribedAsync ran first, OnProcessorErrorAsync would see
+        // _activeChannel == null and silently drop the fault.
         var previous = Interlocked.Exchange(ref _activeChannel, channel);
         previous?.Writer.TryComplete();
         _activeReaderCts?.Cancel();
@@ -114,7 +120,24 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
 
         try
         {
-            await foreach (var env in channel.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+            await EnsureSubscribedAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // Subscription failed (e.g. StartProcessingAsync threw). The channel
+            // will never be read, so complete it and detach so the fault is not
+            // hidden from the caller and disposal does not leak a half-started
+            // enumeration.
+            Interlocked.CompareExchange(ref _activeChannel, null, channel);
+            channel.Writer.TryComplete();
+            throw;
+        }
+
+        try
+        {
+            // Use the linked CTS so DisposeAsync can cancel a blocked reader
+            // independently of the caller's token.
+            await foreach (var env in channel.Reader.ReadAllAsync(_activeReaderCts.Token).ConfigureAwait(false))
             {
                 yield return env;
             }
@@ -264,7 +287,7 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
     /// <inheritdoc />
     public async Task CommitAsync(MessageEnvelope<T> message, CancellationToken ct = default)
     {
-        if (!_pending.TryRemove(message.Offset, out var entry))
+        if (!_pending.TryGetValue(message.Offset, out var entry))
         {
             // Already committed or never tracked — no-op. Commit-after-commit
             // is allowed by the host pipeline (idempotent retries).
@@ -281,7 +304,13 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
                 ex,
                 "Failed to complete ASB message {SequenceNumber} on entity {Entity}; broker lock will expire and redeliver.",
                 entry.Message.SequenceNumber, _topic);
+            throw;
         }
+
+        // Only drop the pending entry after the broker acknowledged the completion.
+        // If CompleteMessageAsync threw, keeping the entry lets the uncommitted
+        // delivery redeliver and keeps it visible to DisposeAsync cleanup.
+        _pending.TryRemove(message.Offset, out _);
     }
 
     /// <inheritdoc />
