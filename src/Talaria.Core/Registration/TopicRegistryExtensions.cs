@@ -29,7 +29,7 @@ public static class TopicRegistryExtensions
         RetryPolicy? retryPolicy = null)
     {
         return AddTopicRegistration(registry, topic, typeof(T), retryPolicy, null,
-            async (payload, _, ct) => await handler((T)payload, ct));
+            async (payload, _, _, ct) => await handler((T)payload, ct));
     }
 
     /// <summary>
@@ -50,7 +50,7 @@ public static class TopicRegistryExtensions
         RetryPolicy? retryPolicy = null)
     {
         return AddTopicRegistration(registry, topic, typeof(T), retryPolicy, consumerGroup,
-            async (payload, _, ct) => await handler((T)payload, ct));
+            async (payload, _, _, ct) => await handler((T)payload, ct));
     }
 
     /// <summary>
@@ -69,13 +69,18 @@ public static class TopicRegistryExtensions
         RetryPolicy? retryPolicy = null)
     {
         return AddTopicRegistration(registry, topic, typeof(T), retryPolicy, null,
-            async (payload, headers, ct) =>
+            async (payload, headers, metadata, ct) =>
             {
                 var envelope = new MessageEnvelope<T>
                 {
                     Payload = (T)payload,
                     Headers = headers,
                     SourceTopic = topic,
+                    PartitionKey = metadata.PartitionKey,
+                    Partition = metadata.Partition,
+                    Offset = metadata.Offset,
+                    Timestamp = metadata.Timestamp,
+                    CorrelationId = metadata.CorrelationId,
                 };
                 await handler(envelope, ct);
             });
@@ -109,7 +114,7 @@ public static class TopicRegistryExtensions
         Type messageType,
         RetryPolicy? retryPolicy,
         string? consumerGroup,
-        Func<object, MessageHeaders, CancellationToken, Task> handler)
+        Func<object, MessageHeaders, EnvelopeMetadata, CancellationToken, Task> handler)
     {
         if (retryPolicy is not null)
         {

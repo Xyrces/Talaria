@@ -47,14 +47,25 @@ internal sealed class MessageProcessingPipeline
     /// </summary>
     public bool IsHopCountExceeded<T>(MessageEnvelope<T> envelope, string topic)
     {
-        if (envelope.Headers.HopCount < _options.MaxHopCount)
+        var rawHopCount = envelope.Headers.TryGetValue(MessageHeaders.HopCountKey, out var v) ? v : null;
+        var hopCount = envelope.Headers.HopCount;
+
+        if (rawHopCount is not null && !int.TryParse(rawHopCount, out _))
+        {
+            _logger.LogWarning(
+                "malformed hop count header '{Value}' on message {MessageId}; treating as 0",
+                rawHopCount, envelope.Headers.MessageId);
+            hopCount = 0;
+        }
+
+        if (hopCount < _options.MaxHopCount)
         {
             return false;
         }
 
         _logger.LogWarning(
             "Message on '{Topic}' exceeded max hop count ({HopCount}/{Max}). Routing to DLQ.",
-            topic, envelope.Headers.HopCount, _options.MaxHopCount);
+            topic, hopCount, _options.MaxHopCount);
         envelope.Headers.DlqReason = "max_hops_exceeded";
         return true;
     }

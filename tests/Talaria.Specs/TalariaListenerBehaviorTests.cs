@@ -47,7 +47,7 @@ public class TalariaListenerBehaviorTests
         var producer = await transport.CreateProducerAsync<TopicMessage>("listener.topic", new ProducerOptions());
         await producer.ProduceAsync(new TopicMessage { Id = "manual-1" });
 
-        await PollUntilAsync(() => Task.FromResult(received.Count == 1), TimeSpan.FromSeconds(5));
+        await TestAsyncHelpers.PollUntilAsync(() => Task.FromResult(received.Count == 1), TimeSpan.FromSeconds(5));
         Assert.Equal("manual-1", received[0]);
 
         await listener.StopAsync();
@@ -103,52 +103,17 @@ public class TalariaListenerBehaviorTests
         await startProducer.ProduceAsync(new StartSaga { Id = "end-1" });
 
         var store = services.GetRequiredService<IStateStore<SagaState>>();
-        var started = await PollUntilAsync(async () => await store.GetAsync("end-1") is not null, TimeSpan.FromSeconds(5));
+        var started = await TestAsyncHelpers.PollUntilAsync(async () => await store.GetAsync("end-1") is not null, TimeSpan.FromSeconds(5));
         Assert.True(started, "Saga starter never created state.");
 
         var completeProducer = await transport.CreateProducerAsync<CompleteSaga>("listener.saga.complete", new ProducerOptions());
         await completeProducer.ProduceAsync(new CompleteSaga { Id = "end-1" });
 
-        var dispatched = await ReadUntilAsync<SagaCompleted>(transport, "listener.saga.completed", 1);
+        var dispatched = await TestAsyncHelpers.ReadUntilAsync<SagaCompleted>(transport, "listener.saga.completed", 1);
         var envelope = Assert.Single(dispatched);
         Assert.Equal("end-1", envelope.Payload!.Id);
 
         await listener.StopAsync();
     }
 
-    private static async Task<List<MessageEnvelope<T>>> ReadUntilAsync<T>(
-        InMemoryTransport transport, string topic, int expectedCount)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        List<MessageEnvelope<T>> messages;
-        do
-        {
-            messages = await transport.ReadAllFromTopicAsync<T>(topic);
-            if (messages.Count >= expectedCount)
-            {
-                break;
-            }
-
-            await Task.Delay(50);
-        }
-        while (DateTime.UtcNow < deadline);
-
-        return messages;
-    }
-
-    private static async Task<bool> PollUntilAsync(Func<Task<bool>> condition, TimeSpan timeout)
-    {
-        var deadline = DateTime.UtcNow + timeout;
-        while (DateTime.UtcNow < deadline)
-        {
-            if (await condition())
-            {
-                return true;
-            }
-
-            await Task.Delay(50);
-        }
-
-        return await condition();
-    }
 }

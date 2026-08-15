@@ -3,9 +3,12 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging.Abstractions;
 using Talaria.Core;
 using Talaria.Core.Abstractions;
+using Talaria.Core.Hosting;
 using Talaria.Core.Registration;
+using Talaria.Core.Sagas;
 using Talaria.Transports.InMemory;
 using Xunit;
 
@@ -65,7 +68,7 @@ public class TopicRetryBehaviorTests
 
         await host.StartAsync();
 
-        var succeeded = await PollUntilAsync(
+        var succeeded = await TestAsyncHelpers.PollUntilAsync(
             () => Task.FromResult(Volatile.Read(ref attempts) >= 3), TimeSpan.FromSeconds(10));
         Assert.True(succeeded, $"Handler did not run 3 times (ran {Volatile.Read(ref attempts)}).");
 
@@ -126,7 +129,7 @@ public class TopicRetryBehaviorTests
 
         await host.StartAsync();
 
-        var succeeded = await PollUntilAsync(
+        var succeeded = await TestAsyncHelpers.PollUntilAsync(
             () => Task.FromResult(Volatile.Read(ref attempts) >= 3), TimeSpan.FromSeconds(10));
         Assert.True(succeeded, "Handler did not succeed within timeout.");
 
@@ -180,7 +183,7 @@ public class TopicRetryBehaviorTests
 
         await host.StartAsync();
 
-        var dlq = await ReadUntilAsync<RetryMessage>(transport, "retry.topic.dlq", 1);
+        var dlq = await TestAsyncHelpers.ReadUntilAsync<RetryMessage>(transport, "retry.topic.dlq", 1);
 
         Assert.Single(dlq);
         Assert.Equal("retries_exhausted", dlq[0].Headers.DlqReason);
@@ -219,7 +222,7 @@ public class TopicRetryBehaviorTests
 
         await host.StartAsync();
 
-        var dlq = await ReadUntilAsync<RetryMessage>(transport, "retry.topic.dlq", 1);
+        var dlq = await TestAsyncHelpers.ReadUntilAsync<RetryMessage>(transport, "retry.topic.dlq", 1);
 
         Assert.Single(dlq);
         Assert.Equal("retry_unavailable", dlq[0].Headers.DlqReason);
@@ -273,12 +276,12 @@ public class TopicRetryBehaviorTests
 
         await host.StartAsync();
 
-        var succeeded = await PollUntilAsync(
+        var succeeded = await TestAsyncHelpers.PollUntilAsync(
             () => Task.FromResult(Volatile.Read(ref attempts) >= 2), TimeSpan.FromSeconds(10));
         Assert.True(succeeded, "Handler did not succeed within timeout.");
 
         // Stability window: no duplicate retry copies should re-trigger the handler.
-        var stable = await PollStableAsync(
+        var stable = await TestAsyncHelpers.PollStableAsync(
             () => Task.FromResult(Volatile.Read(ref attempts) == 2), TimeSpan.FromSeconds(2));
         Assert.True(stable, $"Duplicate retry copy re-ran the handler (attempts = {Volatile.Read(ref attempts)}).");
 
@@ -326,7 +329,7 @@ public class TopicRetryBehaviorTests
 
         await host.StartAsync();
 
-        var dlq = await ReadUntilAsync<RetryMessage>(transport, "retry.topic.dlq", 1);
+        var dlq = await TestAsyncHelpers.ReadUntilAsync<RetryMessage>(transport, "retry.topic.dlq", 1);
 
         Assert.Single(dlq);
         Assert.Equal(1, Volatile.Read(ref attempts));
@@ -386,18 +389,147 @@ public class TopicRetryBehaviorTests
         await host.StartAsync();
 
         // Wait until the retry has been durably scheduled and inspect the captured copy.
-        var deferred = await PollUntilAsync(
+        var deferred = await TestAsyncHelpers.PollUntilAsync(
             () => Task.FromResult(captured != null), TimeSpan.FromSeconds(5));
         Assert.True(deferred, "No deferred retry message was scheduled.");
         Assert.Equal("order-42", captured!.PartitionKey);
 
         // Confirm the retry eventually succeeds (sweeper republishes the deferred copy).
-        var succeeded = await PollUntilAsync(
+        var succeeded = await TestAsyncHelpers.PollUntilAsync(
             () => Task.FromResult(Volatile.Read(ref attempts) >= 2), TimeSpan.FromSeconds(10));
         Assert.True(succeeded, "Handler did not succeed on retry.");
 
         await host.StopAsync();
         host.Dispose();
+    }
+
+    [Fact]
+    public async Task OperationCanceledException_DuringShutdown_IsNotDLQed_AndRedelivers()
+    {
+        var transport = new InMemoryTransport();
+        var attempts = 0;
+        var handlerCts = new CancellationTokenSource();
+
+        var topicReg = new TopicRegistry();
+        topicReg.MapTopic<RetryMessage>("shutdown.topic",
+            async (msg, ct) =>
+            {
+                Interlocked.Increment(ref attempts);
+                await Task.Delay(Timeout.Infinite, handlerCts.Token);
+            },
+            new RetryPolicy
+            {
+                MaxRetryAttempts = 3,
+                RetryInterval = TimeSpan.FromMilliseconds(50),
+                BackoffType = RetryBackoffType.Fixed,
+            });
+
+        var listener = new TalariaListener(
+            transport,
+            topicReg,
+            new SagaRegistry(),
+            new TalariaOptions
+            {
+                ApplicationName = "shutdown-app",
+                MinRetryDelay = TimeSpan.FromMilliseconds(50),
+            },
+            NullLogger<TalariaListener>.Instance);
+
+        await listener.StartAsync();
+
+        var producer = await transport.CreateProducerAsync<RetryMessage>("shutdown.topic", new ProducerOptions());
+        await producer.ProduceAsync(new RetryMessage { Id = "MSG-SHUTDOWN" }, new MessageHeaders { MessageId = "shutdown-1" });
+
+        // Wait until the handler has been entered at least once.
+        await TestAsyncHelpers.PollUntilAsync(
+            () => Task.FromResult(Volatile.Read(ref attempts) >= 1), TimeSpan.FromSeconds(5));
+
+        // Signal the handler to cancel, then stop the listener. The handler will throw OCE.
+        handlerCts.Cancel();
+        await listener.StopAsync();
+
+        // The message must NOT be in the DLQ.
+        Assert.Empty(await transport.ReadAllFromTopicAsync<RetryMessage>("shutdown.topic.dlq"));
+
+        // Start a fresh listener; the uncommitted message redelivers.
+        var received = new List<string>();
+        var topicReg2 = new TopicRegistry();
+        topicReg2.MapTopic<RetryMessage>("shutdown.topic", (msg, ct) =>
+        {
+            received.Add(msg.Id);
+            return Task.CompletedTask;
+        });
+
+        var listener2 = new TalariaListener(
+            transport,
+            topicReg2,
+            new SagaRegistry(),
+            new TalariaOptions { ApplicationName = "shutdown-app" },
+            NullLogger<TalariaListener>.Instance);
+
+        await listener2.StartAsync();
+
+        await TestAsyncHelpers.PollUntilAsync(
+            () => Task.FromResult(received.Count == 1), TimeSpan.FromSeconds(5));
+        Assert.Equal("MSG-SHUTDOWN", received[0]);
+
+        await listener2.StopAsync();
+    }
+
+    [Fact]
+    public async Task Manual_TalariaListener_TopicRetry_FailsThenSucceeds()
+    {
+        var transport = new InMemoryTransport();
+        var deferralStore = new InMemoryDeferralStore();
+        var attempts = 0;
+        var received = new List<string>();
+
+        var topicReg = new TopicRegistry();
+        topicReg.MapTopic<RetryMessage>("manual-retry.topic",
+            (msg, ct) =>
+            {
+                var attempt = Interlocked.Increment(ref attempts);
+                received.Add(msg.Id);
+                if (attempt < 3)
+                {
+                    throw new InvalidOperationException("boom");
+                }
+
+                return Task.CompletedTask;
+            },
+            new RetryPolicy
+            {
+                MaxRetryAttempts = 3,
+                RetryInterval = TimeSpan.FromMilliseconds(50),
+                BackoffType = RetryBackoffType.Fixed,
+            });
+
+        var listener = new TalariaListener(
+            transport,
+            topicReg,
+            new SagaRegistry(),
+            new TalariaOptions
+            {
+                ApplicationName = "manual-retry-app",
+                MinRetryDelay = TimeSpan.FromMilliseconds(50),
+                DeferralBackoff = TimeSpan.FromMilliseconds(50),
+            },
+            NullLogger<TalariaListener>.Instance,
+            stores: new TalariaListenerStores(null, deferralStore, null));
+
+        await listener.StartAsync();
+
+        var producer = await transport.CreateProducerAsync<RetryMessage>("manual-retry.topic", new ProducerOptions());
+        await producer.ProduceAsync(new RetryMessage { Id = "MSG-MANUAL-RETRY" }, new MessageHeaders { MessageId = "manual-1" });
+
+        var succeeded = await TestAsyncHelpers.PollUntilAsync(
+            () => Task.FromResult(Volatile.Read(ref attempts) >= 3), TimeSpan.FromSeconds(10));
+        Assert.True(succeeded, $"Handler did not run 3 times (ran {Volatile.Read(ref attempts)}).");
+
+        Assert.Equal(["MSG-MANUAL-RETRY", "MSG-MANUAL-RETRY", "MSG-MANUAL-RETRY"], received);
+        Assert.Empty(await transport.ReadAllFromTopicAsync<RetryMessage>("manual-retry.topic.dlq"));
+
+        await listener.StopAsync();
     }
 
     private sealed class CapturingDeferralStore : IDeferralStore
@@ -427,57 +559,4 @@ public class TopicRetryBehaviorTests
             => _inner.AbandonAsync(lease, visibleAt, ct);
     }
 
-    // ---- Helpers ----
-
-    private static async Task<List<MessageEnvelope<T>>> ReadUntilAsync<T>(
-        InMemoryTransport transport, string topic, int expectedCount)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        List<MessageEnvelope<T>> messages;
-        do
-        {
-            messages = await transport.ReadAllFromTopicAsync<T>(topic);
-            if (messages.Count >= expectedCount)
-            {
-                break;
-            }
-
-            await Task.Delay(50);
-        }
-        while (DateTime.UtcNow < deadline);
-
-        return messages;
-    }
-
-    private static async Task<bool> PollUntilAsync(Func<Task<bool>> condition, TimeSpan timeout)
-    {
-        var deadline = DateTime.UtcNow + timeout;
-        while (DateTime.UtcNow < deadline)
-        {
-            if (await condition())
-            {
-                return true;
-            }
-
-            await Task.Delay(50);
-        }
-
-        return await condition();
-    }
-
-    private static async Task<bool> PollStableAsync(Func<Task<bool>> condition, TimeSpan window)
-    {
-        var deadline = DateTime.UtcNow + window;
-        while (DateTime.UtcNow < deadline)
-        {
-            if (!await condition())
-            {
-                return false;
-            }
-
-            await Task.Delay(50);
-        }
-
-        return await condition();
-    }
 }

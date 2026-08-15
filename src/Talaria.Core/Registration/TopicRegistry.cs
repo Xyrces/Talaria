@@ -18,7 +18,7 @@ public sealed class TopicRegistration
     public required Type MessageType { get; init; }
 
     /// <summary>The erased async handler invoked for each delivered message.</summary>
-    public required Func<object, MessageHeaders, CancellationToken, Task> Handler { get; init; }
+    public required Func<object, MessageHeaders, EnvelopeMetadata, CancellationToken, Task> Handler { get; init; }
 
     /// <summary>Optional explicit consumer group. Null falls back to <see cref="TalariaOptions.ConsumerGroupOverride"/> then auto-generated.</summary>
     public string? ConsumerGroup { get; init; }

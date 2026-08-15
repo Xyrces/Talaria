@@ -272,8 +272,23 @@ internal sealed class SagaConsumerEngine
                 {
                     await HandleDeferralAsync(env, payload, step, correlationId, ct);
 
+                    // Commit the original envelope BEFORE releasing the idempotency lock.
+                    // The deferred copy carries a freshly minted MessageId, so it is NOT
+                    // gated by the original lock. Committing first ensures the original
+                    // cannot redeliver and re-run the handler concurrently with the deferred
+                    // copy. If commit fails we leave the lock held: it expires via TTL and
+                    // the transport redelivers the original, which is safe.
+                    try
+                    {
+                        await consumer.CommitAsync(env, ct);
+                    }
+                    catch (Exception commitEx)
+                    {
+                        _logger.LogError(commitEx, "Failed to commit original envelope after deferring saga message {MessageId}; it remains uncommitted for redelivery.", env.Headers.MessageId);
+                        return;
+                    }
+
                     await ReleaseLockBestEffortAsync(gate.Lock, ct);
-                    await consumer.CommitAsync(env, ct);
 
                     Diagnostics.TalariaDiagnostics.MessagesDeferred.Add(1, new KeyValuePair<string, object?>("saga.type", stateType.Name));
                 }
@@ -305,6 +320,18 @@ internal sealed class SagaConsumerEngine
             }
             catch (Exception ex)
             {
+                // During shutdown the handler may observe OperationCanceledException (or any
+                // exception while the loop token is already canceled). Do not DLQ in that
+                // case; leave the message uncommitted so it redelivers after restart.
+                if (ct.IsCancellationRequested)
+                {
+                    _logger.LogDebug(
+                        ex,
+                        "Saga {Type} handler threw during shutdown; leaving message uncommitted for redelivery.",
+                        stateType.Name);
+                    return;
+                }
+
                 _logger.LogError(ex, "Saga {Type} threw an exception while handling message {MsgType}", stateType.Name, step.MessageType.Name);
                 activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, ex.Message);
 
@@ -329,8 +356,23 @@ internal sealed class SagaConsumerEngine
                     activity?.SetTag("saga.status", "deferred");
                     await HandleDeferralAsync(env, payload, step, correlationId, ct);
 
+                    // Commit the original envelope BEFORE releasing the idempotency lock.
+                    // The deferred copy carries a freshly minted MessageId, so it is NOT
+                    // gated by the original lock. Committing first ensures the original
+                    // cannot redeliver and re-run the handler concurrently with the deferred
+                    // copy. If commit fails we leave the lock held: it expires via TTL and
+                    // the transport redelivers the original, which is safe.
+                    try
+                    {
+                        await consumer.CommitAsync(env, ct);
+                    }
+                    catch (Exception commitEx)
+                    {
+                        _logger.LogError(commitEx, "Failed to commit original envelope after deferring saga message {MessageId}; it remains uncommitted for redelivery.", env.Headers.MessageId);
+                        return;
+                    }
+
                     await ReleaseLockBestEffortAsync(gate.Lock, ct);
-                    await consumer.CommitAsync(env, ct);
 
                     Diagnostics.TalariaDiagnostics.MessagesDeferred.Add(1, new KeyValuePair<string, object?>("saga.type", stateType.Name));
                 }

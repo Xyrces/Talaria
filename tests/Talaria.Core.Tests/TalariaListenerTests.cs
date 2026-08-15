@@ -50,7 +50,7 @@ public class TalariaListenerTests
         {
             TopicName = "idle-topic",
             MessageType = typeof(DummyMessage),
-            Handler = (msg, headers, ct) => Task.CompletedTask
+            Handler = (msg, headers, _, ct) => Task.CompletedTask
         });
 
         var listener = new TalariaListener(

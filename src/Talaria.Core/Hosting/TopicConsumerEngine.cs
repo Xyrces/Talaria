@@ -9,7 +9,7 @@ namespace Talaria.Core.Hosting;
 /// <summary>
 /// Host-agnostic engine that runs supervised consumer loops for all topic registrations.
 /// </summary>
-internal sealed class TopicConsumerEngine
+internal sealed class TopicConsumerEngine : IAsyncDisposable
 {
     private readonly ITransport _transport;
     private readonly IReadOnlyList<TopicRegistration> _registrations;
@@ -128,10 +128,28 @@ internal sealed class TopicConsumerEngine
 
                 try
                 {
-                    await registration.Handler(envelope.Payload!, envelope.Headers, ct);
+                    var metadata = new EnvelopeMetadata(
+                        envelope.PartitionKey,
+                        envelope.Partition,
+                        envelope.Offset,
+                        envelope.Timestamp,
+                        envelope.CorrelationId);
+                    await registration.Handler(envelope.Payload!, envelope.Headers, metadata, ct);
                 }
                 catch (Exception ex)
                 {
+                    // During shutdown the handler may observe OperationCanceledException (or any
+                    // exception while the loop token is already canceled). Do not DLQ in that
+                    // case; leave the message uncommitted so it redelivers after restart.
+                    if (ct.IsCancellationRequested)
+                    {
+                        _logger.LogDebug(
+                            ex,
+                            "Handler for topic '{Topic}' threw during shutdown; leaving message uncommitted for redelivery.",
+                            registration.TopicName);
+                        continue;
+                    }
+
                     _logger.LogError(ex,
                         "Handler for topic '{Topic}' failed. Evaluating delayed retry policy.",
                         registration.TopicName);
@@ -172,5 +190,13 @@ internal sealed class TopicConsumerEngine
         }
 
         _logger.LogInformation("Talaria: consumer for '{Topic}' shut down.", registration.TopicName);
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        // No-op: the consumer engine holds no resources beyond the per-loop consumers,
+        // which are disposed when their loops exit. Implemented for uniform disposal in
+        // TalariaListener.
+        return ValueTask.CompletedTask;
     }
 }
