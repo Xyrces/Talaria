@@ -13,10 +13,12 @@ using Talaria.Core.Sagas;
 namespace Talaria.Core.Hosting;
 
 /// <summary>
-/// Hosted service that listens on all configured saga topics.
-/// One supervised consumer per topic; messages are fanned out to the correct saga step
-/// via the message-type header. Dispatch topics are explicit (DispatchTo) and producers
-/// are created once at startup — no reflection in the per-message hot path.
+/// Hosted service that listens on all configured saga topics and runs the deferral
+/// sweeper whenever an <see cref="IDeferralStore"/> is registered. One supervised consumer
+/// per topic; messages are fanned out to the correct saga step via the message-type header.
+/// Dispatch topics are explicit (DispatchTo) and producers are created once at startup —
+/// no reflection in the per-message hot path. Also coordinates opt-in delayed retries for
+/// saga step handler exceptions via <see cref="RetryCoordinator"/>.
 /// </summary>
 public sealed class SagaHostedService : BackgroundService
 {
@@ -46,7 +48,7 @@ public sealed class SagaHostedService : BackgroundService
     private IReadOnlyDictionary<Type, string> _dispatchRoutes = new Dictionary<Type, string>();
 
     private sealed record ProducerInvoker(
-        Func<object, MessageHeaders?, CancellationToken, Task> Produce,
+        Func<object, MessageHeaders?, string?, CancellationToken, Task> Produce,
         IAsyncDisposable Producer);
 
     private sealed record StepRoute(
@@ -116,10 +118,12 @@ public sealed class SagaHostedService : BackgroundService
         if (_deferralStore is null && stepsByTopic.Count > 0)
         {
             _logger.LogWarning(
-                "No IDeferralStore is registered. Out-of-order saga messages and handler-initiated " +
-                "deferrals will be routed to the DLQ instead of being deferred. " +
+                "No IDeferralStore is registered. Out-of-order saga messages, handler-initiated " +
+                "deferrals, and delayed retries will be routed to the DLQ instead of being deferred. " +
                 "Register one via UseRedisDeferralStore() or UseInMemoryDeferralStore().");
         }
+
+        var retryCoordinator = new RetryCoordinator(_deferralStore, _options, _logger);
 
         _outboxStore = _serviceProvider.GetService<IOutboxStore>();
         if (_outboxStore is null && _dispatchRoutes.Count > 0)
@@ -146,10 +150,13 @@ public sealed class SagaHostedService : BackgroundService
         var tasks = stepsByTopic.Select(kvp =>
             ConsumerSupervision.RunSupervisedAsync(
                 $"saga:{kvp.Key}",
-                ct => ConsumeTopicLoopAsync(kvp.Key, kvp.Value, transport, pipeline, ct),
+                ct => ConsumeTopicLoopAsync(kvp.Key, kvp.Value, transport, pipeline, retryCoordinator, ct),
                 _logger,
                 stoppingToken)).ToList();
 
+        // NOTE: the deferral sweeper lives in SagaHostedService. Hosts that use delayed
+        // retries or saga deferrals must not omit SagaHostedService — AddTalaria registers
+        // both hosted services by default.
         if (_deferralStore != null)
         {
             tasks.Add(ConsumerSupervision.RunSupervisedAsync(
@@ -217,6 +224,7 @@ public sealed class SagaHostedService : BackgroundService
         IReadOnlyList<StepRoute> routes,
         ITransport transport,
         MessageProcessingPipeline pipeline,
+        RetryCoordinator retryCoordinator,
         CancellationToken ct)
     {
         await using var consumer = await transport.CreateConsumerAsync<JsonElement>(
@@ -241,7 +249,7 @@ public sealed class SagaHostedService : BackgroundService
                 continue;
             }
 
-            await ProcessStepMessageAsync(env, route, transport, pipeline, consumer, ct);
+            await ProcessStepMessageAsync(env, route, transport, pipeline, retryCoordinator, consumer, ct);
         }
     }
 
@@ -270,6 +278,7 @@ public sealed class SagaHostedService : BackgroundService
         StepRoute route,
         ITransport transport,
         MessageProcessingPipeline pipeline,
+        RetryCoordinator retryCoordinator,
         IConsumer<JsonElement> consumer,
         CancellationToken ct)
     {
@@ -363,8 +372,11 @@ public sealed class SagaHostedService : BackgroundService
                 return;
             }
 
-            // 5b. Starter replay: state already exists — idempotent replay, skip and commit.
-            if (state != null && step.IsStarter)
+            // 5b. Starter replay: state already exists AND this is the original attempt
+            // (RetryAttempt == 0) — idempotent replay, skip and commit. A retry copy
+            // (RetryAttempt > 0) means the original starter FAILED, so it must run; otherwise
+            // the saga stalls because the failed starter never transitions state.
+            if (state != null && step.IsStarter && env.Headers.RetryAttempt == 0)
             {
                 _logger.LogWarning(
                     "Saga {SagaType} starter message {MessageId} on topic {Topic} received, but state for correlation {CorrelationId} already exists. Skipping as an idempotent replay.",
@@ -387,9 +399,16 @@ public sealed class SagaHostedService : BackgroundService
                 activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, ex.Message);
 
                 Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
-                Diagnostics.TalariaDiagnostics.DlqRouted.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
 
-                await pipeline.FailAsync(gate.Lock, consumer, env, ex, null, ct);
+                var outcome = await retryCoordinator.TryCoordinateSagaRetryAsync(
+                    step.TopicName, step.MessageType, pipeline, consumer, env, ex, gate.Lock, ct);
+
+                if (outcome == RetryCoordinator.RetryOutcome.NotRetryable)
+                {
+                    Diagnostics.TalariaDiagnostics.DlqRouted.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
+                    await pipeline.FailAsync(gate.Lock, consumer, env, ex, null, ct);
+                }
+
                 return;
             }
 
@@ -580,6 +599,13 @@ public sealed class SagaHostedService : BackgroundService
     /// and throws <see cref="InvalidOperationException"/> when deferral is impossible
     /// (no store registered, missing source topic, or max attempts exceeded).
     /// </summary>
+    /// <remarks>
+    /// Interaction with delayed retries: a retry copy of a saga message that arrives out-of-order
+    /// (state not yet present for a non-starter) enters this deferral path using the DEFERRAL
+    /// attempt counter and can dead-letter as <c>max_deferrals_exceeded</c> independently of the
+    /// retry policy's <see cref="RetryPolicy.MaxRetryAttempts"/>. The two counters are intentionally
+    /// separate: retries track handler failures, deferrals track ordering gaps.
+    /// </remarks>
     private async Task HandleDeferralAsync(
         MessageEnvelope<JsonElement> env,
         object payload,
@@ -640,7 +666,8 @@ public sealed class SagaHostedService : BackgroundService
             headers,
             correlationId,
             attempt,
-            DateTimeOffset.UtcNow + TimeSpan.FromMilliseconds(_options.DeferralBackoff.TotalMilliseconds * attempt));
+            DateTimeOffset.UtcNow + TimeSpan.FromMilliseconds(_options.DeferralBackoff.TotalMilliseconds * attempt),
+            env.PartitionKey);
 
         await _deferralStore.EnqueueAsync(deferred, ct);
     }
@@ -715,7 +742,7 @@ public sealed class SagaHostedService : BackgroundService
                 ?? throw new JsonException($"Deferred payload deserialized to null for {type.Name}.");
 
             var invoker = await GetOrCreateProducerAsync(transport, message.Topic, type, ct);
-            await invoker.Produce(payload, new MessageHeaders(message.Headers), ct);
+            await invoker.Produce(payload, new MessageHeaders(message.Headers), message.PartitionKey, ct);
 
             await _deferralStore!.CompleteAsync(leased.Lease, ct);
 
@@ -818,7 +845,7 @@ public sealed class SagaHostedService : BackgroundService
                 ?? throw new JsonException($"Outbox payload deserialized to null for {type.Name}.");
 
             var invoker = await GetOrCreateProducerAsync(transport, message.Topic, type, ct);
-            await invoker.Produce(payload, new MessageHeaders(message.Headers), ct);
+            await invoker.Produce(payload, new MessageHeaders(message.Headers), null, ct);
 
             await _outboxStore!.CompleteAsync(leased.Lease, ct);
 
@@ -875,7 +902,7 @@ public sealed class SagaHostedService : BackgroundService
     {
         var producer = await transport.CreateProducerAsync<T>(topic, new ProducerOptions(), ct);
         return new ProducerInvoker(
-            async (msg, headers, token) => await producer.ProduceAsync((T)msg, headers, null, token),
+            async (msg, headers, partitionKey, token) => await producer.ProduceAsync((T)msg, headers, partitionKey, token),
             producer);
     }
 

@@ -42,6 +42,11 @@ internal interface IServiceBusMessageScheduler
     /// are accepted by ASB (immediate enqueue); future times trigger broker-side
     /// holding until the deadline.
     /// </param>
+    /// <param name="partitionKey">
+    /// Optional partition key. Transports that support sessions map this to
+    /// <see cref="Azure.Messaging.ServiceBus.ServiceBusMessage.SessionId"/> so the
+    /// scheduled message is received on the same session as the original delivery.
+    /// </param>
     /// <param name="ct">Cancellation token; cancels the broker call.</param>
     /// <returns>The broker-assigned sequence number.</returns>
     Task<long> ScheduleAsync(
@@ -49,5 +54,6 @@ internal interface IServiceBusMessageScheduler
         BinaryData body,
         IReadOnlyDictionary<string, object> applicationProperties,
         DateTimeOffset scheduledEnqueueTime,
+        string? partitionKey,
         CancellationToken ct = default);
 }

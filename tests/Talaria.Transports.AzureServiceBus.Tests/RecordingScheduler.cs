@@ -25,9 +25,10 @@ internal sealed class RecordingScheduler : IServiceBusMessageScheduler
         BinaryData body,
         IReadOnlyDictionary<string, object> applicationProperties,
         DateTimeOffset scheduledEnqueueTime,
+        string? partitionKey,
         CancellationToken ct = default)
     {
-        Calls.Add(new ScheduledCall(topic, body, new Dictionary<string, object>(applicationProperties), scheduledEnqueueTime));
+        Calls.Add(new ScheduledCall(topic, body, new Dictionary<string, object>(applicationProperties), scheduledEnqueueTime, partitionKey));
         return Task.FromResult((long)(Calls.Count));
     }
 
@@ -35,5 +36,6 @@ internal sealed class RecordingScheduler : IServiceBusMessageScheduler
         string Topic,
         BinaryData Body,
         IReadOnlyDictionary<string, object> ApplicationProperties,
-        DateTimeOffset ScheduledEnqueueTime);
+        DateTimeOffset ScheduledEnqueueTime,
+        string? PartitionKey);
 }
