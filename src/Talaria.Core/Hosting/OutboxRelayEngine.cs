@@ -91,7 +91,7 @@ internal sealed class OutboxRelayEngine : IAsyncDisposable
                 ?? throw new System.Text.Json.JsonException($"Outbox payload deserialized to null for {type.Name}.");
 
             var invoker = await _producerCache.GetOrCreateAsync(message.Topic, type, ct);
-            await invoker.Produce(payload, new MessageHeaders(message.Headers), null, ct);
+            await invoker.Produce(payload, new MessageHeaders(message.Headers), message.PartitionKey, ct);
 
             await _outboxStore.CompleteAsync(leased.Lease, ct);
 
