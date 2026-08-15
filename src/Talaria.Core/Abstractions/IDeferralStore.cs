@@ -24,7 +24,7 @@ public sealed record DeferredMessage(
     string? CorrelationId,
     int Attempt,
     DateTimeOffset DueAt,
-    string? PartitionKey);
+    string? PartitionKey = null);
 
 /// <summary>
 /// A lease on a deferred message. Carries a fencing token so that only the current

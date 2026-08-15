@@ -106,6 +106,52 @@ public class InMemoryTransportTests
             break;
         }
     }
+
+    [Fact]
+    public async Task DlqBus_IsUnbounded_DoesNotDropDeadLetters()
+    {
+        // Arrange: a tiny regular-topic capacity so a bounded DLQ would definitely overflow.
+        var options = new InMemoryTransportOptions { ChannelCapacity = 2 };
+        var transport = new InMemoryTransport(options);
+        var producer = await transport.CreateProducerAsync<TestOrder>(
+            "orders", new ProducerOptions());
+        var consumer = await transport.CreateConsumerAsync<TestOrder>(
+            "orders", new ConsumerOptions());
+
+        const int messageCount = 10;
+
+        // Produce concurrently: the small topic channel would block if we published all 10 upfront.
+        var producerTask = Task.Run(async () =>
+        {
+            for (var i = 0; i < messageCount; i++)
+            {
+                await producer.ProduceAsync(new TestOrder($"ORD-{i}", i));
+            }
+        });
+
+        // Act: nack every message. The DLQ must accept all of them without blocking or dropping.
+        var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var nacked = 0;
+        await foreach (var envelope in consumer.ConsumeAsync(cts.Token))
+        {
+            await consumer.NackAsync(envelope, cts.Token);
+            nacked++;
+            if (nacked == messageCount)
+            {
+                break;
+            }
+        }
+
+        await producerTask;
+        Assert.Equal(messageCount, nacked);
+
+        // Assert: both topic-specific and app-wide DLQs retained every dead letter.
+        var topicDlqMessages = await transport.ReadAllFromTopicAsync<TestOrder>("orders.dlq");
+        var appDlqMessages = await transport.ReadAllFromTopicAsync<TestOrder>("__app.dlq");
+
+        Assert.Equal(messageCount, topicDlqMessages.Count);
+        Assert.Equal(messageCount, appDlqMessages.Count);
+    }
 }
 
 public record TestOrder(string OrderId, decimal Total);
