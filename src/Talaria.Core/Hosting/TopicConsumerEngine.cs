@@ -152,7 +152,6 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
                 activity?.SetTag("talaria.consumer.type", registration.ConsumerType?.FullName ?? registration.RequestConsumerType?.FullName ?? "delegate");
 
                 Exception? handlerException = null;
-                object? response = null;
                 try
                 {
                     if (registration.ConsumerType is not null)
@@ -198,7 +197,31 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
                     }
                     else if (isRequest)
                     {
-                        response = await InvokeRequestHandlerAsync(registration, envelope, ct);
+                        var response = await InvokeRequestHandlerAsync(registration, envelope, ct).ConfigureAwait(false);
+                        if (response is not null)
+                        {
+                            var replyTo = envelope.Headers.ReplyTo;
+                            if (string.IsNullOrEmpty(replyTo))
+                            {
+                                _logger.LogWarning(
+                                    "Request on topic '{Topic}' has no '{ReplyToHeader}' header; no response will be published.",
+                                    registration.TopicName, MessageHeaders.ReplyToKey);
+                            }
+                            else
+                            {
+                                // Publish the response inside the handler try block so a broker
+                                // failure flows through the same retry/fault path as a handler
+                                // failure. The handler may therefore run more than once if the
+                                // response publish fails and retries are enabled.
+                                await PublishResponseAsync(registration, replyTo, response, envelope.Headers, ct).ConfigureAwait(false);
+                            }
+                        }
+                        else
+                        {
+                            _logger.LogWarning(
+                                "Request handler for topic '{Topic}' returned null; no response will be published and the requester will time out.",
+                                registration.TopicName);
+                        }
                     }
                     else
                     {
@@ -208,7 +231,7 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
                             envelope.Offset,
                             envelope.Timestamp,
                             envelope.CorrelationId);
-                        await registration.Handler!(envelope.Payload!, envelope.Headers, metadata, ct);
+                        await registration.Handler!(envelope.Payload!, envelope.Headers, metadata, ct).ConfigureAwait(false);
                     }
                 }
                 catch (Exception ex)
@@ -240,7 +263,7 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
                         new KeyValuePair<string, object?>("messaging.destination.name", registration.TopicName));
 
                     var outcome = await retryCoordinator.TryCoordinateTopicRetryAsync(
-                        registration, pipeline, consumer, envelope, handlerException, gate.Lock, ct);
+                        registration, pipeline, consumer, envelope, handlerException, gate.Lock, ct).ConfigureAwait(false);
 
                     if (outcome == RetryCoordinator.RetryOutcome.NotRetryable)
                     {
@@ -248,42 +271,21 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
                             "Handler for topic '{Topic}' failed. Routing to DLQ.",
                             registration.TopicName);
 
-                        await PublishFaultAsync(registration, envelope, handlerException, ct);
+                        await PublishFaultAsync(registration, envelope, handlerException, ct).ConfigureAwait(false);
 
                         Diagnostics.TalariaDiagnostics.DlqRouted.Add(1,
                             new KeyValuePair<string, object?>("messaging.destination.name", registration.TopicName));
-                        await pipeline.FailAsync(gate.Lock, consumer, envelope, handlerException, null, ct);
+                        await pipeline.FailAsync(gate.Lock, consumer, envelope, handlerException, null, ct).ConfigureAwait(false);
                     }
                     else if (outcome == RetryCoordinator.RetryOutcome.Exhausted || outcome == RetryCoordinator.RetryOutcome.Unavailable)
                     {
-                        await PublishFaultAsync(registration, envelope, handlerException, ct);
+                        await PublishFaultAsync(registration, envelope, handlerException, ct).ConfigureAwait(false);
                     }
 
                     continue;
                 }
 
-                if (isRequest && response is not null)
-                {
-                    var replyTo = envelope.Headers.ReplyTo;
-                    if (string.IsNullOrEmpty(replyTo))
-                    {
-                        _logger.LogWarning(
-                            "Request on topic '{Topic}' has no '{ReplyToHeader}' header; no response will be published.",
-                            registration.TopicName, MessageHeaders.ReplyToKey);
-                    }
-                    else
-                    {
-                        await PublishResponseAsync(registration, replyTo, response, envelope.Headers, ct);
-                    }
-                }
-                else if (isRequest)
-                {
-                    _logger.LogWarning(
-                        "Request handler for topic '{Topic}' returned null; no response will be published and the requester will time out.",
-                        registration.TopicName);
-                }
-
-                await pipeline.CompleteAsync(gate.Lock, consumer, envelope, ct);
+                await pipeline.CompleteAsync(gate.Lock, consumer, envelope, ct).ConfigureAwait(false);
 
                 Diagnostics.TalariaDiagnostics.MessagesConsumed.Add(1,
                     new KeyValuePair<string, object?>("messaging.destination.name", registration.TopicName));
@@ -365,15 +367,35 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
         MessageHeaders requestHeaders,
         CancellationToken ct)
     {
-        var invoker = await _producerCache.GetOrCreateAsync(replyTo, registration.ResponseType!, ct);
+        var invoker = await _producerCache.GetOrCreateAsync(replyTo, registration.ResponseType!, ct).ConfigureAwait(false);
 
-        var headers = new MessageHeaders(requestHeaders)
+        // Build clean response headers. Carrying the request's MessageId would cause the
+        // response to reuse it (breaking broker dedup and idempotency on the reply topic),
+        // and request-specific routing metadata (reply_to, retry/DLQ headers) must not leak
+        // into the response envelope. The transport producer increments hop_count itself when
+        // the header is present, so no manual increment is needed here.
+        var headers = new MessageHeaders();
+        if (requestHeaders.TryGetValue(MessageHeaders.RequestIdKey, out var requestId))
         {
-            RequestId = requestHeaders.RequestId,
-        };
-        headers.HopCount++;
+            headers.RequestId = requestId;
+        }
 
-        await invoker.Produce(response, headers, null, ct);
+        if (requestHeaders.TryGetValue(MessageHeaders.CorrelationIdKey, out var correlationId))
+        {
+            headers.CorrelationId = correlationId;
+        }
+
+        if (requestHeaders.TryGetValue(MessageHeaders.TraceParentKey, out var traceParent))
+        {
+            headers.TraceParent = traceParent;
+        }
+
+        if (requestHeaders.TryGetValue(MessageHeaders.TraceStateKey, out var traceState))
+        {
+            headers.TraceState = traceState;
+        }
+
+        await invoker.Produce(response, headers, null, ct).ConfigureAwait(false);
     }
 
     private async Task PublishFaultAsync<T>(
@@ -391,21 +413,37 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
 
         try
         {
-            var invoker = await _producerCache.GetOrCreateAsync(replyTo, typeof(RequestFaultInfo), ct);
+            var invoker = await _producerCache.GetOrCreateAsync(replyTo, typeof(RequestFaultInfo), ct).ConfigureAwait(false);
 
+            // Propagate correlation and W3C trace context so the requester can link the
+            // fault to the originating activity. The transport producer handles hop_count.
             var headers = new MessageHeaders
             {
                 RequestId = requestId,
                 RequestFault = true,
             };
+            if (envelope.Headers.TryGetValue(MessageHeaders.CorrelationIdKey, out var correlationId))
+            {
+                headers.CorrelationId = correlationId;
+            }
+
+            if (envelope.Headers.TryGetValue(MessageHeaders.TraceParentKey, out var traceParent))
+            {
+                headers.TraceParent = traceParent;
+            }
+
+            if (envelope.Headers.TryGetValue(MessageHeaders.TraceStateKey, out var traceState))
+            {
+                headers.TraceState = traceState;
+            }
+
             headers[RequestClientFaultHeaders.ExceptionTypeKey] = ex.GetType().FullName ?? "Unknown";
             if (_options.IncludeExceptionDetailsInDlq)
             {
                 headers[RequestClientFaultHeaders.ExceptionMessageKey] = ex.Message;
             }
-            headers.HopCount++;
 
-            await invoker.Produce(new RequestFaultInfo(), headers, null, ct);
+            await invoker.Produce(new RequestFaultInfo(), headers, null, ct).ConfigureAwait(false);
         }
         catch (Exception publishEx)
         {

@@ -34,7 +34,7 @@ public sealed class RequestClientFactory : IAsyncDisposable
     private Task? _initializationTask;
     private Task? _pumpTask;
     private CancellationTokenSource? _pumpCts;
-    private bool _disposed;
+    private volatile bool _disposed;
 
     /// <summary>
     /// Creates a new request client factory.
@@ -84,28 +84,28 @@ public sealed class RequestClientFactory : IAsyncDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         await InitializeAsync(ct).ConfigureAwait(false);
-        EnsurePumpStarted();
+        await EnsurePumpStartedAsync(ct).ConfigureAwait(false);
 
         var requestId = Guid.NewGuid().ToString("N");
         var tcs = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeoutCts.CancelAfter(_options.DefaultRequestTimeout);
-
-        var registration = timeoutCts.Token.Register(() =>
-        {
-            if (_pending.TryRemove(requestId, out var pending))
-            {
-                pending.DisposeRegistrations();
-                tcs.TrySetException(new RequestTimeoutException(requestId));
-            }
-        });
-
-        var pending = new PendingRequest(tcs, typeof(TResponse), registration);
+        var pending = new PendingRequest(tcs, typeof(TResponse));
         _pending[requestId] = pending;
 
+        CancellationTokenSource? timeoutCts = null;
         try
         {
+            // Use a standalone (non-linked) timeout source. Caller cancellation is observed
+            // by WaitAsync(ct) and surfaces as OperationCanceledException. The timeout callback
+            // alone completes the TCS with RequestTimeoutException.
+            timeoutCts = new CancellationTokenSource(_options.DefaultRequestTimeout);
+            pending.TimeoutRegistration = timeoutCts.Token.Register(() =>
+            {
+                if (tcs.TrySetException(new RequestTimeoutException(requestId)))
+                {
+                    _pending.TryRemove(requestId, out _);
+                }
+            });
+
             var invoker = await _producerCache.GetOrCreateAsync(topic, typeof(TRequest), ct).ConfigureAwait(false);
             var headers = new MessageHeaders
             {
@@ -113,28 +113,23 @@ public sealed class RequestClientFactory : IAsyncDisposable
                 ReplyTo = _inboxTopic,
             };
             await invoker.Produce(request, headers, null, ct).ConfigureAwait(false);
+
+            return (TResponse)await tcs.Task.WaitAsync(ct).ConfigureAwait(false);
         }
-        catch (Exception)
+        catch (OperationCanceledException) when (timeoutCts is not null && !timeoutCts.IsCancellationRequested)
         {
             _pending.TryRemove(requestId, out _);
-            pending.DisposeRegistrations();
-            timeoutCts.Dispose();
             throw;
         }
-
-        try
+        catch
         {
-            var result = await tcs.Task.WaitAsync(ct).ConfigureAwait(false);
-            return (TResponse)result;
-        }
-        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
-        {
-            throw new RequestTimeoutException(requestId);
+            _pending.TryRemove(requestId, out _);
+            throw;
         }
         finally
         {
             pending.DisposeRegistrations();
-            timeoutCts.Dispose();
+            timeoutCts?.Dispose();
         }
     }
 
@@ -149,6 +144,8 @@ public sealed class RequestClientFactory : IAsyncDisposable
         await _initLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+
             if (_initializationTask is not null)
             {
                 await _initializationTask.ConfigureAwait(false);
@@ -180,23 +177,25 @@ public sealed class RequestClientFactory : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(
+            _logger.LogWarning(
                 ex,
-                "ITopologyProvisioner failed to provision inbox '{Inbox}'; the transport may auto-create entities.",
+                "ITopologyProvisioner failed to provision inbox '{Inbox}'; the transport may auto-create entities or the requester may fail if auto-creation is disabled.",
                 _inboxTopic);
         }
     }
 
-    private void EnsurePumpStarted()
+    private async Task EnsurePumpStartedAsync(CancellationToken ct)
     {
         if (_pumpTask is not null)
         {
             return;
         }
 
-        _pumpStartLock.Wait();
+        await _pumpStartLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+
             if (_pumpTask is not null)
             {
                 return;
@@ -228,21 +227,23 @@ public sealed class RequestClientFactory : IAsyncDisposable
             await foreach (var envelope in inboxConsumer.ConsumeAsync(ct).ConfigureAwait(false))
             {
                 var requestId = envelope.Headers.RequestId;
-                if (string.IsNullOrEmpty(requestId) || !_pending.TryRemove(requestId, out var pending))
+                if (string.IsNullOrEmpty(requestId) || !_pending.TryGetValue(requestId, out var pending))
                 {
                     await inboxConsumer.CommitAsync(envelope, ct).ConfigureAwait(false);
                     continue;
                 }
 
-                pending.DisposeRegistrations();
-
+                // The TCS arbitrates first-wins: a response that arrives while the timeout
+                // fires is never dropped. Only the caller that successfully completes the TCS
+                // removes the pending entry.
+                bool completed = false;
                 if (envelope.Headers.RequestFault)
                 {
                     var exceptionType = envelope.Headers.TryGetValue(RequestClientFaultHeaders.ExceptionTypeKey, out var et) ? et : null;
                     var message = envelope.Headers.TryGetValue(RequestClientFaultHeaders.ExceptionMessageKey, out var em)
                         ? em
                         : "The responder faulted while processing the request. Enable IncludeExceptionDetailsInDlq on the responder for details.";
-                    pending.Tcs.TrySetException(new RequestFaultException(requestId, exceptionType, message));
+                    completed = pending.Tcs.TrySetException(new RequestFaultException(requestId, exceptionType, message));
                 }
                 else
                 {
@@ -251,20 +252,26 @@ public sealed class RequestClientFactory : IAsyncDisposable
                         var response = JsonSerializer.Deserialize(envelope.Payload, pending.ResponseType);
                         if (response is null)
                         {
-                            pending.Tcs.TrySetException(new InvalidOperationException(
+                            completed = pending.Tcs.TrySetException(new InvalidOperationException(
                                 $"Response for request '{requestId}' deserialized to null."));
                         }
                         else
                         {
-                            pending.Tcs.TrySetResult(response);
+                            completed = pending.Tcs.TrySetResult(response);
                         }
                     }
                     catch (Exception ex)
                     {
-                        pending.Tcs.TrySetException(ex);
+                        completed = pending.Tcs.TrySetException(ex);
                     }
                 }
 
+                if (completed)
+                {
+                    _pending.TryRemove(requestId, out _);
+                }
+
+                pending.DisposeRegistrations();
                 await inboxConsumer.CommitAsync(envelope, ct).ConfigureAwait(false);
             }
         }
@@ -301,6 +308,16 @@ public sealed class RequestClientFactory : IAsyncDisposable
         }
 
         _pumpCts?.Dispose();
+
+        foreach (var kvp in _pending.ToArray())
+        {
+            if (_pending.TryRemove(kvp.Key, out var pending))
+            {
+                pending.Tcs.TrySetException(new ObjectDisposedException(nameof(RequestClientFactory)));
+                pending.DisposeRegistrations();
+            }
+        }
+
         _initLock.Dispose();
         _pumpStartLock.Dispose();
 

@@ -163,6 +163,8 @@ public static class TopicRegistryExtensions
         string topic,
         Func<TRequest, MessageHeaders, EnvelopeMetadata, CancellationToken, Task<TResponse>> handler,
         RetryPolicy? retryPolicy = null)
+        where TRequest : class
+        where TResponse : class
     {
         return AddTopicRegistration(
             registry,
@@ -193,6 +195,8 @@ public static class TopicRegistryExtensions
         string consumerGroup,
         Func<TRequest, MessageHeaders, EnvelopeMetadata, CancellationToken, Task<TResponse>> handler,
         RetryPolicy? retryPolicy = null)
+        where TRequest : class
+        where TResponse : class
     {
         return AddTopicRegistration(
             registry,

@@ -165,6 +165,13 @@ public sealed class MessageHeaders : IDictionary<string, string>
         set => this[DlqAttemptsKey] = value.ToString();
     }
 
+    /// <summary>Correlation identifier propagated across related messages.</summary>
+    public string? CorrelationId
+    {
+        get => TryGetValue(CorrelationIdKey, out var v) ? v : null;
+        set { if (value is not null) this[CorrelationIdKey] = value; else Remove(CorrelationIdKey); }
+    }
+
     /// <summary>Unique identifier of the request this message is correlated with.</summary>
     public string? RequestId
     {

@@ -187,6 +187,8 @@ public static class TalariaEndpointExtensions
         string topic,
         Func<TRequest, MessageHeaders, EnvelopeMetadata, CancellationToken, Task<TResponse>> handler,
         RetryPolicy? retryPolicy = null)
+        where TRequest : class
+        where TResponse : class
     {
         var registry = services.GetRequiredService<TopicRegistry>();
         registry.MapRequest(topic, handler, retryPolicy);

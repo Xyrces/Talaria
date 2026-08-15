@@ -119,6 +119,22 @@ public sealed class TopicRegistry
                     "Call MapTopic/MapRequest before the host runs (e.g. during startup, before app.Run()).");
             }
 
+            // Plain multi-registration per topic is existing fan-out behavior and is preserved.
+            // Request/response registrations, however, own the consumer loop for the topic and
+            // cannot coexist with any other registration for the same topic.
+            var isRequestRegistration = registration.RequestHandler is not null || registration.RequestConsumerType is not null;
+            var hasExistingForTopic = _registrations.Any(r => r.TopicName == registration.TopicName);
+            var hasExistingRequestForTopic = _registrations.Any(r =>
+                r.TopicName == registration.TopicName &&
+                (r.RequestHandler is not null || r.RequestConsumerType is not null));
+
+            if (hasExistingForTopic && (isRequestRegistration || hasExistingRequestForTopic))
+            {
+                throw new InvalidOperationException(
+                    $"Topic '{registration.TopicName}' already has a registration. " +
+                    "A topic cannot have both plain and request/response registrations, or multiple request/response registrations.");
+            }
+
             _registrations.Add(registration);
         }
     }

@@ -106,6 +106,7 @@ public class RequestResponseRegistrationTests
         Assert.Contains("plain class consumer type", ex.Message);
     }
 
+
     [Fact]
     public void MapRequest_PostSeal_ThrowsInvalidOperationException()
     {
@@ -116,5 +117,52 @@ public class RequestResponseRegistrationTests
             registry.MapRequest<Ping, Pong>("late.topic", async (msg, _, _, ct) => new Pong()));
 
         Assert.Contains("MapTopic/MapRequest", ex.Message);
+    }
+
+    [Fact]
+    public void MapRequest_Over_Existing_MapRequest_On_Same_Topic_Throws()
+    {
+        var registry = new TopicRegistry();
+        registry.MapRequest<Ping, Pong>("ping.topic", async (msg, _, _, ct) => new Pong { Echo = msg.Value });
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            registry.MapRequest<Ping, Pong>("ping.topic", async (msg, _, _, ct) => new Pong { Echo = msg.Value }));
+
+        Assert.Contains("ping.topic", ex.Message);
+        Assert.Contains("cannot have both plain and request/response registrations", ex.Message);
+    }
+
+    [Fact]
+    public void MapTopic_Over_Existing_MapRequest_On_Same_Topic_Throws()
+    {
+        var registry = new TopicRegistry();
+        registry.MapRequest<Ping, Pong>("ping.topic", async (msg, _, _, ct) => new Pong { Echo = msg.Value });
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            registry.MapTopic<Ping>("ping.topic", (msg, ct) => Task.CompletedTask));
+
+        Assert.Contains("ping.topic", ex.Message);
+    }
+
+    [Fact]
+    public void MapRequest_Over_Existing_MapTopic_On_Same_Topic_Throws()
+    {
+        var registry = new TopicRegistry();
+        registry.MapTopic<Ping>("ping.topic", (msg, ct) => Task.CompletedTask);
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            registry.MapRequest<Ping, Pong>("ping.topic", async (msg, _, _, ct) => new Pong { Echo = msg.Value }));
+
+        Assert.Contains("ping.topic", ex.Message);
+    }
+
+    [Fact]
+    public void MapTopic_Twice_On_Same_Topic_Is_Allowed_For_FanOut()
+    {
+        var registry = new TopicRegistry();
+        registry.MapTopic<Ping>("ping.topic", (msg, ct) => Task.CompletedTask);
+        registry.MapTopic<Ping>("ping.topic", (msg, ct) => Task.CompletedTask);
+
+        Assert.Equal(2, registry.Registrations.Count);
     }
 }

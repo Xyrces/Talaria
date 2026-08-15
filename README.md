@@ -224,11 +224,13 @@ public class CheckoutService
 }
 ```
 
-Each `IRequestClient<TRequest>` is created from a shared `RequestClientFactory` singleton. The factory owns a dedicated reply topic and consumer group, so multiple factories in the same process have isolated inboxes. `TalariaOptions.DefaultRequestTimeout` (default 30 seconds) is applied when the caller does not supply a cancellation token.
+Each `IRequestClient<TRequest>` is created from a shared `RequestClientFactory` singleton. The factory owns a dedicated reply topic and consumer group, so multiple factories in the same process have isolated inboxes. `TalariaOptions.DefaultRequestTimeout` (default 30 seconds) always applies; the caller's cancellation token can only shorten the wait.
 
-`GetResponseAsync<TResponse>` throws `RequestTimeoutException` when no response arrives in time, and `RequestFaultException` when the responder publishes a fault (e.g. after retries are exhausted). The exception includes the responder exception type and, when `TalariaOptions.IncludeExceptionDetailsInDlq` is enabled on the responder side, the original message.
+`GetResponseAsync<TResponse>` throws `RequestTimeoutException` when no response arrives in time, and `RequestFaultException` when the responder publishes a fault (e.g. after retries are exhausted). The exception includes the responder exception type and, when `TalariaOptions.IncludeExceptionDetailsInDlq` is enabled on the responder side, the original exception message.
 
-Response delivery is at-least-once: the responder may publish a duplicate response if its offset commit fails after publishing, and the requester completes the caller on the first matching response it receives, ignoring duplicates.
+Response delivery is at-least-once: the responder may publish a duplicate response if its offset commit fails after publishing, and the requester completes the caller on the first matching response it receives, ignoring duplicates. Fault publication is best-effort: if the responder cannot publish the fault marker itself (for example, because the reply topic does not exist), the requester observes a `RequestTimeoutException` rather than a `RequestFaultException`.
+
+If the response publish fails after the handler succeeds, the failure flows through the same retry/fault path as a handler failure. This means the handler may run more than once when retries are enabled and the broker rejects the response publication.
 
 Transport caveats:
 

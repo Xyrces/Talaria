@@ -10,7 +10,7 @@ internal sealed class PendingRequest
     public PendingRequest(
         TaskCompletionSource<object> tcs,
         Type responseType,
-        CancellationTokenRegistration timeoutRegistration)
+        CancellationTokenRegistration timeoutRegistration = default)
     {
         Tcs = tcs;
         ResponseType = responseType;
@@ -21,7 +21,7 @@ internal sealed class PendingRequest
 
     public Type ResponseType { get; }
 
-    public CancellationTokenRegistration TimeoutRegistration { get; }
+    public CancellationTokenRegistration TimeoutRegistration { get; set; }
 
     public void DisposeRegistrations()
     {
