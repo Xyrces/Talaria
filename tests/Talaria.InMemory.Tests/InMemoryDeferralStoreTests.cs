@@ -8,8 +8,8 @@ public class InMemoryDeferralStoreTests
 {
     private static readonly TimeSpan Lease = TimeSpan.FromSeconds(30);
 
-    private static DeferredMessage Message(DateTimeOffset dueAt, string topic = "orders") =>
-        new(Guid.NewGuid(), topic, typeof(object).AssemblyQualifiedName!, "{}",
+    private static DeferredMessage Message(DateTimeOffset dueAt, string topic = "orders", string? partitionKey = null) =>
+        new(Guid.NewGuid(), topic, typeof(object).AssemblyQualifiedName!, "{}", partitionKey,
             new MessageHeaders(), "corr-1", Attempt: 1, dueAt);
 
     [Fact]
@@ -125,7 +125,7 @@ public class InMemoryDeferralStoreTests
         var headers = new MessageHeaders { MessageId = "msg-1:defer:2", [MessageHeaders.DeferralAttemptKey] = "2" };
         var dueAt = DateTimeOffset.UtcNow.AddSeconds(-1);
         var message = new DeferredMessage(
-            Guid.NewGuid(), "orders", typeof(object).AssemblyQualifiedName!, "{\"x\":1}",
+            Guid.NewGuid(), "orders", typeof(object).AssemblyQualifiedName!, "{\"x\":1}", "part-9",
             headers, "corr-9", Attempt: 2, dueAt);
 
         await store.EnqueueAsync(message);
@@ -137,5 +137,30 @@ public class InMemoryDeferralStoreTests
         Assert.Equal("corr-9", acquired.Message.CorrelationId);
         Assert.Equal(2, acquired.Message.Attempt);
         Assert.Equal("msg-1:defer:2", acquired.Message.Headers.MessageId);
+        Assert.Equal("part-9", acquired.Message.PartitionKey);
+    }
+
+    [Fact]
+    public async Task EnqueueAsync_PartitionKeyNull_RoundTripsAsNull()
+    {
+        var store = new InMemoryDeferralStore();
+        var message = Message(DateTimeOffset.UtcNow.AddSeconds(-1));
+
+        await store.EnqueueAsync(message);
+
+        var acquired = Assert.Single(await store.AcquireDueAsync(DateTimeOffset.UtcNow, Lease, maxBatch: 10));
+        Assert.Null(acquired.Message.PartitionKey);
+    }
+
+    [Fact]
+    public async Task EnqueueAsync_PartitionKeySet_RoundTripsWithSameKey()
+    {
+        var store = new InMemoryDeferralStore();
+        var message = Message(DateTimeOffset.UtcNow.AddSeconds(-1), partitionKey: "order-42");
+
+        await store.EnqueueAsync(message);
+
+        var acquired = Assert.Single(await store.AcquireDueAsync(DateTimeOffset.UtcNow, Lease, maxBatch: 10));
+        Assert.Equal("order-42", acquired.Message.PartitionKey);
     }
 }

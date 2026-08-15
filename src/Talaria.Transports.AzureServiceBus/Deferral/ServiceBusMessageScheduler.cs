@@ -30,10 +30,11 @@ internal sealed class ServiceBusMessageScheduler : IServiceBusMessageScheduler, 
         BinaryData body,
         IReadOnlyDictionary<string, object> applicationProperties,
         DateTimeOffset scheduledEnqueueTime,
+        string? partitionKey,
         CancellationToken ct = default)
     {
         var sender = GetOrCreateSender(topic);
-        var message = BuildMessage(body, applicationProperties, scheduledEnqueueTime);
+        var message = BuildMessage(body, applicationProperties, scheduledEnqueueTime, partitionKey);
         return await sender.ScheduleMessageAsync(message, scheduledEnqueueTime, ct).ConfigureAwait(false);
     }
 
@@ -60,7 +61,8 @@ internal sealed class ServiceBusMessageScheduler : IServiceBusMessageScheduler, 
     private static ServiceBusMessage BuildMessage(
         BinaryData body,
         IReadOnlyDictionary<string, object> applicationProperties,
-        DateTimeOffset scheduledEnqueueTime)
+        DateTimeOffset scheduledEnqueueTime,
+        string? partitionKey)
     {
         var message = new ServiceBusMessage(body)
         {
@@ -70,6 +72,19 @@ internal sealed class ServiceBusMessageScheduler : IServiceBusMessageScheduler, 
         if (applicationProperties is null)
         {
             return message;
+        }
+
+        // ASB's closest analogue to a Kafka partition key is SessionId. Setting it pins
+        // the scheduled message to the same session-aware receiver as the original delivery.
+        if (!string.IsNullOrEmpty(partitionKey))
+        {
+            message.SessionId = partitionKey;
+        }
+        else if (applicationProperties.TryGetValue(Talaria.Core.Abstractions.MessageHeaders.CorrelationIdKey, out var sessionCid)
+            && sessionCid is string sessionCorrelationId
+            && !string.IsNullOrEmpty(sessionCorrelationId))
+        {
+            message.SessionId = sessionCorrelationId;
         }
 
         var target = message.ApplicationProperties;

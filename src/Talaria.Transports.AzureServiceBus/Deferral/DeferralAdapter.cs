@@ -138,7 +138,7 @@ public sealed class DeferralAdapter : IDeferralStore
         var body = BinaryData.FromString(message.PayloadJson ?? string.Empty);
 
         await _scheduler
-            .ScheduleAsync(message.Topic, body, properties, message.DueAt, ct)
+            .ScheduleAsync(message.Topic, body, properties, message.DueAt, message.PartitionKey, ct)
             .ConfigureAwait(false);
     }
 }

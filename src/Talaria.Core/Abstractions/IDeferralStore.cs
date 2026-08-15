@@ -9,6 +9,7 @@ namespace Talaria.Core.Abstractions;
 /// <param name="Topic">The topic the message must be republished to.</param>
 /// <param name="MessageType">Assembly-qualified CLR type name of the payload, used to resolve the deserializer and producer.</param>
 /// <param name="PayloadJson">The message payload serialized as JSON.</param>
+/// <param name="PartitionKey">Optional partition key used to preserve routing affinity when the message is republished.</param>
 /// <param name="Headers">Headers to republish with the message (deferral attempt, minted message id, trace context).</param>
 /// <param name="CorrelationId">The saga correlation id, if one was resolved.</param>
 /// <param name="Attempt">The deferral attempt number (1-based).</param>
@@ -19,6 +20,7 @@ public sealed record DeferredMessage(
     string Topic,
     string MessageType,
     string PayloadJson,
+    string? PartitionKey,
     MessageHeaders Headers,
     string? CorrelationId,
     int Attempt,

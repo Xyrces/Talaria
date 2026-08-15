@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Azure;
+using Azure.Messaging.ServiceBus;
 using Talaria.Core.Abstractions;
 using Talaria.Transports.AzureServiceBus.Deferral;
 using Talaria.Transports.InMemory;
@@ -40,12 +42,13 @@ public class DeferralAdapterTests
         return (adapter, scheduler, longTerm, clock);
     }
 
-    private static DeferredMessage MakeMessage(DateTimeOffset dueAt, int payloadBytes = 16, string topic = "topic-a")
+    private static DeferredMessage MakeMessage(DateTimeOffset dueAt, int payloadBytes = 16, string topic = "topic-a", string? partitionKey = null)
         => new(
             Id: Guid.NewGuid(),
             Topic: topic,
             MessageType: typeof(object).AssemblyQualifiedName!,
             PayloadJson: new string('x', payloadBytes),
+            PartitionKey: partitionKey,
             Headers: new MessageHeaders { MessageId = "msg-1" },
             CorrelationId: "corr-1",
             Attempt: 1,
@@ -147,6 +150,54 @@ public class DeferralAdapterTests
         // Stale token must be rejected; the adapter is just a pass-through, the store
         // retains its fencing-token contract.
         Assert.False(await adapter.CompleteAsync(leased.Lease));
+    }
+
+    [Fact]
+    public async Task EnqueueAsync_WithPartitionKey_PassesPartitionKeyToScheduler()
+    {
+        var (adapter, scheduler, longTerm, clock) = Build();
+        var now = new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.Zero);
+        clock.SetUtcNow(now);
+
+        var message = MakeMessage(now.AddMinutes(2), partitionKey: "pk-1");
+        await adapter.EnqueueAsync(message);
+
+        var call = Assert.Single(scheduler.Calls);
+        Assert.Equal("pk-1", call.PartitionKey);
+        Assert.Equal(0, longTerm.Count);
+    }
+
+    [Fact]
+    public async Task ServiceBusMessageScheduler_SetsSessionIdFromPartitionKey()
+    {
+        var sender = new RecordingSender();
+        await using var client = new FakeServiceBusClient(sender);
+        var scheduler = new ServiceBusMessageScheduler(client);
+        var dueAt = new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.Zero);
+        var properties = new Dictionary<string, object>
+        {
+            [MessageHeaders.MessageTypeKey] = typeof(object).FullName!,
+        };
+
+        await scheduler.ScheduleAsync("topic-a", BinaryData.FromString("{}"), properties, dueAt, partitionKey: "pk-1");
+
+        var scheduled = Assert.Single(sender.Scheduled);
+        Assert.Equal("pk-1", scheduled.Message.SessionId);
+        Assert.Equal(dueAt, scheduled.ScheduledEnqueueTime);
+    }
+
+    private sealed class FakeServiceBusClient : ServiceBusClient
+    {
+        private readonly ServiceBusSender _sender;
+
+        public FakeServiceBusClient(ServiceBusSender sender)
+        {
+            _sender = sender;
+        }
+
+        public override ServiceBusSender CreateSender(string queueOrTopicName) => _sender;
+
+        public override ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }
 

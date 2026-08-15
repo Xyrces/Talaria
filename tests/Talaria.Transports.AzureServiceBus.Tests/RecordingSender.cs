@@ -18,10 +18,20 @@ namespace Talaria.Transports.AzureServiceBus.Tests;
 internal sealed class RecordingSender : ServiceBusSender
 {
     public List<ServiceBusMessage> Sent { get; } = new();
+    public List<(ServiceBusMessage Message, DateTimeOffset ScheduledEnqueueTime)> Scheduled { get; } = new();
 
     public override Task SendMessageAsync(ServiceBusMessage message, CancellationToken cancellationToken = default)
     {
         Sent.Add(message);
         return Task.CompletedTask;
+    }
+
+    public override Task<long> ScheduleMessageAsync(
+        ServiceBusMessage message,
+        DateTimeOffset scheduledEnqueueTime,
+        CancellationToken cancellationToken = default)
+    {
+        Scheduled.Add((message, scheduledEnqueueTime));
+        return Task.FromResult((long)Scheduled.Count);
     }
 }

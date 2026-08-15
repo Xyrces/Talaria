@@ -97,10 +97,10 @@ public class DeferralStoreContractTests
 
         var due = new DeferredMessage(
             Guid.NewGuid(), "topic-a", typeof(StepMessage).AssemblyQualifiedName!,
-            "{}", new MessageHeaders(), "corr-1", 1, DateTimeOffset.UtcNow.AddMilliseconds(-1));
+            "{}", null, new MessageHeaders(), "corr-1", 1, DateTimeOffset.UtcNow.AddMilliseconds(-1));
         var notDue = new DeferredMessage(
             Guid.NewGuid(), "topic-a", typeof(StepMessage).AssemblyQualifiedName!,
-            "{}", new MessageHeaders(), "corr-2", 1, DateTimeOffset.UtcNow.AddHours(1));
+            "{}", null, new MessageHeaders(), "corr-2", 1, DateTimeOffset.UtcNow.AddHours(1));
 
         await store.EnqueueAsync(due);
         await store.EnqueueAsync(notDue);

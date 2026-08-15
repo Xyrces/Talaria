@@ -152,6 +152,7 @@ public sealed class RedisDeferralStore : IDeferralStore
             message.Topic,
             message.MessageType,
             message.PayloadJson,
+            message.PartitionKey,
             message.Headers.ToDictionary(kvp => kvp.Key, kvp => kvp.Value),
             message.CorrelationId,
             message.Attempt,
@@ -167,6 +168,7 @@ public sealed class RedisDeferralStore : IDeferralStore
             dto.Topic,
             dto.MessageType,
             dto.PayloadJson,
+            dto.PartitionKey,
             new MessageHeaders(dto.Headers),
             dto.CorrelationId,
             dto.Attempt,
@@ -174,11 +176,14 @@ public sealed class RedisDeferralStore : IDeferralStore
     }
 
     // Flat DTO so the wire format stays stable even if MessageHeaders internals change.
+    // Entries written before the PartitionKey field was introduced deserialize with a null
+    // partition key, so old data is forward-compatible.
     private sealed record DeferredMessageDto(
         Guid Id,
         string Topic,
         string MessageType,
         string PayloadJson,
+        string? PartitionKey,
         Dictionary<string, string> Headers,
         string? CorrelationId,
         int Attempt,
