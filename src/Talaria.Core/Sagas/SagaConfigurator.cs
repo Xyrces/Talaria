@@ -97,10 +97,12 @@ public class SagaConfigurator<TState> where TState : class, new()
     /// <param name="handler">Async handler that receives the current state and returns the next state.</param>
     /// <param name="correlateBy">Optional explicit correlation resolver.</param>
     /// <returns>The same configurator, for chaining.</returns>
-    /// <exception cref="InvalidOperationException">
-    /// Thrown by the engine at runtime when the state for the resolved correlation ID
-    /// is missing (no prior starter was processed).
-    /// </exception>
+    /// <remarks>
+    /// When the saga state for the resolved correlation ID is missing (no prior starter was
+    /// processed), the engine defers the message if an <see cref="IDeferralStore"/> is registered,
+    /// or routes it to the DLQ with reason <c>deferral_unavailable</c> if no deferral store is
+    /// registered.
+    /// </remarks>
     public SagaConfigurator<TState> On<TMessage>(
         string topic,
         Func<TState, TMessage, ISagaContext<TState>, Task<SagaResult<TState>>> handler,

@@ -61,7 +61,7 @@ public sealed record NativeDeadLetterEnvelope(
 /// Transports without a native DLQ simply never invoke the registered
 /// handler — the engine's existing <c>NackAsync</c>-based routing covers
 /// those paths. The interface exists to bridge transports that have a
-/// first-class DLQ concept that the host should observe and react to
+/// native DLQ concept that the host should observe and react to
 /// (alerting, replay tools, metrics counters). Implementations are expected
 /// to be quick — they run on the consumer's hot path between dead-letter
 /// detection and the transport moving on to the next message. Long-running

@@ -14,8 +14,8 @@ namespace Talaria.Core.Abstractions;
 public sealed record IdempotencyLock(string MessageId, string ConsumerQueue, string Token);
 
 /// <summary>
-/// A centralized abstraction for enforcing exactly-once delivery across a distributed cluster.
-/// Tracks physical message IDs globally to prevent redundant concurrent processing and duplicate replays.
+/// Suppresses duplicate message processing across consumer restarts and replicas by tracking
+/// message IDs per consumer queue.
 /// </summary>
 /// <remarks>
 /// TalariaListener acquires an <see cref="IdempotencyLock"/> before processing a
@@ -30,7 +30,6 @@ public interface IIdempotencyStore
     /// Attempts to mark the message ID as processed exclusively.
     /// If it returns a lock, no other replica has claimed or processed this message;
     /// the caller owns the lock until it releases it, completes it, or it expires.
-    /// In an event-driven setup natively backing Exactly-Once Delivery, this replaces complex local locking.
     /// </summary>
     /// <param name="messageId">The physical message ID to dedupe on.</param>
     /// <param name="consumerQueue">The consumer group (or topic+group) scoping the lock.</param>
@@ -44,7 +43,7 @@ public interface IIdempotencyStore
     Task<IdempotencyLock?> TryAcquireLockAsync(string messageId, string consumerQueue, TimeSpan expiration, CancellationToken ct = default);
 
     /// <summary>
-    /// Formally seals the message's successful execution, converting the transient lock into a long-lasting flag.
+    /// Marks the message as successfully processed, replacing the transient lock with a long-lived completion marker.
     /// Subsequent checks against this message ID will bounce for the completion TTL.
     /// </summary>
     /// <param name="lock">The lock returned by a prior successful <see cref="TryAcquireLockAsync"/>.</param>

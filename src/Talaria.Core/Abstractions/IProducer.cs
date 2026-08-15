@@ -20,8 +20,8 @@ public interface IProducer<T> : IAsyncDisposable
     /// <param name="message">The payload to serialize and publish.</param>
     /// <param name="headers">
     /// Optional headers (W3C Trace Context, OTel Baggage, Talaria metadata). When null, an
-    /// empty <see cref="MessageHeaders"/> is used; Talaria will not synthesize a MessageId
-    /// for the caller.
+    /// empty <see cref="MessageHeaders"/> is used; Talaria synthesizes a MessageId when one
+    /// is not supplied.
     /// </param>
     /// <param name="partitionKey">
     /// Optional partition key. Transports with keyed partitioning route to a deterministic

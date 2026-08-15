@@ -9,7 +9,7 @@ namespace Talaria.Core.Abstractions;
 /// <remarks>
 /// Implementations are registered as singletons in the DI container; the container
 /// owns their lifecycle and disposes them on host shutdown. Talaria ships
-/// in-memory and Kafka transports; the abstraction is also the contract test
+/// in-memory, Kafka, and Azure Service Bus transports; the abstraction is also the contract test
 /// surface for any custom provider.
 /// </remarks>
 /// <since>1.0.0</since>

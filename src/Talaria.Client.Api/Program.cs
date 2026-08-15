@@ -106,7 +106,7 @@ app.Services.MapTopic<SendVerificationEmailCommand>(emailCommandsTopic, async (m
     logger.LogInformation("Verification email for account {AccountId} sent.", msg.AccountId);
 });
 
-// Diagnostics endpoint used by the AppHost integration tests to assert exactly-once side effects.
+// Diagnostics endpoint used by the AppHost integration tests to assert idempotent duplicate suppression of side effects.
 // Includes the replica id so multi-replica tests can sum counts across instances.
 app.MapGet("/api/diagnostics/count/{key}", (string key, [FromServices] Talaria.Client.Api.ProcessingTracker tracker) =>
     Results.Ok(new { Key = key, Count = tracker.Get(key), Instance = Environment.MachineName }));

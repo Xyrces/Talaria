@@ -6,7 +6,7 @@ namespace Talaria.Client.Api;
 
 /// <summary>
 /// Demo/diagnostics counter for side effects (saga handler invocations, emails sent).
-/// Used by the AppHost integration tests to assert exactly-once execution.
+/// Used by the AppHost integration tests to assert idempotent duplicate suppression.
 /// </summary>
 public sealed class ProcessingTracker
 {

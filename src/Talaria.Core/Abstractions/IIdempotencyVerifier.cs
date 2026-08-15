@@ -34,29 +34,24 @@ public enum IdempotencyVerdict
     /// <summary>
     /// The verifier knows this MessageId has already been processed on this
     /// consumer group. The host must commit the offset without invoking the
-    /// handler — exactly-once delivery is preserved end-to-end.
+    /// handler; the duplicate is suppressed without invoking the handler.
     /// </summary>
     Duplicate = 2,
 }
 
 /// <summary>
-/// Transport-native duplicate detection. Lets a transport answer "have I seen
-/// this MessageId on this consumer group before?" using its own bookkeeping
-/// (Azure Service Bus native duplicate detection, Kafka transactional
-/// offset metadata, etc.) — without round-tripping to an external store.
+/// Reserved extension point for transport-native duplicate detection. Lets a
+/// transport answer "have I seen this MessageId on this consumer group before?"
+/// using its own bookkeeping (Azure Service Bus native duplicate detection, Kafka
+/// transactional offset metadata, etc.) without round-tripping to an external store.
 /// </summary>
 /// <remarks>
-/// The pipeline layer in <c>Talaria.Core.Hosting</c> is expected to call
-/// <see cref="VerifyAsync"/> on every inbound message before invoking the
-/// handler. A <see cref="IdempotencyVerdict.Duplicate"/> result short-circuits
-/// the handler dispatch and commits the message offset, mirroring the
-/// behavior already produced when the external <see cref="IIdempotencyStore"/>
-/// reports a held lock. Implementations that cannot inspect their transport's
-/// native duplicate-detection metadata should return <see cref="IdempotencyVerdict.Unverifiable"/>
-/// so the host falls back to the external store. The verifier is independent
-/// of <see cref="IIdempotencyStore"/>: the two deduplicate on the same
-/// MessageId, but the verifier is cheap and transport-local while the store
-/// is durable and cluster-wide.
+/// <see cref="IIdempotencyVerifier"/> is a reserved extension point for future transport-native
+/// deduplication. It is not currently wired into the default consumer pipeline and no built-in
+/// transport implements it. The engine deserializes and invokes handlers for messages that pass
+/// the external <see cref="IIdempotencyStore"/> gate; duplicate suppression is performed by that
+/// store. Implementations that cannot inspect their transport's native duplicate-detection
+/// metadata should return <see cref="IdempotencyVerdict.Unverifiable"/>.
 /// </remarks>
 /// <since>1.0.0</since>
 public interface IIdempotencyVerifier
@@ -64,7 +59,7 @@ public interface IIdempotencyVerifier
     /// <summary>
     /// Asks the transport whether this MessageId has already been delivered on
     /// this consumer group. Implementations should be cheap (no I/O when
-    /// possible) — the verifier sits on the consumer hot path.
+    /// possible); the verifier sits on the consumer hot path.
     /// </summary>
     /// <typeparam name="T">The CLR payload type of the inbound envelope.</typeparam>
     /// <param name="envelope">The inbound message envelope to inspect.</param>

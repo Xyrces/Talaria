@@ -146,7 +146,7 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
     }
 
     /// <summary>
-    /// Begins a real Kafka transaction (exactly-once semantics). All produces obtained
+    /// Begins a real Kafka transaction (broker-side transactional produce/offset commit). All produces obtained
     /// from the session, plus the consumed message's offset when provided, commit atomically.
     /// </summary>
     public Task<ITransactionalSession> BeginTransactionAsync(
