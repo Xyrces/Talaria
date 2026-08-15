@@ -8,6 +8,7 @@ using Microsoft.Extensions.Options;
 using Talaria.Core;
 using Talaria.Core.Abstractions;
 using Talaria.Core.Hosting;
+using Talaria.Core.Registration;
 using Talaria.Core.Sagas;
 using Talaria.Transports.InMemory;
 using Xunit;
@@ -50,15 +51,21 @@ public class SagaEngineBehaviorTests
             .AddSingleton<IDeferralStore>(deferralStore)
             .BuildServiceProvider();
 
-        var hostedService = new SagaHostedService(registry, services, Options.Create(new TalariaOptions
-        {
-            ApplicationName = "test-app",
-            DeferralBackoff = TimeSpan.FromMilliseconds(50),
-            MaxDeferralAttempts = 5
-        }), NullLogger<SagaHostedService>.Instance);
+        var listener = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            new TalariaOptions
+            {
+                ApplicationName = "test-app",
+                DeferralBackoff = TimeSpan.FromMilliseconds(50),
+                MaxDeferralAttempts = 5
+            },
+            NullLogger<TalariaListener>.Instance,
+            services);
 
         using var cts = new CancellationTokenSource();
-        await hostedService.StartAsync(cts.Token);
+        await listener.StartAsync(cts.Token);
 
         // Produce the STEP first — no state exists yet, so it must be deferred.
         var stepProducer = await transport.CreateProducerAsync<OooStep>("s1-step", new ProducerOptions());
@@ -91,7 +98,7 @@ public class SagaEngineBehaviorTests
         Assert.Empty(await transport.ReadAllFromTopicAsync<OooStep>("s1-step.dlq"));
         Assert.Empty(await transport.ReadAllFromTopicAsync<OooStart>("s1-start.dlq"));
 
-        await hostedService.StopAsync(cts.Token);
+        await listener.StopAsync(cts.Token);
     }
 
     // ---- Test 2: two steps on the same topic (fan-out via message-type header) ----
@@ -134,15 +141,21 @@ public class SagaEngineBehaviorTests
             .AddSingleton(typeof(IStateStore<>), typeof(InMemoryStateStore<>))
             .BuildServiceProvider();
 
-        var hostedService = new SagaHostedService(registry, services, Options.Create(new TalariaOptions
-        {
-            ApplicationName = "test-app",
-            DeferralBackoff = TimeSpan.FromMilliseconds(50),
-            MaxDeferralAttempts = 5
-        }), NullLogger<SagaHostedService>.Instance);
+        var listener = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            new TalariaOptions
+            {
+                ApplicationName = "test-app",
+                DeferralBackoff = TimeSpan.FromMilliseconds(50),
+                MaxDeferralAttempts = 5
+            },
+            NullLogger<TalariaListener>.Instance,
+            services);
 
         using var cts = new CancellationTokenSource();
-        await hostedService.StartAsync(cts.Token);
+        await listener.StartAsync(cts.Token);
 
         // Create the saga state first — without it the non-starter steps would defer
         // (and, with no IDeferralStore registered, dead-letter).
@@ -165,7 +178,7 @@ public class SagaEngineBehaviorTests
 
         Assert.Empty(await transport.ReadAllFromTopicAsync<FanMsgA>("s2-shared.dlq"));
 
-        await hostedService.StopAsync(cts.Token);
+        await listener.StopAsync(cts.Token);
     }
 
     // ---- Test 3: starter replay skip ----
@@ -195,15 +208,21 @@ public class SagaEngineBehaviorTests
             .AddSingleton(typeof(IStateStore<>), typeof(InMemoryStateStore<>))
             .BuildServiceProvider();
 
-        var hostedService = new SagaHostedService(registry, services, Options.Create(new TalariaOptions
-        {
-            ApplicationName = "test-app",
-            DeferralBackoff = TimeSpan.FromMilliseconds(50),
-            MaxDeferralAttempts = 5
-        }), NullLogger<SagaHostedService>.Instance);
+        var listener = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            new TalariaOptions
+            {
+                ApplicationName = "test-app",
+                DeferralBackoff = TimeSpan.FromMilliseconds(50),
+                MaxDeferralAttempts = 5
+            },
+            NullLogger<TalariaListener>.Instance,
+            services);
 
         using var cts = new CancellationTokenSource();
-        await hostedService.StartAsync(cts.Token);
+        await listener.StartAsync(cts.Token);
 
         // Same correlation, different MessageIds — the second is a replay, not a duplicate.
         var producer = await transport.CreateProducerAsync<ReplayStart>("s3-start", new ProducerOptions());
@@ -224,7 +243,7 @@ public class SagaEngineBehaviorTests
         Assert.True(stable, "The replayed starter was not skipped cleanly (handler re-ran or DLQ'd).");
         Assert.Equal(1, Volatile.Read(ref starterRuns));
 
-        await hostedService.StopAsync(cts.Token);
+        await listener.StopAsync(cts.Token);
     }
 
     // ---- Test 4: dispatch validation (no DispatchTo mapping) ----
@@ -261,15 +280,21 @@ public class SagaEngineBehaviorTests
             .AddSingleton(typeof(IStateStore<>), typeof(InMemoryStateStore<>))
             .BuildServiceProvider();
 
-        var hostedService = new SagaHostedService(registry, services, Options.Create(new TalariaOptions
-        {
-            ApplicationName = "test-app",
-            DeferralBackoff = TimeSpan.FromMilliseconds(50),
-            MaxDeferralAttempts = 5
-        }), NullLogger<SagaHostedService>.Instance);
+        var listener = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            new TalariaOptions
+            {
+                ApplicationName = "test-app",
+                DeferralBackoff = TimeSpan.FromMilliseconds(50),
+                MaxDeferralAttempts = 5
+            },
+            NullLogger<TalariaListener>.Instance,
+            services);
 
         using var cts = new CancellationTokenSource();
-        await hostedService.StartAsync(cts.Token);
+        await listener.StartAsync(cts.Token);
 
         var producer = await transport.CreateProducerAsync<DispatchStart>("s4-start", new ProducerOptions());
         await producer.ProduceAsync(new DispatchStart { Id = "c4" });
@@ -289,7 +314,7 @@ public class SagaEngineBehaviorTests
         Assert.Null(await store.GetAsync("c4"));
         Assert.Equal(1, Volatile.Read(ref handlerRuns));
 
-        await hostedService.StopAsync(cts.Token);
+        await listener.StopAsync(cts.Token);
     }
 
     // ---- Test 5: handler exception → lock released + DLQ ----
@@ -320,15 +345,21 @@ public class SagaEngineBehaviorTests
             .AddSingleton<IIdempotencyStore>(idempotencyStore)
             .BuildServiceProvider();
 
-        var hostedService = new SagaHostedService(registry, services, Options.Create(new TalariaOptions
-        {
-            ApplicationName = "test-app",
-            DeferralBackoff = TimeSpan.FromMilliseconds(50),
-            MaxDeferralAttempts = 5
-        }), NullLogger<SagaHostedService>.Instance);
+        var listener = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            new TalariaOptions
+            {
+                ApplicationName = "test-app",
+                DeferralBackoff = TimeSpan.FromMilliseconds(50),
+                MaxDeferralAttempts = 5
+            },
+            NullLogger<TalariaListener>.Instance,
+            services);
 
         using var cts = new CancellationTokenSource();
-        await hostedService.StartAsync(cts.Token);
+        await listener.StartAsync(cts.Token);
 
         // Establish saga state so the failing step is actually invoked (not deferred).
         var startProducer = await transport.CreateProducerAsync<FailStart>("s5-start", new ProducerOptions());
@@ -352,7 +383,7 @@ public class SagaEngineBehaviorTests
             "fail-msg-1", "test-app.s5-step", TimeSpan.FromMinutes(1));
         Assert.NotNull(reacquired);
 
-        await hostedService.StopAsync(cts.Token);
+        await listener.StopAsync(cts.Token);
     }
 
     // ---- Test 6: duplicate saga MessageId → exactly once ----
@@ -384,15 +415,21 @@ public class SagaEngineBehaviorTests
             .AddSingleton<IIdempotencyStore>(idempotencyStore)
             .BuildServiceProvider();
 
-        var hostedService = new SagaHostedService(registry, services, Options.Create(new TalariaOptions
-        {
-            ApplicationName = "test-app",
-            DeferralBackoff = TimeSpan.FromMilliseconds(50),
-            MaxDeferralAttempts = 5
-        }), NullLogger<SagaHostedService>.Instance);
+        var listener = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            new TalariaOptions
+            {
+                ApplicationName = "test-app",
+                DeferralBackoff = TimeSpan.FromMilliseconds(50),
+                MaxDeferralAttempts = 5
+            },
+            NullLogger<TalariaListener>.Instance,
+            services);
 
         using var cts = new CancellationTokenSource();
-        await hostedService.StartAsync(cts.Token);
+        await listener.StartAsync(cts.Token);
 
         // Same MessageId produced twice — the idempotency gate must skip the second.
         var producer = await transport.CreateProducerAsync<DupStart>("s6-start", new ProducerOptions());
@@ -412,7 +449,7 @@ public class SagaEngineBehaviorTests
         Assert.Equal(1, Volatile.Read(ref starterRuns));
         Assert.Empty(await transport.ReadAllFromTopicAsync<DupStart>("s6-start.dlq"));
 
-        await hostedService.StopAsync(cts.Token);
+        await listener.StopAsync(cts.Token);
     }
 
     // ---- Helpers (same poll-with-timeout pattern as SagaHostedServiceTests) ----

@@ -8,6 +8,7 @@ using Microsoft.Extensions.Options;
 using Talaria.Core;
 using Talaria.Core.Abstractions;
 using Talaria.Core.Hosting;
+using Talaria.Core.Registration;
 using Talaria.Core.Sagas;
 using Talaria.Transports.InMemory;
 using Xunit;
@@ -24,7 +25,7 @@ public class SagaHostedServiceTests
     {
         var transport = new InMemoryTransport();
         var registry = new SagaRegistry();
-        
+
         var config = new SagaConfigurator<TestState>(registry);
         // Force no internal correlation resolver, so it falls back to CorrelationResolver which fails
         config.On<NoCorrelationMessage>("test-topic", async (state, msg, ctx) => ctx.Transition(state));
@@ -37,10 +38,16 @@ public class SagaHostedServiceTests
 
         var opts = Options.Create(new TalariaOptions());
 
-        var hostedService = new SagaHostedService(registry, services, opts, NullLogger<SagaHostedService>.Instance);
-        
+        var listener = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            opts.Value,
+            NullLogger<TalariaListener>.Instance,
+            services);
+
         using var cts = new CancellationTokenSource();
-        await hostedService.StartAsync(cts.Token);
+        await listener.StartAsync(cts.Token);
 
         var producer = await transport.CreateProducerAsync<NoCorrelationMessage>("test-topic", new ProducerOptions());
         await producer.ProduceAsync(new NoCorrelationMessage());
@@ -51,7 +58,7 @@ public class SagaHostedServiceTests
         Assert.Single(dlq);
         Assert.Equal("missing_correlation_id", dlq[0].Headers.DlqReason);
 
-        await hostedService.StopAsync(cts.Token);
+        await listener.StopAsync(cts.Token);
     }
 
     [Fact]
@@ -59,7 +66,7 @@ public class SagaHostedServiceTests
     {
         var transport = new InMemoryTransport();
         var registry = new SagaRegistry();
-        
+
         var config = new SagaConfigurator<TestState>(registry);
         config.On<NoCorrelationMessage>("defer-topic", async (state, msg, ctx) => ctx.Transition(state), correlateBy: m => "static-id");
         config.Complete();
@@ -71,10 +78,16 @@ public class SagaHostedServiceTests
 
         var opts = Options.Create(new TalariaOptions { MaxDeferralAttempts = 1, DeferralBackoff = TimeSpan.FromMilliseconds(5) });
 
-        var hostedService = new SagaHostedService(registry, services, opts, NullLogger<SagaHostedService>.Instance);
-        
+        var listener = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            opts.Value,
+            NullLogger<TalariaListener>.Instance,
+            services);
+
         using var cts = new CancellationTokenSource();
-        await hostedService.StartAsync(cts.Token);
+        await listener.StartAsync(cts.Token);
 
         var producer = await transport.CreateProducerAsync<NoCorrelationMessage>("defer-topic", new ProducerOptions());
         var msg = new NoCorrelationMessage();
@@ -87,7 +100,7 @@ public class SagaHostedServiceTests
         Assert.Single(dlq);
         Assert.Equal("max_deferrals_exceeded", dlq[0].Headers.DlqReason);
 
-        await hostedService.StopAsync(cts.Token);
+        await listener.StopAsync(cts.Token);
     }
 
     private static async Task<List<MessageEnvelope<T>>> ReadUntilAsync<T>(

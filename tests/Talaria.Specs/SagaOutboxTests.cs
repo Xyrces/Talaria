@@ -8,6 +8,7 @@ using Microsoft.Extensions.Options;
 using Talaria.Core;
 using Talaria.Core.Abstractions;
 using Talaria.Core.Hosting;
+using Talaria.Core.Registration;
 using Talaria.Core.Sagas;
 using Talaria.Transports.InMemory;
 using Xunit;
@@ -48,12 +49,20 @@ public class SagaOutboxTests
         return (registry, services, transport, outbox);
     }
 
-    private static SagaHostedService StartHost(SagaRegistry registry, IServiceProvider services)
-        => new(registry, services, Options.Create(new TalariaOptions
-        {
-            ApplicationName = "test-app",
-            OutboxRelayInterval = TimeSpan.FromMilliseconds(50)
-        }), NullLogger<SagaHostedService>.Instance);
+    private static TalariaListener StartHost(SagaRegistry registry, IServiceProvider services, ITransport transport)
+    {
+        return new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            new TalariaOptions
+            {
+                ApplicationName = "test-app",
+                OutboxRelayInterval = TimeSpan.FromMilliseconds(50)
+            },
+            NullLogger<TalariaListener>.Instance,
+            services);
+    }
 
     [Fact]
     public async Task Dispatch_Is_Staged_In_Outbox_And_Published_By_Relay()
@@ -74,9 +83,9 @@ public class SagaOutboxTests
             config.DispatchTo<OrderBilled>("ob-billed");
         });
 
-        var hostedService = StartHost(registry, services);
+        var listener = StartHost(registry, services, transport);
         using var cts = new CancellationTokenSource();
-        await hostedService.StartAsync(cts.Token);
+        await listener.StartAsync(cts.Token);
 
         await (await transport.CreateProducerAsync<PlaceOrder>("ob-start", new ProducerOptions()))
             .ProduceAsync(new PlaceOrder { Id = "c1" });
@@ -107,7 +116,7 @@ public class SagaOutboxTests
         var store = services.GetRequiredService<IStateStore<OrderState>>();
         Assert.True((await store.GetAsync("c1"))!.Billed);
 
-        await hostedService.StopAsync(cts.Token);
+        await listener.StopAsync(cts.Token);
     }
 
     [Fact]
@@ -128,9 +137,9 @@ public class SagaOutboxTests
             config.DispatchTo<OrderBilled>("oc-billed");
         });
 
-        var hostedService = StartHost(registry, services);
+        var listener = StartHost(registry, services, transport);
         using var cts = new CancellationTokenSource();
-        await hostedService.StartAsync(cts.Token);
+        await listener.StartAsync(cts.Token);
 
         await (await transport.CreateProducerAsync<PlaceOrder>("oc-start", new ProducerOptions()))
             .ProduceAsync(new PlaceOrder { Id = "c1" });
@@ -153,7 +162,7 @@ public class SagaOutboxTests
         var drained = await PollUntilAsync(() => Task.FromResult(outbox.Count == 0), TimeSpan.FromSeconds(5));
         Assert.True(drained);
 
-        await hostedService.StopAsync(cts.Token);
+        await listener.StopAsync(cts.Token);
     }
 
     [Fact]
@@ -171,9 +180,9 @@ public class SagaOutboxTests
             config.DispatchTo<OrderBilled>("or-billed");
         });
 
-        var hostedService = StartHost(registry, services);
+        var listener = StartHost(registry, services, transport);
         using var cts = new CancellationTokenSource();
-        await hostedService.StartAsync(cts.Token);
+        await listener.StartAsync(cts.Token);
 
         var producer = await transport.CreateProducerAsync<PlaceOrder>("or-start", new ProducerOptions());
         await producer.ProduceAsync(new PlaceOrder { Id = "c1" }, new MessageHeaders { MessageId = "starter-1" });
@@ -190,7 +199,7 @@ public class SagaOutboxTests
         Assert.True(stable, "A replayed starter staged a second outbox entry.");
         Assert.Empty(await transport.ReadAllFromTopicAsync<OrderBilled>("or-billed"));
 
-        await hostedService.StopAsync(cts.Token);
+        await listener.StopAsync(cts.Token);
     }
 
     private static async Task<List<MessageEnvelope<T>>> ReadUntilAsync<T>(
