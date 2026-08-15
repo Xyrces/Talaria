@@ -173,6 +173,102 @@ public static class TalariaEndpointExtensions
     }
 
     /// <summary>
+    /// Maps a request handler delegate to a message topic.
+    /// </summary>
+    /// <typeparam name="TRequest">The CLR request type delivered on the topic.</typeparam>
+    /// <typeparam name="TResponse">The CLR response type returned by the handler.</typeparam>
+    /// <param name="services">The application's service provider.</param>
+    /// <param name="topic">The topic name to subscribe to.</param>
+    /// <param name="handler">Async handler invoked for each delivered request.</param>
+    /// <param name="retryPolicy">Optional retry policy for this topic. Null falls back to <see cref="TalariaOptions.DefaultRetryPolicy"/>.</param>
+    /// <returns>The same <paramref name="services"/>, for chaining.</returns>
+    public static IServiceProvider MapRequest<TRequest, TResponse>(
+        this IServiceProvider services,
+        string topic,
+        Func<TRequest, MessageHeaders, EnvelopeMetadata, CancellationToken, Task<TResponse>> handler,
+        RetryPolicy? retryPolicy = null)
+    {
+        var registry = services.GetRequiredService<TopicRegistry>();
+        registry.MapRequest(topic, handler, retryPolicy);
+        return services;
+    }
+
+    /// <summary>
+    /// Maps a class-based request consumer to a message topic. The consumer is resolved from
+    /// a per-message DI scope by its concrete type <typeparamref name="TConsumer"/>.
+    /// </summary>
+    /// <typeparam name="TRequest">The CLR request type delivered on the topic.</typeparam>
+    /// <typeparam name="TConsumer">The concrete consumer type implementing <see cref="IRequestConsumer{TRequest, TResponse}"/>.</typeparam>
+    /// <typeparam name="TResponse">The CLR response type returned by the consumer.</typeparam>
+    /// <param name="services">The application's service provider.</param>
+    /// <param name="topic">The topic name to subscribe to.</param>
+    /// <param name="retryPolicy">Optional retry policy for this topic. Null falls back to <see cref="TalariaOptions.DefaultRetryPolicy"/>.</param>
+    /// <returns>The same <paramref name="services"/>, for chaining.</returns>
+    /// <exception cref="InvalidOperationException">The <typeparamref name="TConsumer"/> is not registered in the service provider and <see cref="IServiceProviderIsService"/> is available.</exception>
+    public static IServiceProvider MapRequest<TRequest, TConsumer, TResponse>(
+        this IServiceProvider services,
+        string topic,
+        RetryPolicy? retryPolicy = null)
+        where TRequest : class
+        where TConsumer : class, IRequestConsumer<TRequest, TResponse>
+    {
+        return MapRequestCore<TRequest, TConsumer, TResponse>(services, topic, null, retryPolicy);
+    }
+
+    /// <summary>
+    /// Maps a class-based request consumer to a message topic with an explicit consumer group.
+    /// The consumer is resolved from a per-message DI scope by its concrete type <typeparamref name="TConsumer"/>.
+    /// </summary>
+    /// <typeparam name="TRequest">The CLR request type delivered on the topic.</typeparam>
+    /// <typeparam name="TConsumer">The concrete consumer type implementing <see cref="IRequestConsumer{TRequest, TResponse}"/>.</typeparam>
+    /// <typeparam name="TResponse">The CLR response type returned by the consumer.</typeparam>
+    /// <param name="services">The application's service provider.</param>
+    /// <param name="topic">The topic name to subscribe to.</param>
+    /// <param name="consumerGroup">The consumer group identifier. Overrides <see cref="TalariaOptions.ConsumerGroupOverride"/>.</param>
+    /// <param name="retryPolicy">Optional retry policy for this topic. Null falls back to <see cref="TalariaOptions.DefaultRetryPolicy"/>.</param>
+    /// <returns>The same <paramref name="services"/>, for chaining.</returns>
+    /// <exception cref="InvalidOperationException">The <typeparamref name="TConsumer"/> is not registered in the service provider and <see cref="IServiceProviderIsService"/> is available.</exception>
+    public static IServiceProvider MapRequest<TRequest, TConsumer, TResponse>(
+        this IServiceProvider services,
+        string topic,
+        string consumerGroup,
+        RetryPolicy? retryPolicy = null)
+        where TRequest : class
+        where TConsumer : class, IRequestConsumer<TRequest, TResponse>
+    {
+        return MapRequestCore<TRequest, TConsumer, TResponse>(services, topic, consumerGroup, retryPolicy);
+    }
+
+    private static IServiceProvider MapRequestCore<TRequest, TConsumer, TResponse>(
+        IServiceProvider services,
+        string topic,
+        string? consumerGroup,
+        RetryPolicy? retryPolicy)
+        where TRequest : class
+        where TConsumer : class, IRequestConsumer<TRequest, TResponse>
+    {
+        var isService = services.GetService<IServiceProviderIsService>();
+        if (isService is not null && !isService.IsService(typeof(TConsumer)))
+        {
+            throw new InvalidOperationException(
+                $"Consumer '{typeof(TConsumer).FullName}' is not registered in the service provider. " +
+                "Register it before calling MapRequest, e.g. services.AddScoped<TConsumer>().");
+        }
+
+        var registry = services.GetRequiredService<TopicRegistry>();
+        if (consumerGroup is null)
+        {
+            registry.MapRequest<TRequest, TConsumer, TResponse>(topic, retryPolicy);
+        }
+        else
+        {
+            registry.MapRequest<TRequest, TConsumer, TResponse>(topic, consumerGroup, retryPolicy);
+        }
+
+        return services;
+    }
+
+    /// <summary>
     /// Configures a saga workflow.
     /// </summary>
     /// <typeparam name="TState">The CLR saga state type. Must be a reference type with a public parameterless constructor.</typeparam>

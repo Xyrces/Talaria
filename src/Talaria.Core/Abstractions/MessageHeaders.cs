@@ -53,6 +53,16 @@ public sealed class MessageHeaders : IDictionary<string, string>
     /// <summary>Header key carrying the original message id that a retry copy was generated from.</summary>
     public const string RetryRootMessageIdKey = "talaria.retry.root_message_id";
 
+    // Request/response
+    /// <summary>Header key carrying the unique identifier of a request message.</summary>
+    public const string RequestIdKey = "talaria.request_id";
+
+    /// <summary>Header key carrying the reply topic for a request message.</summary>
+    public const string ReplyToKey = "talaria.reply_to";
+
+    /// <summary>Header key marking a response as a fault.</summary>
+    public const string RequestFaultKey = "talaria.request_fault";
+
     // Engine-owned transport metadata (not part of the public contract)
     /// <summary>Header key carrying the current deferral attempt count (engine-internal).</summary>
     public const string DeferralAttemptKey = "x-deferral-attempt";
@@ -153,6 +163,27 @@ public sealed class MessageHeaders : IDictionary<string, string>
     {
         get => TryGetValue(DlqAttemptsKey, out var s) && int.TryParse(s, out var v) ? v : 0;
         set => this[DlqAttemptsKey] = value.ToString();
+    }
+
+    /// <summary>Unique identifier of the request this message is correlated with.</summary>
+    public string? RequestId
+    {
+        get => TryGetValue(RequestIdKey, out var v) ? v : null;
+        set { if (value is not null) this[RequestIdKey] = value; else Remove(RequestIdKey); }
+    }
+
+    /// <summary>Topic to which the response for this request should be published.</summary>
+    public string? ReplyTo
+    {
+        get => TryGetValue(ReplyToKey, out var v) ? v : null;
+        set { if (value is not null) this[ReplyToKey] = value; else Remove(ReplyToKey); }
+    }
+
+    /// <summary>True when the response message represents a request fault.</summary>
+    public bool RequestFault
+    {
+        get => TryGetValue(RequestFaultKey, out var s) && bool.TryParse(s, out var v) && v;
+        set => this[RequestFaultKey] = value.ToString();
     }
 
     // IDictionary<string, string> — delegated to the private store.

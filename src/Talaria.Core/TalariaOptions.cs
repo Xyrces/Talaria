@@ -88,4 +88,10 @@ public sealed class TalariaOptions
     /// </summary>
     public TimeSpan MinRetryDelay { get; set; } = TimeSpan.FromMilliseconds(100);
 
+    /// <summary>
+    /// Default timeout applied to request/response operations when the caller does not
+    /// supply an explicit cancellation token. Must be greater than zero.
+    /// </summary>
+    public TimeSpan DefaultRequestTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
 }

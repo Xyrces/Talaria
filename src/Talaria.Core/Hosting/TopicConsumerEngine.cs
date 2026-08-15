@@ -8,7 +8,7 @@ using Talaria.Core.Registration;
 namespace Talaria.Core.Hosting;
 
 /// <summary>
-/// Host-agnostic engine that runs supervised consumer loops for all topic registrations.
+/// Host-agnostic engine that runs supervised consumer loops for all <c>MapTopic</c> and <c>MapRequest</c> registrations.
 /// </summary>
 internal sealed class TopicConsumerEngine : IAsyncDisposable
 {
@@ -19,6 +19,7 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
     private readonly MessageProcessingPipeline _pipeline;
     private readonly ILogger _logger;
     private readonly IServiceProvider? _serviceProvider;
+    private readonly ProducerCache _producerCache;
 
     public TopicConsumerEngine(
         ITransport transport,
@@ -36,6 +37,7 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
         _pipeline = pipeline;
         _logger = logger;
         _serviceProvider = serviceProvider;
+        _producerCache = new ProducerCache(transport);
 
         var classConsumerWithoutProvider = _registrations.FirstOrDefault(r => r.ConsumerType is not null && serviceProvider is null);
         if (classConsumerWithoutProvider is not null)
@@ -43,6 +45,14 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
             throw new InvalidOperationException(
                 $"Topic '{classConsumerWithoutProvider.TopicName}' uses a class-based consumer but no IServiceProvider was supplied to {nameof(TopicConsumerEngine)}. " +
                 "A service provider is required to resolve ITopicConsumer<T> instances and create per-message scopes.");
+        }
+
+        var requestConsumerWithoutProvider = _registrations.FirstOrDefault(r => r.RequestConsumerType is not null && serviceProvider is null);
+        if (requestConsumerWithoutProvider is not null)
+        {
+            throw new InvalidOperationException(
+                $"Topic '{requestConsumerWithoutProvider.TopicName}' uses a class-based request consumer but no IServiceProvider was supplied to {nameof(TopicConsumerEngine)}. " +
+                "A service provider is required to resolve IRequestConsumer<TRequest, TResponse> instances and create per-message scopes.");
         }
     }
 
@@ -110,6 +120,7 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
             registration.TopicName, consumerGroup, _transport.Name);
 
         var pipeline = _pipeline;
+        var isRequest = registration.RequestHandler is not null || registration.RequestConsumerType is not null;
 
         await foreach (var envelope in consumer.ConsumeAsync(ct))
         {
@@ -138,9 +149,10 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
                     continue;
                 }
 
-                activity?.SetTag("talaria.consumer.type", registration.ConsumerType?.FullName ?? "delegate");
+                activity?.SetTag("talaria.consumer.type", registration.ConsumerType?.FullName ?? registration.RequestConsumerType?.FullName ?? "delegate");
 
                 Exception? handlerException = null;
+                object? response = null;
                 try
                 {
                     if (registration.ConsumerType is not null)
@@ -183,6 +195,10 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
                                 }
                             }
                         }
+                    }
+                    else if (isRequest)
+                    {
+                        response = await InvokeRequestHandlerAsync(registration, envelope, ct);
                     }
                     else
                     {
@@ -232,12 +248,33 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
                             "Handler for topic '{Topic}' failed. Routing to DLQ.",
                             registration.TopicName);
 
+                        await PublishFaultAsync(registration, envelope, handlerException, ct);
+
                         Diagnostics.TalariaDiagnostics.DlqRouted.Add(1,
                             new KeyValuePair<string, object?>("messaging.destination.name", registration.TopicName));
                         await pipeline.FailAsync(gate.Lock, consumer, envelope, handlerException, null, ct);
                     }
+                    else if (outcome == RetryCoordinator.RetryOutcome.Exhausted || outcome == RetryCoordinator.RetryOutcome.Unavailable)
+                    {
+                        await PublishFaultAsync(registration, envelope, handlerException, ct);
+                    }
 
                     continue;
+                }
+
+                if (isRequest && response is not null)
+                {
+                    var replyTo = envelope.Headers.ReplyTo;
+                    if (string.IsNullOrEmpty(replyTo))
+                    {
+                        _logger.LogWarning(
+                            "Request on topic '{Topic}' has no '{ReplyToHeader}' header; no response will be published.",
+                            registration.TopicName, MessageHeaders.ReplyToKey);
+                    }
+                    else
+                    {
+                        await PublishResponseAsync(registration, replyTo, response, envelope.Headers, ct);
+                    }
                 }
 
                 await pipeline.CompleteAsync(gate.Lock, consumer, envelope, ct);
@@ -256,11 +293,124 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
         _logger.LogInformation("Talaria: consumer for '{Topic}' shut down.", registration.TopicName);
     }
 
-    public ValueTask DisposeAsync()
+    private async Task<object?> InvokeRequestHandlerAsync<T>(
+        TopicRegistration registration,
+        MessageEnvelope<T> envelope,
+        CancellationToken ct)
     {
-        // No-op: the consumer engine holds no resources beyond the per-loop consumers,
-        // which are disposed when their loops exit. Implemented for uniform disposal in
-        // TalariaListener.
-        return ValueTask.CompletedTask;
+        if (registration.RequestConsumerType is not null)
+        {
+            var scope = _serviceProvider!.CreateAsyncScope();
+            try
+            {
+                var method = typeof(TopicConsumerEngine)
+                    .GetMethod(nameof(InvokeClassRequestConsumerAsync), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+                    .MakeGenericMethod(typeof(T), registration.ResponseType!);
+
+                return await (Task<object?>)method.Invoke(this, [scope.ServiceProvider, registration.RequestConsumerType, envelope, ct])!;
+            }
+            finally
+            {
+                try
+                {
+                    await scope.DisposeAsync();
+                }
+                catch (Exception disposeEx)
+                {
+                    _logger.LogError(disposeEx,
+                        "Scope disposal for request topic '{Topic}' failed; the response will still be published if the handler succeeded.",
+                        registration.TopicName);
+                }
+            }
+        }
+
+        var metadata = new EnvelopeMetadata(
+            envelope.PartitionKey,
+            envelope.Partition,
+            envelope.Offset,
+            envelope.Timestamp,
+            envelope.CorrelationId);
+
+        return await registration.RequestHandler!(envelope.Payload!, envelope.Headers, metadata, ct);
+    }
+
+    private async Task<object?> InvokeClassRequestConsumerAsync<TRequest, TResponse>(
+        IServiceProvider scopedServices,
+        Type consumerType,
+        MessageEnvelope<TRequest> envelope,
+        CancellationToken ct)
+        where TRequest : class
+        where TResponse : class
+    {
+        var consumer = (IRequestConsumer<TRequest, TResponse>)scopedServices.GetRequiredService(consumerType);
+        var context = new ConsumeContext<TRequest>
+        {
+            Envelope = envelope,
+            CancellationToken = ct,
+            Services = scopedServices,
+        };
+        return await consumer.ConsumeAsync(context, ct);
+    }
+
+    private async Task PublishResponseAsync(
+        TopicRegistration registration,
+        string replyTo,
+        object response,
+        MessageHeaders requestHeaders,
+        CancellationToken ct)
+    {
+        var invoker = await _producerCache.GetOrCreateAsync(replyTo, registration.ResponseType!, ct);
+
+        var headers = new MessageHeaders(requestHeaders)
+        {
+            RequestId = requestHeaders.RequestId,
+        };
+        headers.HopCount++;
+
+        await invoker.Produce(response, headers, null, ct);
+    }
+
+    private async Task PublishFaultAsync<T>(
+        TopicRegistration registration,
+        MessageEnvelope<T> envelope,
+        Exception ex,
+        CancellationToken ct)
+    {
+        var replyTo = envelope.Headers.ReplyTo;
+        var requestId = envelope.Headers.RequestId;
+        if (string.IsNullOrEmpty(replyTo) || string.IsNullOrEmpty(requestId))
+        {
+            return;
+        }
+
+        try
+        {
+            var invoker = await _producerCache.GetOrCreateAsync(replyTo, typeof(RequestFaultInfo), ct);
+
+            var headers = new MessageHeaders
+            {
+                RequestId = requestId,
+                RequestFault = true,
+            };
+            headers[RequestClientFaultHeaders.ExceptionTypeKey] = ex.GetType().FullName ?? "Unknown";
+            if (_options.IncludeExceptionDetailsInDlq)
+            {
+                headers[RequestClientFaultHeaders.ExceptionMessageKey] = ex.Message;
+            }
+            headers.HopCount++;
+
+            await invoker.Produce(new RequestFaultInfo(), headers, null, ct);
+        }
+        catch (Exception publishEx)
+        {
+            _logger.LogError(publishEx,
+                "Failed to publish fault response for request {RequestId} to '{ReplyTo}'.",
+                requestId, replyTo);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await _producerCache.DisposeAsync();
     }
 }

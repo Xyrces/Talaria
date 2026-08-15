@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Talaria.Core.Abstractions;
 using Talaria.Core.Registration;
+using Talaria.Core.Requesting;
 using Talaria.Core.Sagas;
 
 namespace Talaria.Core.Hosting;
@@ -29,6 +30,7 @@ public sealed class TalariaListener : IAsyncDisposable
     private readonly ILogger<TalariaListener> _logger;
     private readonly IServiceProvider? _serviceProvider;
     private readonly TalariaListenerStores _stores;
+    private readonly RequestClientFactory _requestClientFactory;
 
     private readonly object _lifecycleLock = new();
     private CancellationTokenSource? _runCts;
@@ -54,6 +56,11 @@ public sealed class TalariaListener : IAsyncDisposable
     /// Optional stores supplied directly. When omitted and a <paramref name="serviceProvider"/>
     /// is supplied, the stores are resolved from the provider.
     /// </param>
+    /// <param name="loggerFactory">
+    /// Optional logger factory used by the internal <see cref="RequestClientFactory"/> created
+    /// by <see cref="CreateRequestClient{TRequest}(string)"/>. When omitted, the listener's
+    /// own logger is reused for all request/response diagnostics.
+    /// </param>
     public TalariaListener(
         ITransport transport,
         TopicRegistry topicRegistry,
@@ -61,7 +68,8 @@ public sealed class TalariaListener : IAsyncDisposable
         TalariaOptions options,
         ILogger<TalariaListener> logger,
         IServiceProvider? serviceProvider = null,
-        TalariaListenerStores? stores = null)
+        TalariaListenerStores? stores = null,
+        ILoggerFactory? loggerFactory = null)
     {
         _transport = transport;
         _topicRegistry = topicRegistry;
@@ -73,6 +81,11 @@ public sealed class TalariaListener : IAsyncDisposable
             serviceProvider?.GetService<IIdempotencyStore>(),
             serviceProvider?.GetService<IDeferralStore>(),
             serviceProvider?.GetService<IOutboxStore>());
+        _requestClientFactory = new RequestClientFactory(
+            transport,
+            options,
+            loggerFactory ?? new SingleLoggerFactory(logger),
+            provisioner: null);
     }
 
     /// <summary>
@@ -87,6 +100,21 @@ public sealed class TalariaListener : IAsyncDisposable
                 return _runTask is { IsCompleted: false };
             }
         }
+    }
+
+    /// <summary>
+    /// Creates a typed request client bound to the supplied destination topic.
+    /// </summary>
+    /// <typeparam name="TRequest">The CLR request type.</typeparam>
+    /// <param name="topic">The topic to which requests are published.</param>
+    /// <returns>A request client sharing the listener's internal request client factory.</returns>
+    /// <remarks>
+    /// The factory and its inbox pump are owned by the listener and disposed with it.
+    /// </remarks>
+    public IRequestClient<TRequest> CreateRequestClient<TRequest>(string topic)
+        where TRequest : class
+    {
+        return _requestClientFactory.CreateClient<TRequest>(topic);
     }
 
     /// <summary>
@@ -195,7 +223,8 @@ public sealed class TalariaListener : IAsyncDisposable
     }
 
     /// <summary>
-    /// Stops the listener if it is running. Does not dispose caller-owned transports or stores.
+    /// Stops the listener if it is running and disposes the internal request client factory.
+    /// Does not dispose caller-owned transports or stores.
     /// </summary>
     public async ValueTask DisposeAsync()
     {
@@ -208,6 +237,7 @@ public sealed class TalariaListener : IAsyncDisposable
         }
 
         await StopAsync();
+        await _requestClientFactory.DisposeAsync();
 
         lock (_lifecycleLock)
         {
@@ -317,5 +347,26 @@ public sealed class TalariaListener : IAsyncDisposable
                 await topicEngine.DisposeAsync();
             }
         }
+    }
+
+    /// <summary>
+    /// Logger factory wrapper that returns the listener's logger for every category.
+    /// Used by the internal <see cref="RequestClientFactory"/> when the listener is
+    /// constructed without an explicit logger factory.
+    /// </summary>
+    private sealed class SingleLoggerFactory : ILoggerFactory
+    {
+        private readonly ILogger _logger;
+
+        public SingleLoggerFactory(ILogger logger)
+        {
+            _logger = logger;
+        }
+
+        public ILogger CreateLogger(string categoryName) => _logger;
+
+        public void AddProvider(ILoggerProvider provider) { }
+
+        public void Dispose() { }
     }
 }

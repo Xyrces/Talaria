@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Talaria.Core.Abstractions;
+using Talaria.Core.Requesting;
 
 namespace Talaria.Core.Registration;
 
@@ -86,6 +89,37 @@ public sealed class TalariaBuilder
     public TalariaBuilder UseIdempotencyStore(IIdempotencyStore store)
     {
         Services.AddSingleton(store);
+        return this;
+    }
+
+    /// <summary>
+    /// Registers a typed request client and the shared <see cref="RequestClientFactory"/> singleton.
+    /// </summary>
+    /// <typeparam name="TRequest">The CLR request type.</typeparam>
+    /// <param name="topic">The topic to which requests are published.</param>
+    /// <returns>The same builder, for chaining.</returns>
+    /// <remarks>
+    /// The factory is registered as a singleton and disposed by the container on shutdown.
+    /// Multiple calls for different request types share the same factory instance and inbox pump.
+    /// </remarks>
+    public TalariaBuilder AddRequestClient<TRequest>(string topic)
+        where TRequest : class
+    {
+        Services.AddSingleton<RequestClientFactory>(sp =>
+        {
+            var transport = sp.GetRequiredService<ITransport>();
+            var options = sp.GetRequiredService<IOptions<TalariaOptions>>().Value;
+            var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
+            var provisioner = sp.GetService<ITopologyProvisioner>();
+            return new RequestClientFactory(transport, options, loggerFactory, provisioner);
+        });
+
+        Services.AddSingleton<IRequestClient<TRequest>>(sp =>
+        {
+            var factory = sp.GetRequiredService<RequestClientFactory>();
+            return factory.CreateClient<TRequest>(topic);
+        });
+
         return this;
     }
 }

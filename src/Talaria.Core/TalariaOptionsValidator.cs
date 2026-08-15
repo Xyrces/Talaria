@@ -59,6 +59,11 @@ internal sealed class TalariaOptionsValidator : IValidateOptions<TalariaOptions>
             return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.MinRetryDelay)} must be greater than zero.");
         }
 
+        if (options.DefaultRequestTimeout <= TimeSpan.Zero)
+        {
+            return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.DefaultRequestTimeout)} must be greater than zero.");
+        }
+
         return ValidateOptionsResult.Success;
     }
 
