@@ -56,7 +56,7 @@ internal sealed class RetryCoordinator
     /// <param name="lock">The acquired idempotency lock, if any.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>The outcome of the coordination attempt.</returns>
-    public async Task<RetryOutcome> TryCoordinateTopicRetryAsync<T>(
+    internal async Task<RetryOutcome> TryCoordinateTopicRetryAsync<T>(
         TopicRegistration registration,
         MessageProcessingPipeline pipeline,
         IConsumer<T> consumer,
@@ -91,7 +91,7 @@ internal sealed class RetryCoordinator
     /// <param name="lock">The acquired idempotency lock, if any.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>The outcome of the coordination attempt.</returns>
-    public async Task<RetryOutcome> TryCoordinateSagaRetryAsync(
+    internal async Task<RetryOutcome> TryCoordinateSagaRetryAsync(
         string topicName,
         Type messageType,
         MessageProcessingPipeline pipeline,
@@ -131,7 +131,7 @@ internal sealed class RetryCoordinator
             return RetryOutcome.NotRetryable;
         }
 
-        if (IsDisabled(policy))
+        if (!RetryPolicy.IsEnabled(policy))
         {
             return RetryOutcome.NotRetryable;
         }
@@ -150,10 +150,8 @@ internal sealed class RetryCoordinator
 
             Diagnostics.TalariaDiagnostics.RetryExhausted.Add(1,
                 new KeyValuePair<string, object?>("messaging.destination.name", topicName));
-            Diagnostics.TalariaDiagnostics.DlqRouted.Add(1,
-                new KeyValuePair<string, object?>("messaging.destination.name", topicName));
 
-            await pipeline.FailAsync(@lock, consumer, envelope, ex, "retries_exhausted", ct);
+            await RouteToDlqAsync(pipeline, consumer, envelope, ex, @lock, "retries_exhausted", ct);
             return RetryOutcome.Exhausted;
         }
 
@@ -165,12 +163,7 @@ internal sealed class RetryCoordinator
                 "Register a deferral store via UseInMemoryDeferralStore() or UseRedisDeferralStore().",
                 topicName);
 
-            envelope.Headers.DlqReason = "retry_unavailable";
-
-            Diagnostics.TalariaDiagnostics.DlqRouted.Add(1,
-                new KeyValuePair<string, object?>("messaging.destination.name", topicName));
-
-            await pipeline.FailAsync(@lock, consumer, envelope, ex, "retry_unavailable", ct);
+            await RouteToDlqAsync(pipeline, consumer, envelope, ex, @lock, "retry_unavailable", ct);
             return RetryOutcome.Unavailable;
         }
 
@@ -203,12 +196,7 @@ internal sealed class RetryCoordinator
                 "Failed to enqueue delayed retry for message {MessageId} on '{Topic}'. Routing to DLQ with reason 'retry_unavailable'.",
                 envelope.Headers.MessageId, topicName);
 
-            envelope.Headers.DlqReason = "retry_unavailable";
-
-            Diagnostics.TalariaDiagnostics.DlqRouted.Add(1,
-                new KeyValuePair<string, object?>("messaging.destination.name", topicName));
-
-            await pipeline.FailAsync(@lock, consumer, envelope, ex, "retry_unavailable", ct);
+            await RouteToDlqAsync(pipeline, consumer, envelope, ex, @lock, "retry_unavailable", ct);
             return RetryOutcome.Unavailable;
         }
 
@@ -217,8 +205,22 @@ internal sealed class RetryCoordinator
         Diagnostics.TalariaDiagnostics.RetryDelay.Record(delay.TotalMilliseconds,
             new KeyValuePair<string, object?>("messaging.destination.name", topicName));
 
-        // The deferred copy is durably scheduled — safe to commit the original and release the
-        // idempotency lock so the retry copy (new MessageId) is not skipped as a duplicate.
+        // Commit the original envelope BEFORE releasing the idempotency lock.
+        // The idempotency key is consumerGroup:messageId; the retry copy carries a
+        // freshly minted MessageId, so it is NOT gated by the original lock. Committing
+        // first ensures the original cannot redeliver and re-run the handler concurrently
+        // with the retry copy. If commit fails we leave the lock held: it expires via TTL
+        // and the transport redelivers the original, which is safe.
+        try
+        {
+            await consumer.CommitAsync(envelope, ct);
+        }
+        catch (Exception commitEx)
+        {
+            _logger.LogError(commitEx, "Failed to commit original envelope after scheduling retry for {MessageId}; it remains uncommitted for redelivery.", envelope.Headers.MessageId);
+            return RetryOutcome.Scheduled;
+        }
+
         if (@lock is not null)
         {
             try
@@ -231,16 +233,27 @@ internal sealed class RetryCoordinator
             }
         }
 
-        try
-        {
-            await consumer.CommitAsync(envelope, ct);
-        }
-        catch (Exception commitEx)
-        {
-            _logger.LogError(commitEx, "Failed to commit original envelope after scheduling retry for {MessageId}; it may be redelivered.", envelope.Headers.MessageId);
-        }
-
         return RetryOutcome.Scheduled;
+    }
+
+    /// <summary>
+    /// Routes the message to the DLQ with the given reason, updating metrics.
+    /// </summary>
+    private async Task RouteToDlqAsync<T>(
+        MessageProcessingPipeline pipeline,
+        IConsumer<T> consumer,
+        MessageEnvelope<T> envelope,
+        Exception ex,
+        IdempotencyLock? @lock,
+        string dlqReason,
+        CancellationToken ct)
+    {
+        envelope.Headers.DlqReason = dlqReason;
+
+        Diagnostics.TalariaDiagnostics.DlqRouted.Add(1,
+            new KeyValuePair<string, object?>("messaging.destination.name", envelope.SourceTopic ?? "unknown"));
+
+        await pipeline.FailAsync(@lock, consumer, envelope, ex, dlqReason, ct);
     }
 
     /// <summary>
@@ -253,8 +266,7 @@ internal sealed class RetryCoordinator
 
         TimeSpan computed = policy.BackoffType switch
         {
-            RetryBackoffType.Exponential => TimeSpan.FromTicks(
-                baseDelay.Ticks * (long)Math.Pow(2, currentAttempt)),
+            RetryBackoffType.Exponential => ComputeExponentialDelay(baseDelay, currentAttempt, policy.MaxRetryInterval),
             _ => baseDelay,
         };
 
@@ -271,19 +283,51 @@ internal sealed class RetryCoordinator
         return computed;
     }
 
+    private static TimeSpan ComputeExponentialDelay(TimeSpan baseDelay, int currentAttempt, TimeSpan? maxInterval)
+    {
+        // Stop doubling once the next multiplication would exceed the configured cap
+        // or overflow the backing long. This keeps intermediate values positive and bounded.
+        var cap = maxInterval ?? TimeSpan.MaxValue;
+        var current = baseDelay;
+
+        for (var i = 0; i < currentAttempt; i++)
+        {
+            if (current >= cap)
+            {
+                return cap;
+            }
+
+            // Detect overflow before it happens.
+            if (current.Ticks > long.MaxValue / 2)
+            {
+                return cap;
+            }
+
+            current = TimeSpan.FromTicks(current.Ticks * 2);
+        }
+
+        return current > cap ? cap : current;
+    }
+
     /// <summary>
-    /// Builds the headers for a retry copy: clones the original, sets the retry attempt,
-    /// captures the original message id, mints a new message id, and strips stale DLQ headers.
+    /// Builds the headers for a retry copy: clones the original, preserves an existing
+    /// root message id (or captures the original MessageId as the root), sets the retry
+    /// attempt, and strips stale DLQ headers.
     /// </summary>
     internal static MessageHeaders BuildRetryHeaders(MessageHeaders original, int nextAttempt)
     {
         var headers = new MessageHeaders(original);
 
-        // Capture the root message id once, before mutating MessageId.
-        var rootMessageId = original.MessageId;
-        if (!string.IsNullOrEmpty(rootMessageId))
+        // Preserve the root established on the first retry; only capture MessageId when
+        // no root is already present. This prevents compounding ids such as
+        // "root:retry:1:retry:2" on subsequent attempts.
+        if (string.IsNullOrEmpty(headers.RetryRootMessageId))
         {
-            headers.RetryRootMessageId = rootMessageId;
+            var rootMessageId = original.MessageId;
+            if (!string.IsNullOrEmpty(rootMessageId))
+            {
+                headers.RetryRootMessageId = rootMessageId;
+            }
         }
 
         headers.RetryAttempt = nextAttempt;
@@ -306,12 +350,11 @@ internal sealed class RetryCoordinator
     {
         if (payload is JsonElement jsonElement)
         {
-            return jsonElement.GetRawText();
+            // Clone the element before reading raw text to avoid sharing mutable JsonDocument
+            // state with the original envelope.
+            return jsonElement.Clone().GetRawText();
         }
 
         return JsonSerializer.Serialize(payload, messageType);
     }
-
-    private static bool IsDisabled(RetryPolicy policy)
-        => policy is null || policy.MaxRetryAttempts <= 0 || policy.RetryInterval <= TimeSpan.Zero;
 }

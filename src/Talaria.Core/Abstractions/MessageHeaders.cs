@@ -145,7 +145,10 @@ public sealed class MessageHeaders : IDictionary<string, string>
         set { if (value is not null) this[DlqExceptionKey] = value; else Remove(DlqExceptionKey); }
     }
 
-    /// <summary>Number of delivery attempts recorded before the message was routed to the DLQ.</summary>
+    /// <summary>
+    /// Number of retry attempts already consumed when the message was routed to the DLQ
+    /// for exhausted retries (0-based). For other DLQ reasons this value may be zero.
+    /// </summary>
     public int DlqAttempts
     {
         get => TryGetValue(DlqAttemptsKey, out var s) && int.TryParse(s, out var v) ? v : 0;

@@ -84,7 +84,7 @@ public class TalariaEndpointExtensionsTests
         var provider = CreateProvider();
         var policy = new RetryPolicy { MaxRetryAttempts = 3, RetryInterval = TimeSpan.FromSeconds(1) };
 
-        provider.MapTopic<string>("test-retry", policy, (m, c) => Task.CompletedTask);
+        provider.MapTopic<string>("test-retry", (m, c) => Task.CompletedTask, policy);
 
         var registry = provider.GetRequiredService<TopicRegistry>();
         var reg = registry.Registrations.First();
@@ -97,7 +97,7 @@ public class TalariaEndpointExtensionsTests
         var provider = CreateProvider();
         var policy = new RetryPolicy { MaxRetryAttempts = 2, RetryInterval = TimeSpan.FromMilliseconds(100) };
 
-        provider.MapTopic<string>("test-retry-cg", "cg-1", policy, (m, c) => Task.CompletedTask);
+        provider.MapTopic<string>("test-retry-cg", "cg-1", (m, c) => Task.CompletedTask, policy);
 
         var registry = provider.GetRequiredService<TopicRegistry>();
         var reg = registry.Registrations.First();
@@ -111,7 +111,7 @@ public class TalariaEndpointExtensionsTests
         var provider = CreateProvider();
         var policy = new RetryPolicy { MaxRetryAttempts = 1, RetryInterval = TimeSpan.FromMinutes(1) };
 
-        provider.MapTopicWithEnvelope<string>("test-retry-env", policy, (e, c) => Task.CompletedTask);
+        provider.MapTopicWithEnvelope<string>("test-retry-env", (e, c) => Task.CompletedTask, policy);
 
         var registry = provider.GetRequiredService<TopicRegistry>();
         var reg = registry.Registrations.First();
@@ -124,10 +124,30 @@ public class TalariaEndpointExtensionsTests
         var provider = CreateProvider();
         var policy = new RetryPolicy { MaxRetryAttempts = 4, RetryInterval = TimeSpan.FromSeconds(5) };
 
-        provider.MapTopic<string>("test-retry-sync", policy, m => { });
+        provider.MapTopic<string>("test-retry-sync", m => { }, policy);
 
         var registry = provider.GetRequiredService<TopicRegistry>();
         var reg = registry.Registrations.First();
         Assert.Same(policy, reg.RetryPolicy);
+    }
+
+    [Theory]
+    [InlineData(-1, 1000, null)]
+    [InlineData(1, 0, null)]
+    [InlineData(1, 1000, 500)]
+    public void MapTopic_WithInvalidRetryPolicy_ThrowsArgumentException(int maxAttempts, int intervalMs, int? maxIntervalMs)
+    {
+        var provider = CreateProvider();
+        var policy = new RetryPolicy
+        {
+            MaxRetryAttempts = maxAttempts,
+            RetryInterval = TimeSpan.FromMilliseconds(intervalMs),
+            MaxRetryInterval = maxIntervalMs.HasValue ? TimeSpan.FromMilliseconds(maxIntervalMs.Value) : null,
+        };
+
+        var ex = Assert.Throws<ArgumentException>(() =>
+            provider.MapTopic<string>("test-retry", (m, c) => Task.CompletedTask, policy));
+
+        Assert.Equal("retryPolicy", ex.ParamName);
     }
 }

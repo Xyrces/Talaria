@@ -6,7 +6,7 @@ Talaria is a distributed messaging and saga orchestration library for **.NET** (
 
 Talaria provides **at-least-once delivery with idempotent processing**:
 
-- Consumers commit offsets only after successful processing, so failures redeliver.
+- When delayed retries are disabled (the default), consumers commit offsets only after successful processing, so failures redeliver. When retries are enabled, a handler failure commits the original delivery as soon as a retry copy is durably scheduled in the `IDeferralStore`; the sweeper republishes the retry copy later. The original message is therefore acknowledged before the retry runs, and the idempotency store (keyed by `MessageId`) ensures the retry copy — which carries a freshly minted `MessageId` — is processed exactly once.
 - A distributed idempotency store (`IIdempotencyStore`) deduplicates by `MessageId` using fencing-token locks, so redeliveries and duplicate publishes are processed exactly once per consumer group.
 - Saga outbound messages go through a **transactional outbox**: the state transition and its outbound messages are staged in one atomic store operation (`IStateStore.TransitionAsync`), then a leased relay publishes them at-least-once. Each staged message carries a minted `MessageId`, so a duplicate publish after a relay crash is deduplicated by the downstream idempotency gate. A crash after the atomic transition loses nothing.
 - The replay window that remains is between the atomic transition and the offset commit: a crash there replays the message against transitioned state. Starter steps are protected by a built-in replay guard; custom step handlers should be idempotent.
@@ -153,18 +153,18 @@ app.Services.MapTopic<SendVerificationEmailCommand>("email-commands", async (msg
 Opt-in per topic (or globally via `TalariaOptions.DefaultRetryPolicy`). Retry copies are scheduled in the configured `IDeferralStore` and republished by the sweeper; attempts are exhausted to the DLQ with reason `retries_exhausted`. If retries are enabled but no `IDeferralStore` is registered, messages dead-letter with reason `retry_unavailable`.
 
 ```csharp
-// Per-topic policy
+// Per-topic policy (passed last to avoid overload ambiguity)
 app.Services.MapTopic<FetchExternalReportCommand>("report-requests",
+    async (msg, ct) =>
+    {
+        await ReportService.Fetch(msg.ReportId);
+    },
     new RetryPolicy
     {
         MaxRetryAttempts = 5,
         RetryInterval = TimeSpan.FromSeconds(2),
         BackoffType = RetryBackoffType.Exponential,
         MaxRetryInterval = TimeSpan.FromMinutes(1),
-    },
-    async (msg, ct) =>
-    {
-        await ReportService.Fetch(msg.ReportId);
     });
 
 // Global default applied to all topics/saga steps that do not declare their own

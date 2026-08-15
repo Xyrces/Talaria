@@ -48,19 +48,10 @@ internal sealed class TalariaOptionsValidator : IValidateOptions<TalariaOptions>
             return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.OutboxRelayInterval)} must be greater than zero.");
         }
 
-        if (options.DefaultRetryPolicy.MaxRetryAttempts < 0)
+        var retryValidation = ValidateRetryPolicy(options.DefaultRetryPolicy, $"{nameof(TalariaOptions.DefaultRetryPolicy)}");
+        if (retryValidation != null)
         {
-            return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.DefaultRetryPolicy)}.{nameof(RetryPolicy.MaxRetryAttempts)} must not be negative.");
-        }
-
-        if (options.DefaultRetryPolicy.RetryInterval < TimeSpan.Zero)
-        {
-            return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.DefaultRetryPolicy)}.{nameof(RetryPolicy.RetryInterval)} must not be negative.");
-        }
-
-        if (options.DefaultRetryPolicy.MaxRetryInterval.HasValue && options.DefaultRetryPolicy.MaxRetryInterval.Value < options.DefaultRetryPolicy.RetryInterval)
-        {
-            return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.DefaultRetryPolicy)}.{nameof(RetryPolicy.MaxRetryInterval)} must not be less than {nameof(RetryPolicy.RetryInterval)}.");
+            return retryValidation;
         }
 
         if (options.MinRetryDelay <= TimeSpan.Zero)
@@ -69,5 +60,40 @@ internal sealed class TalariaOptionsValidator : IValidateOptions<TalariaOptions>
         }
 
         return ValidateOptionsResult.Success;
+    }
+
+    /// <summary>
+    /// Validates a <see cref="RetryPolicy"/> instance. Returns null when valid.
+    /// </summary>
+    /// <param name="policy">The policy to validate.</param>
+    /// <param name="path">Property path prefix used in error messages.</param>
+    internal static ValidateOptionsResult? ValidateRetryPolicy(RetryPolicy? policy, string path)
+    {
+        if (policy is null)
+        {
+            return ValidateOptionsResult.Fail($"{path} must not be null.");
+        }
+
+        if (policy.MaxRetryAttempts < 0)
+        {
+            return ValidateOptionsResult.Fail($"{path}.{nameof(RetryPolicy.MaxRetryAttempts)} must not be negative.");
+        }
+
+        if (policy.MaxRetryAttempts > 0 && policy.RetryInterval <= TimeSpan.Zero)
+        {
+            return ValidateOptionsResult.Fail($"{path}.{nameof(RetryPolicy.RetryInterval)} must be greater than zero when {nameof(RetryPolicy.MaxRetryAttempts)} is greater than zero.");
+        }
+
+        if (policy.RetryInterval < TimeSpan.Zero)
+        {
+            return ValidateOptionsResult.Fail($"{path}.{nameof(RetryPolicy.RetryInterval)} must not be negative.");
+        }
+
+        if (policy.MaxRetryInterval.HasValue && policy.MaxRetryInterval.Value < policy.RetryInterval)
+        {
+            return ValidateOptionsResult.Fail($"{path}.{nameof(RetryPolicy.MaxRetryInterval)} must not be less than {nameof(RetryPolicy.RetryInterval)}.");
+        }
+
+        return null;
     }
 }

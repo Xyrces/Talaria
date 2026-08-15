@@ -11,7 +11,8 @@ namespace Talaria.Core.Hosting;
 
 /// <summary>
 /// Background service that manages the lifecycle of all topic consumers.
-/// On start: creates a supervised consumer loop for each topic registration and dispatches messages to handlers.
+/// On start: creates a supervised consumer loop for each topic registration, dispatches messages to handlers,
+/// and coordinates opt-in delayed retries via <see cref="RetryCoordinator"/> before falling back to DLQ routing.
 /// On stop: cancels the loops; each consumer is disposed as its loop unwinds.
 /// </summary>
 public sealed class TalariaHostedService : BackgroundService
@@ -74,10 +75,10 @@ public sealed class TalariaHostedService : BackgroundService
         }
     }
 
-    private static bool IsRetryEnabled(TopicRegistration registration)
+    private bool IsRetryEnabled(TopicRegistration registration)
     {
-        var policy = registration.RetryPolicy;
-        return policy is { MaxRetryAttempts: > 0 } && policy.RetryInterval > TimeSpan.Zero;
+        var policy = registration.RetryPolicy ?? _options.DefaultRetryPolicy;
+        return RetryPolicy.IsEnabled(policy);
     }
 
     private async Task ConsumeTopicAsync(
@@ -164,6 +165,10 @@ public sealed class TalariaHostedService : BackgroundService
 
                     if (outcome == RetryCoordinator.RetryOutcome.NotRetryable)
                     {
+                        _logger.LogError(ex,
+                            "Handler for topic '{Topic}' failed. Routing to DLQ.",
+                            registration.TopicName);
+
                         Diagnostics.TalariaDiagnostics.DlqRouted.Add(1,
                             new KeyValuePair<string, object?>("messaging.destination.name", registration.TopicName));
                         await pipeline.FailAsync(gate.Lock, consumer, envelope, ex, null, ct);

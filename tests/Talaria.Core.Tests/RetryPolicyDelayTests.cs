@@ -99,4 +99,21 @@ public class RetryPolicyDelayTests
 
         Assert.Equal(TimeSpan.FromSeconds(2), delay);
     }
+
+    [Fact]
+    public void ComputeDelay_Exponential_LargeAttempts_DoesNotOverflow()
+    {
+        var policy = new RetryPolicy
+        {
+            MaxRetryAttempts = 100,
+            RetryInterval = TimeSpan.FromTicks(1),
+            BackoffType = RetryBackoffType.Exponential,
+            MaxRetryInterval = TimeSpan.FromMinutes(1),
+        };
+
+        var delay = RetryCoordinator.ComputeDelay(policy, currentAttempt: 99, TimeSpan.FromMilliseconds(1));
+
+        Assert.Equal(TimeSpan.FromMinutes(1), delay);
+        Assert.True(delay > TimeSpan.Zero);
+    }
 }

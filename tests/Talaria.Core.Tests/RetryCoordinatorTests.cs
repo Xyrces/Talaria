@@ -290,6 +290,111 @@ public class RetryCoordinatorTests
     private sealed class SagaRetryPayload { public string Id { get; set; } = ""; }
 
     [Fact]
+    public void BuildRetryHeaders_PreservesExistingRootMessageId_AcrossAttempts()
+    {
+        var original = new MessageHeaders
+        {
+            MessageId = "root:retry:1",
+            RetryRootMessageId = "root",
+            RetryAttempt = 1,
+        };
+
+        var cloned = RetryCoordinator.BuildRetryHeaders(original, nextAttempt: 2);
+
+        Assert.Equal("root", cloned.RetryRootMessageId);
+        Assert.Equal("root:retry:1", cloned.MessageId);
+        Assert.Equal(2, cloned.RetryAttempt);
+    }
+
+    [Fact]
+    public void ComputeDelay_Exponential_DoesNotOverflow_ForLargeAttempts()
+    {
+        var policy = new RetryPolicy
+        {
+            MaxRetryAttempts = 100,
+            RetryInterval = TimeSpan.FromMilliseconds(1),
+            BackoffType = RetryBackoffType.Exponential,
+            MaxRetryInterval = TimeSpan.FromMinutes(5),
+        };
+
+        var delay = RetryCoordinator.ComputeDelay(policy, currentAttempt: 99, TimeSpan.FromMilliseconds(1));
+
+        Assert.Equal(TimeSpan.FromMinutes(5), delay);
+        Assert.True(delay > TimeSpan.Zero);
+    }
+
+    [Fact]
+    public void ComputeDelay_Exponential_NoCap_DoublesUntilBounded()
+    {
+        var policy = new RetryPolicy
+        {
+            MaxRetryAttempts = 100,
+            RetryInterval = TimeSpan.FromMilliseconds(1),
+            BackoffType = RetryBackoffType.Exponential,
+        };
+
+        var delay = RetryCoordinator.ComputeDelay(policy, currentAttempt: 99, TimeSpan.FromMilliseconds(1));
+
+        Assert.True(delay > TimeSpan.Zero);
+        Assert.True(delay <= TimeSpan.MaxValue);
+    }
+
+    [Fact]
+    public async Task TryCoordinateTopicRetryAsync_CommitsBeforeReleasingLock()
+    {
+        var store = new FakeDeferralStore();
+        var options = OptionsWithRetries(maxAttempts: 2);
+        var idempotencyStore = new FakeIdempotencyStore();
+        var pipeline = new MessageProcessingPipeline(idempotencyStore, options, NullLogger.Instance);
+        var coordinator = new RetryCoordinator(store, options, NullLogger.Instance);
+        var consumer = new FakeConsumer<string>();
+        var envelope = Envelope<string>("payload", "msg-1");
+        var lck = await idempotencyStore.TryAcquireLockAsync("msg-1", "cg", TimeSpan.FromMinutes(1), default);
+        Assert.NotNull(lck);
+        var registration = new TopicRegistration
+        {
+            TopicName = "test.topic",
+            MessageType = typeof(string),
+            Handler = (_, _, _) => Task.CompletedTask,
+        };
+
+        var outcome = await coordinator.TryCoordinateTopicRetryAsync(
+            registration, pipeline, consumer, envelope, new InvalidOperationException("boom"), lck, default);
+
+        Assert.Equal(RetryCoordinator.RetryOutcome.Scheduled, outcome);
+        Assert.Single(consumer.Committed);
+        Assert.Contains(lck, idempotencyStore.Released);
+        // Commit must be recorded before the lock release.
+        Assert.True(consumer.CommitCallCount <= idempotencyStore.ReleaseCallCount);
+    }
+
+    [Fact]
+    public async Task TryCoordinateTopicRetryAsync_CommitFailure_DoesNotReleaseLock()
+    {
+        var store = new FakeDeferralStore();
+        var options = OptionsWithRetries(maxAttempts: 2);
+        var idempotencyStore = new FakeIdempotencyStore();
+        var pipeline = new MessageProcessingPipeline(idempotencyStore, options, NullLogger.Instance);
+        var coordinator = new RetryCoordinator(store, options, NullLogger.Instance);
+        var consumer = new FakeConsumer<string> { ThrowOnCommit = true };
+        var envelope = Envelope<string>("payload", "msg-1");
+        var lck = await idempotencyStore.TryAcquireLockAsync("msg-1", "cg", TimeSpan.FromMinutes(1), default);
+        Assert.NotNull(lck);
+        var registration = new TopicRegistration
+        {
+            TopicName = "test.topic",
+            MessageType = typeof(string),
+            Handler = (_, _, _) => Task.CompletedTask,
+        };
+
+        var outcome = await coordinator.TryCoordinateTopicRetryAsync(
+            registration, pipeline, consumer, envelope, new InvalidOperationException("boom"), lck, default);
+
+        Assert.Equal(RetryCoordinator.RetryOutcome.Scheduled, outcome);
+        Assert.Empty(idempotencyStore.Released);
+    }
+
+    [Fact]
     public void BuildRetryHeaders_SetsAttemptAndRootMessageId_AndStripsDlqHeaders()
     {
         var original = new MessageHeaders
@@ -340,11 +445,19 @@ public class RetryCoordinatorTests
     {
         public List<MessageEnvelope<T>> Committed { get; } = new();
         public List<MessageEnvelope<T>> Nacked { get; } = new();
+        public int CommitCallCount { get; private set; }
+        public bool ThrowOnCommit { get; set; }
 
         public IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsync(CancellationToken ct = default) => throw new NotImplementedException();
 
         public Task CommitAsync(MessageEnvelope<T> envelope, CancellationToken ct = default)
         {
+            CommitCallCount++;
+            if (ThrowOnCommit)
+            {
+                throw new InvalidOperationException("commit failed");
+            }
+
             Committed.Add(envelope);
             return Task.CompletedTask;
         }
@@ -362,6 +475,7 @@ public class RetryCoordinatorTests
     {
         private readonly Dictionary<string, IdempotencyLock> _locks = new();
         public List<IdempotencyLock> Released { get; } = new();
+        public int ReleaseCallCount { get; private set; }
 
         public Task<IdempotencyLock?> TryAcquireLockAsync(string messageId, string consumerGroup, TimeSpan ttl, CancellationToken ct = default)
         {
@@ -374,6 +488,7 @@ public class RetryCoordinatorTests
 
         public Task ReleaseLockAsync(IdempotencyLock lck, CancellationToken ct = default)
         {
+            ReleaseCallCount++;
             Released.Add(lck);
             return Task.CompletedTask;
         }

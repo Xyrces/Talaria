@@ -13,10 +13,12 @@ using Talaria.Core.Sagas;
 namespace Talaria.Core.Hosting;
 
 /// <summary>
-/// Hosted service that listens on all configured saga topics.
-/// One supervised consumer per topic; messages are fanned out to the correct saga step
-/// via the message-type header. Dispatch topics are explicit (DispatchTo) and producers
-/// are created once at startup — no reflection in the per-message hot path.
+/// Hosted service that listens on all configured saga topics and runs the deferral
+/// sweeper whenever an <see cref="IDeferralStore"/> is registered. One supervised consumer
+/// per topic; messages are fanned out to the correct saga step via the message-type header.
+/// Dispatch topics are explicit (DispatchTo) and producers are created once at startup —
+/// no reflection in the per-message hot path. Also coordinates opt-in delayed retries for
+/// saga step handler exceptions via <see cref="RetryCoordinator"/>.
 /// </summary>
 public sealed class SagaHostedService : BackgroundService
 {
@@ -152,6 +154,9 @@ public sealed class SagaHostedService : BackgroundService
                 _logger,
                 stoppingToken)).ToList();
 
+        // NOTE: the deferral sweeper lives in SagaHostedService. Hosts that use delayed
+        // retries or saga deferrals must not omit SagaHostedService — AddTalaria registers
+        // both hosted services by default.
         if (_deferralStore != null)
         {
             tasks.Add(ConsumerSupervision.RunSupervisedAsync(
@@ -367,8 +372,11 @@ public sealed class SagaHostedService : BackgroundService
                 return;
             }
 
-            // 5b. Starter replay: state already exists — idempotent replay, skip and commit.
-            if (state != null && step.IsStarter)
+            // 5b. Starter replay: state already exists AND this is the original attempt
+            // (RetryAttempt == 0) — idempotent replay, skip and commit. A retry copy
+            // (RetryAttempt > 0) means the original starter FAILED, so it must run; otherwise
+            // the saga stalls because the failed starter never transitions state.
+            if (state != null && step.IsStarter && env.Headers.RetryAttempt == 0)
             {
                 _logger.LogWarning(
                     "Saga {SagaType} starter message {MessageId} on topic {Topic} received, but state for correlation {CorrelationId} already exists. Skipping as an idempotent replay.",
@@ -591,6 +599,13 @@ public sealed class SagaHostedService : BackgroundService
     /// and throws <see cref="InvalidOperationException"/> when deferral is impossible
     /// (no store registered, missing source topic, or max attempts exceeded).
     /// </summary>
+    /// <remarks>
+    /// Interaction with delayed retries: a retry copy of a saga message that arrives out-of-order
+    /// (state not yet present for a non-starter) enters this deferral path using the DEFERRAL
+    /// attempt counter and can dead-letter as <c>max_deferrals_exceeded</c> independently of the
+    /// retry policy's <see cref="RetryPolicy.MaxRetryAttempts"/>. The two counters are intentionally
+    /// separate: retries track handler failures, deferrals track ordering gaps.
+    /// </remarks>
     private async Task HandleDeferralAsync(
         MessageEnvelope<JsonElement> env,
         object payload,

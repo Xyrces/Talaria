@@ -40,26 +40,28 @@ public class TopicRetryBehaviorTests
         var host = builder.Build();
 
         host.Services.MapTopic<RetryMessage>("retry.topic",
-            new RetryPolicy
-            {
-                MaxRetryAttempts = 3,
-                RetryInterval = TimeSpan.FromMilliseconds(50),
-                BackoffType = RetryBackoffType.Fixed,
-            },
             (msg, ct) =>
             {
-                Interlocked.Increment(ref attempts);
+                var attempt = Interlocked.Increment(ref attempts);
                 received.Add(msg.Id);
-                if (Volatile.Read(ref attempts) < 3)
+                if (attempt < 3)
                 {
                     throw new InvalidOperationException("boom");
                 }
 
                 return Task.CompletedTask;
+            },
+            new RetryPolicy
+            {
+                MaxRetryAttempts = 3,
+                RetryInterval = TimeSpan.FromMilliseconds(50),
+                BackoffType = RetryBackoffType.Fixed,
             });
 
+        // Use envelope-aware registration for header assertions while reusing the same topic
+        // would conflict, so we inspect the deferred copies directly via a capturing store.
         var producer = await transport.CreateProducerAsync<RetryMessage>("retry.topic", new ProducerOptions());
-        await producer.ProduceAsync(new RetryMessage { Id = "MSG-RETRY" });
+        await producer.ProduceAsync(new RetryMessage { Id = "MSG-RETRY" }, new MessageHeaders { MessageId = "root-1" });
 
         await host.StartAsync();
 
@@ -73,6 +75,68 @@ public class TopicRetryBehaviorTests
         Assert.Equal(3, Volatile.Read(ref attempts));
         Assert.Equal(["MSG-RETRY", "MSG-RETRY", "MSG-RETRY"], received);
         Assert.Empty(await transport.ReadAllFromTopicAsync<RetryMessage>("retry.topic.dlq"));
+
+        await host.StopAsync();
+        host.Dispose();
+    }
+
+    [Fact]
+    public async Task RetryCopy_MintsStableRootMessageId_AcrossAttempts()
+    {
+        var transport = new InMemoryTransport();
+        var innerStore = new InMemoryDeferralStore();
+        var captured = new List<DeferredMessage>();
+        var capturingStore = new CapturingDeferralStore(innerStore, msg => captured.Add(msg));
+        var attempts = 0;
+
+        var builder = Host.CreateDefaultBuilder();
+        builder.ConfigureServices(services =>
+        {
+            services.AddTalaria(opts =>
+            {
+                opts.ApplicationName = "test-app";
+                opts.MinRetryDelay = TimeSpan.FromMilliseconds(50);
+            })
+            .UseInMemoryTransport(transport)
+            .UseIdempotencyStore<InMemoryIdempotencyStore>()
+            .Services.AddSingleton<IDeferralStore>(capturingStore);
+        });
+
+        var host = builder.Build();
+
+        host.Services.MapTopic<RetryMessage>("retry.topic",
+            (msg, ct) =>
+            {
+                if (Interlocked.Increment(ref attempts) < 3)
+                {
+                    throw new InvalidOperationException("boom");
+                }
+
+                return Task.CompletedTask;
+            },
+            new RetryPolicy
+            {
+                MaxRetryAttempts = 3,
+                RetryInterval = TimeSpan.FromMilliseconds(50),
+                BackoffType = RetryBackoffType.Fixed,
+            });
+
+        var producer = await transport.CreateProducerAsync<RetryMessage>("retry.topic", new ProducerOptions());
+        await producer.ProduceAsync(new RetryMessage { Id = "MSG-ROOT" }, new MessageHeaders { MessageId = "root-1" });
+
+        await host.StartAsync();
+
+        var succeeded = await PollUntilAsync(
+            () => Task.FromResult(Volatile.Read(ref attempts) >= 3), TimeSpan.FromSeconds(10));
+        Assert.True(succeeded, "Handler did not succeed within timeout.");
+
+        Assert.Equal(2, captured.Count);
+        Assert.Equal("root-1:retry:1", captured[0].Headers.MessageId);
+        Assert.Equal("root-1", captured[0].Headers.RetryRootMessageId);
+        Assert.Equal(1, captured[0].Headers.RetryAttempt);
+        Assert.Equal("root-1:retry:2", captured[1].Headers.MessageId);
+        Assert.Equal("root-1", captured[1].Headers.RetryRootMessageId);
+        Assert.Equal(2, captured[1].Headers.RetryAttempt);
 
         await host.StopAsync();
         host.Dispose();
@@ -99,16 +163,16 @@ public class TopicRetryBehaviorTests
         var host = builder.Build();
 
         host.Services.MapTopic<RetryMessage>("retry.topic",
+            (msg, ct) =>
+            {
+                Interlocked.Increment(ref attempts);
+                throw new InvalidOperationException("boom");
+            },
             new RetryPolicy
             {
                 MaxRetryAttempts = 1,
                 RetryInterval = TimeSpan.FromMilliseconds(50),
                 BackoffType = RetryBackoffType.Fixed,
-            },
-            (msg, ct) =>
-            {
-                Interlocked.Increment(ref attempts);
-                throw new InvalidOperationException("boom");
             });
 
         var producer = await transport.CreateProducerAsync<RetryMessage>("retry.topic", new ProducerOptions());
@@ -142,13 +206,13 @@ public class TopicRetryBehaviorTests
         var host = builder.Build();
 
         host.Services.MapTopic<RetryMessage>("retry.topic",
+            (msg, ct) => throw new InvalidOperationException("boom"),
             new RetryPolicy
             {
                 MaxRetryAttempts = 3,
                 RetryInterval = TimeSpan.FromSeconds(1),
                 BackoffType = RetryBackoffType.Fixed,
-            },
-            (msg, ct) => throw new InvalidOperationException("boom"));
+            });
 
         var producer = await transport.CreateProducerAsync<RetryMessage>("retry.topic", new ProducerOptions());
         await producer.ProduceAsync(new RetryMessage { Id = "MSG-UNAVAIL" }, new MessageHeaders { MessageId = "unavail-1" });
@@ -187,12 +251,6 @@ public class TopicRetryBehaviorTests
         var host = builder.Build();
 
         host.Services.MapTopic<RetryMessage>("retry.topic",
-            new RetryPolicy
-            {
-                MaxRetryAttempts = 3,
-                RetryInterval = TimeSpan.FromMilliseconds(50),
-                BackoffType = RetryBackoffType.Fixed,
-            },
             (msg, ct) =>
             {
                 Interlocked.Increment(ref attempts);
@@ -202,6 +260,12 @@ public class TopicRetryBehaviorTests
                 }
 
                 return Task.CompletedTask;
+            },
+            new RetryPolicy
+            {
+                MaxRetryAttempts = 3,
+                RetryInterval = TimeSpan.FromMilliseconds(50),
+                BackoffType = RetryBackoffType.Fixed,
             });
 
         var producer = await transport.CreateProducerAsync<RetryMessage>("retry.topic", new ProducerOptions());
@@ -245,16 +309,16 @@ public class TopicRetryBehaviorTests
         var host = builder.Build();
 
         host.Services.MapTopic<RetryMessage>("retry.topic",
+            (msg, ct) =>
+            {
+                Interlocked.Increment(ref attempts);
+                throw new OperationCanceledException();
+            },
             new RetryPolicy
             {
                 MaxRetryAttempts = 3,
                 RetryInterval = TimeSpan.FromMilliseconds(50),
                 BackoffType = RetryBackoffType.Fixed,
-            },
-            (msg, ct) =>
-            {
-                Interlocked.Increment(ref attempts);
-                throw new OperationCanceledException();
             });
 
         var producer = await transport.CreateProducerAsync<RetryMessage>("retry.topic", new ProducerOptions());
@@ -296,12 +360,6 @@ public class TopicRetryBehaviorTests
         var host = builder.Build();
 
         host.Services.MapTopic<RetryMessage>("retry.topic",
-            new RetryPolicy
-            {
-                MaxRetryAttempts = 2,
-                RetryInterval = TimeSpan.FromMilliseconds(50),
-                BackoffType = RetryBackoffType.Fixed,
-            },
             (msg, ct) =>
             {
                 Interlocked.Increment(ref attempts);
@@ -311,6 +369,12 @@ public class TopicRetryBehaviorTests
                 }
 
                 return Task.CompletedTask;
+            },
+            new RetryPolicy
+            {
+                MaxRetryAttempts = 2,
+                RetryInterval = TimeSpan.FromMilliseconds(50),
+                BackoffType = RetryBackoffType.Fixed,
             });
 
         var producer = await transport.CreateProducerAsync<RetryMessage>("retry.topic", new ProducerOptions());
