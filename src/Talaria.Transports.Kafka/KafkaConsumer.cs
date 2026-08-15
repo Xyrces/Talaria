@@ -20,11 +20,10 @@ namespace Talaria.Transports.Kafka;
 /// once the request is queued; a crash before the next drain means redelivery, which the
 /// idempotency stores cover. Any still-queued commits are flushed on dispose.
 /// <para>
-/// Each enumeration is one consumer session: subscribe on start, unsubscribe when it
-/// ends. Abandoning an enumeration and starting a new one rejoins the group and resumes
-/// from the committed offsets — so messages consumed but never committed are redelivered,
-/// while buffered messages are never silently skipped. Callers that read sequentially
-/// should keep one enumeration open (or commit between enumerations).
+/// A consumer instance supports exactly one enumeration. The host restarts consumption by
+/// creating a new consumer via <see cref="ITransport.CreateConsumerAsync{T}"/>. Reusing a
+/// consumer instance, or enumerating the returned <see cref="IAsyncEnumerable{T}"/> more
+/// than once, throws <see cref="InvalidOperationException"/>.
 /// </para>
 /// </summary>
 internal sealed class KafkaConsumer<T> : IConsumer<T>
@@ -49,6 +48,7 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
     private volatile Task? _pumpTask;
     private int _disposed;
     private int _consuming;
+    private int _enumerating;
 
     public KafkaConsumer(
         IConsumer<string, byte[]> consumer,
@@ -68,21 +68,15 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
         _includeDlqExceptionDetails = includeDlqExceptionDetails;
     }
 
-    private const string SingleEnumerationMessage =
-        "ConsumeAsync may only be enumerated once per consumer instance. Create a new consumer to restart consumption.";
-
     public IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsync(CancellationToken ct = default)
     {
-        if (Interlocked.Exchange(ref _consuming, 1) != 0)
-        {
-            throw new InvalidOperationException(SingleEnumerationMessage);
-        }
-
+        SingleEnumerationGuard.ThrowIfAlreadyStarted(ref _consuming);
         return ConsumeAsyncCore(ct);
     }
 
     private async IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsyncCore([EnumeratorCancellation] CancellationToken ct = default)
     {
+        SingleEnumerationGuard.ThrowIfAlreadyStarted(ref _enumerating);
         var channel = Channel.CreateBounded<MessageEnvelope<T>>(new BoundedChannelOptions(_bufferCapacity)
         {
             SingleWriter = true,

@@ -1,15 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <!-- xUnit tests; multi-target the same framework matrix the rest of the repo uses. -->
     <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
     <!-- Ship XML docs so cref references in test source resolve cleanly across the matrix. -->
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);1591</NoWarn>
-    <!-- Lets the test project see the internal scheduler seam inside the transport. -->
-    <InternalsVisibleTo>Talaria.Transports.AzureServiceBus.Tests</InternalsVisibleTo>
   </PropertyGroup>
 
   <ItemGroup>

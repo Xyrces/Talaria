@@ -154,14 +154,16 @@ public class KafkaReliabilityIntegrationTests : IAsyncLifetime
         // ...but newly produced messages are still delivered (on a fresh consumer because
         // each consumer instance may only be enumerated once).
         await producer.ProduceAsync("second", new MessageHeaders { MessageId = "m-2" });
-        // Give the group a moment to release the previous member before the new one joins.
-        await Task.Delay(TimeSpan.FromSeconds(1));
-        var consumer3 = await transport.CreateConsumerAsync<string>(topic, new ConsumerOptions { ConsumerGroup = group });
-        var second = await TryNextAsync(consumer3, TimeSpan.FromSeconds(15));
+
+        // Poll until the new consumer joins and receives the message. The group may need
+        // a moment to finish rebalancing after the previous member left, so we recreate
+        // the consumer each attempt (each instance allows only one enumeration).
+        var second = await TryNextAsyncWithRetry(
+            () => transport.CreateConsumerAsync<string>(topic, new ConsumerOptions { ConsumerGroup = group }),
+            TimeSpan.FromSeconds(15),
+            TimeSpan.FromMilliseconds(200));
         Assert.NotNull(second);
         Assert.Equal("second", second!.Payload);
-
-        await consumer3.DisposeAsync();
     }
 
     [DockerFact]
@@ -260,6 +262,36 @@ public class KafkaReliabilityIntegrationTests : IAsyncLifetime
         catch (OperationCanceledException)
         {
             // Timeout elapsed with no message — expected when asserting absence.
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Polls <see cref="TryNextAsync{T}"/>, recreating the consumer each attempt, until a
+    /// message arrives or the overall deadline expires. This tolerates Kafka group
+    /// rebalancing delays without a fixed sleep.
+    /// </summary>
+    private static async Task<MessageEnvelope<T>?> TryNextAsyncWithRetry<T>(
+        Func<Task<IConsumer<T>>> consumerFactory,
+        TimeSpan overallDeadline,
+        TimeSpan attemptTimeout)
+    {
+        var deadline = DateTime.UtcNow + overallDeadline;
+        while (DateTime.UtcNow < deadline)
+        {
+            var consumer = await consumerFactory();
+            try
+            {
+                var env = await TryNextAsync(consumer, attemptTimeout);
+                if (env is not null)
+                {
+                    return env;
+                }
+            }
+            finally
+            {
+                await consumer.DisposeAsync();
+            }
         }
         return null;
     }
