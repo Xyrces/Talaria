@@ -131,6 +131,11 @@ builder.Services.AddTalaria()
     .UseInMemoryDeferralStore();
 ```
 
+> The in-memory transport's DLQ backlog is intentionally unbounded — dead letters
+> are never dropped and are retained (and replayed to late-joining consumer groups)
+> for the lifetime of the process. In long-running processes with high dead-letter
+> volume, monitor memory usage accordingly.
+
 > Without an `IDeferralStore`, out-of-order saga messages and delayed retry copies
 > are routed to the DLQ (`deferral_unavailable` / `retry_unavailable`) instead of
 > being deferred.

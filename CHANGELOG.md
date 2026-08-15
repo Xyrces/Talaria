@@ -8,7 +8,7 @@ changes may occur in minor version bumps; patch bumps are reserved for
 backwards-compatible fixes.
 
 This seed is generated from `git log` through the current `HEAD`
-(`98325ac` - *Merge pull request #40 from Xyrces/feat/talaria-listener*).
+(`98325ac` - *Merge pull request #46 from Xyrces/feat/class-based-consumers*).
 
 ---
 
