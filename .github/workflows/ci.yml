@@ -57,6 +57,53 @@ jobs:
       - name: Audit NuGet Packages for Vulnerabilities
         run: dotnet list package --vulnerable --include-transitive
 
+      - name: Compute PR prerelease version
+        # PR builds get an unambiguous, collision-free throwaway version so every
+        # push to a PR is consumable from GitHub Packages. Main/tag builds keep
+        # MinVer's version (empty arg = MinVer default).
+        if: github.event_name == 'pull_request'
+        run: echo "PACK_VERSION_ARG=-p:PackageVersion=0.0.0-pr.${{ github.event.pull_request.number }}.${{ github.run_number }}" >> $GITHUB_ENV
+
+      - name: Pack NuGets (--no-build)
+        # Reuses the Release build above; adds seconds, not minutes.
+        run: |
+          dotnet pack src/Talaria.Core/Talaria.Core.csproj -c Release --no-build -o ./out $PACK_VERSION_ARG
+          dotnet pack src/Talaria.Transports.Kafka/Talaria.Transports.Kafka.csproj -c Release --no-build -o ./out $PACK_VERSION_ARG
+          dotnet pack src/Talaria.StateStores.Redis/Talaria.StateStores.Redis.csproj -c Release --no-build -o ./out $PACK_VERSION_ARG
+          dotnet pack src/Talaria.Transports.InMemory/Talaria.Transports.InMemory.csproj -c Release --no-build -o ./out $PACK_VERSION_ARG
+          dotnet pack src/Talaria.Transports.AzureServiceBus/Talaria.Transports.AzureServiceBus.csproj -c Release --no-build -o ./out $PACK_VERSION_ARG
+
+      - name: Upload packages artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nupkgs
+          path: ./out/*.nupkg
+          retention-days: 1
+
+  publish_prerelease:
+    name: Publish PR prerelease to GitHub Packages
+    needs: build_test
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Download packages artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: nupkgs
+          path: ./out
+
+      - name: Publish to GitHub Packages
+        run: dotnet nuget push "./out/*.nupkg" --api-key ${{ secrets.GITHUB_TOKEN }} --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" --skip-duplicate
+
   publish:
     name: Pack and Publish
     needs: build_test
