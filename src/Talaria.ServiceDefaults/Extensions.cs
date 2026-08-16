@@ -97,7 +97,16 @@ public static class Extensions
     {
         var useOtlpExporter = !string.IsNullOrWhiteSpace(builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"]);
 
-        if (useOtlpExporter)
+        // The Grafana stack configures signal-specific OTLP exporters (metrics/traces have
+        // different endpoints). OpenTelemetry does not allow mixing signal-specific
+        // AddOtlpExporter with the cross-cutting UseOtlpExporter on the same service
+        // collection, so we only enable the global exporter when the Grafana endpoints
+        // are not in use.
+        var grafanaMetrics = builder.Configuration["GRAFANA_OTLP_METRICS_ENDPOINT"];
+        var grafanaTraces = builder.Configuration["GRAFANA_OTLP_TRACES_ENDPOINT"];
+        if (useOtlpExporter &&
+            string.IsNullOrWhiteSpace(grafanaMetrics) &&
+            string.IsNullOrWhiteSpace(grafanaTraces))
         {
             builder.Services.AddOpenTelemetry().UseOtlpExporter();
         }
