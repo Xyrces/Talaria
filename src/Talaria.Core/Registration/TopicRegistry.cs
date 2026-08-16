@@ -9,8 +9,9 @@ namespace Talaria.Core.Registration;
 /// a message type, and either a handler delegate or a class-based consumer type.
 /// </summary>
 /// <remarks>
-/// Either <see cref="Handler"/> or <see cref="ConsumerType"/> must be set, but not both.
-/// <see cref="TopicRegistryExtensions.AddTopicRegistration"/> enforces this invariant.
+/// Exactly one of <see cref="Handler"/>, <see cref="ConsumerType"/>, <see cref="RequestHandler"/>,
+/// or <see cref="RequestConsumerType"/> must be set. The <c>MapTopic</c> and <c>MapRequest</c>
+/// overloads in <see cref="TopicRegistryExtensions"/> enforce this invariant.
 /// </remarks>
 /// <since>1.0.0</since>
 public sealed class TopicRegistration
@@ -23,7 +24,8 @@ public sealed class TopicRegistration
 
     /// <summary>
     /// The erased async handler invoked for each delivered message. Null when
-    /// <see cref="ConsumerType"/> is set and the engine resolves an <see cref="ITopicConsumer{T}"/> from DI.
+    /// <see cref="ConsumerType"/> is set and the engine resolves an <see cref="ITopicConsumer{T}"/> from DI,
+    /// or when <see cref="RequestHandler"/> is set and the engine resolves an <see cref="IRequestConsumer{TRequest, TResponse}"/>.
     /// </summary>
     public Func<object, MessageHeaders, EnvelopeMetadata, CancellationToken, Task>? Handler { get; init; }
 
@@ -33,6 +35,25 @@ public sealed class TopicRegistration
     /// Null when a delegate <see cref="Handler"/> is registered.
     /// </summary>
     public Type? ConsumerType { get; init; }
+
+    /// <summary>
+    /// The erased async request handler invoked for each delivered request message.
+    /// When set, the engine publishes the returned response to the topic named in
+    /// the <c>talaria.reply_to</c> header. Mutually exclusive with <see cref="Handler"/>
+    /// and <see cref="ConsumerType"/>.
+    /// </summary>
+    public Func<object, MessageHeaders, EnvelopeMetadata, CancellationToken, Task<object>>? RequestHandler { get; init; }
+
+    /// <summary>
+    /// The concrete consumer type implementing <see cref="IRequestConsumer{TRequest, TResponse}"/> for this topic.
+    /// When set, the engine creates a per-message DI scope, resolves the consumer by this type, and
+    /// publishes the returned response. Mutually exclusive with <see cref="Handler"/>,
+    /// <see cref="ConsumerType"/>, and <see cref="RequestHandler"/>.
+    /// </summary>
+    public Type? RequestConsumerType { get; init; }
+
+    /// <summary>The CLR response type produced by this request handler, when this is a request registration.</summary>
+    public Type? ResponseType { get; init; }
 
     /// <summary>Optional explicit consumer group. Null falls back to <see cref="TalariaOptions.ConsumerGroupOverride"/> then auto-generated.</summary>
     public string? ConsumerGroup { get; init; }
@@ -95,7 +116,23 @@ public sealed class TopicRegistry
             {
                 throw new InvalidOperationException(
                     "Topic registrations are captured when the host starts. " +
-                    "Call MapTopic before the host runs (e.g. during startup, before app.Run()).");
+                    "Call MapTopic/MapRequest before the host runs (e.g. during startup, before app.Run()).");
+            }
+
+            // Plain multi-registration per topic is existing fan-out behavior and is preserved.
+            // Request/response registrations, however, own the consumer loop for the topic and
+            // cannot coexist with any other registration for the same topic.
+            var isRequestRegistration = registration.RequestHandler is not null || registration.RequestConsumerType is not null;
+            var hasExistingForTopic = _registrations.Any(r => r.TopicName == registration.TopicName);
+            var hasExistingRequestForTopic = _registrations.Any(r =>
+                r.TopicName == registration.TopicName &&
+                (r.RequestHandler is not null || r.RequestConsumerType is not null));
+
+            if (hasExistingForTopic && (isRequestRegistration || hasExistingRequestForTopic))
+            {
+                throw new InvalidOperationException(
+                    $"Topic '{registration.TopicName}' already has a registration. " +
+                    "A topic cannot have both plain and request/response registrations, or multiple request/response registrations.");
             }
 
             _registrations.Add(registration);

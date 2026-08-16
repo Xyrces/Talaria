@@ -190,6 +190,56 @@ Notes:
 - Delegate consumers remain the lightweight option when no per-message scope or DI is needed.
 - Singleton-registered consumers share state across messages; prefer scoped registration.
 
+### Request/Response
+
+Talaria supports typed request/response messaging. A responder consumes a request message and publishes a response to the topic named in the `talaria.reply_to` header. The requester correlates responses by `talaria.request_id`.
+
+```csharp
+// Responder (delegate)
+app.Services.MapRequest<CalculateTotalCommand, TotalCalculatedEvent>("calculate-total", async (cmd, headers, metadata, ct) =>
+{
+    return new TotalCalculatedEvent(cmd.OrderId, cmd.Items.Sum(i => i.Price));
+});
+
+// Responder (class consumer, resolved from a per-message DI scope)
+builder.Services.AddScoped<TotalCalculatorConsumer>();
+app.Services.MapRequest<CalculateTotalCommand, TotalCalculatorConsumer, TotalCalculatedEvent>("calculate-total");
+
+// Requester
+builder.Services.AddRequestClient<CalculateTotalCommand>("calculate-total");
+
+public class CheckoutService
+{
+    private readonly IRequestClient<CalculateTotalCommand> _client;
+
+    public CheckoutService(IRequestClient<CalculateTotalCommand> client)
+    {
+        _client = client;
+    }
+
+    public async Task<TotalCalculatedEvent> GetTotalAsync(CalculateTotalCommand command, CancellationToken ct)
+    {
+        return await _client.GetResponseAsync<TotalCalculatedEvent>(command, ct);
+    }
+}
+```
+
+Each `IRequestClient<TRequest>` is created from a shared `RequestClientFactory` singleton. The factory owns a dedicated reply topic and consumer group, so multiple factories in the same process have isolated inboxes. `TalariaOptions.DefaultRequestTimeout` (default 30 seconds) always applies; the caller's cancellation token can only shorten the wait.
+
+`GetResponseAsync<TResponse>` throws `RequestTimeoutException` when no response arrives in time, and `RequestFaultException` when the responder publishes a fault (e.g. after retries are exhausted). The exception includes the responder exception type and, when `TalariaOptions.IncludeExceptionDetailsInDlq` is enabled on the responder side, the original exception message.
+
+Response delivery is at-least-once: the responder may publish a duplicate response if its offset commit fails after publishing, and the requester completes the caller on the first matching response it receives, ignoring duplicates. Fault publication is best-effort: if the responder cannot publish the fault marker itself (for example, because the reply topic does not exist), the requester observes a `RequestTimeoutException` rather than a `RequestFaultException`.
+
+If the response publish fails after the handler succeeds, the failure flows through the same retry/fault path as a handler failure. This means the handler may run more than once when retries are enabled and the broker rejects the response publication.
+
+Transport caveats:
+
+- **Kafka:** reply topics are created on first use when `auto.create.topics.enable` is true. In constrained clusters, provision the `{ApplicationName}-replies-{guid}` topics in advance.
+- **Azure Service Bus:** register an `ITopologyProvisioner` implementation and the factory will provision the inbox queue at first use. Without a provisioner, ASB attempts to create the queue on first receive, which fails if the namespace disallows auto-provisioning.
+- **InMemory:** no provisioning is required; reply topics are created automatically.
+
+Out of scope for this phase: multi-response `GetResponseAsync<T1,T2>()`, request/response through the transactional outbox, and responder-side topology auto-declaration.
+
 ### Delayed retries
 
 Opt-in per topic (or globally via `TalariaOptions.DefaultRetryPolicy`). Retry copies are scheduled in the configured `IDeferralStore` and republished by the sweeper; attempts are exhausted to the DLQ with reason `retries_exhausted`. If retries are enabled but no `IDeferralStore` is registered, messages dead-letter with reason `retry_unavailable`.

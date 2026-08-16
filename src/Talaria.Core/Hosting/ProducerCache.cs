@@ -7,7 +7,7 @@ namespace Talaria.Core.Hosting;
 
 internal sealed class ProducerCache : IAsyncDisposable
 {
-    private readonly ConcurrentDictionary<(string Topic, Type MessageType), ProducerInvoker> _producers = new();
+    private readonly ConcurrentDictionary<(string Topic, Type MessageType), Lazy<Task<ProducerInvoker>>> _producers = new();
     private readonly ITransport _transport;
 
     public ProducerCache(ITransport transport)
@@ -20,33 +20,62 @@ internal sealed class ProducerCache : IAsyncDisposable
         Type messageType,
         CancellationToken ct)
     {
-        if (_producers.TryGetValue((topic, messageType), out var existing))
+        var key = (Topic: topic, MessageType: messageType);
+        var lazy = _producers.GetOrAdd(
+            key,
+            _ => new Lazy<Task<ProducerInvoker>>(
+                () => CreateProducerInvokerAsync(key.Topic, key.MessageType, ct),
+                LazyThreadSafetyMode.ExecutionAndPublication));
+
+        try
         {
-            return existing;
+            return await lazy.Value.ConfigureAwait(false);
         }
-
-        var method = typeof(ProducerCache)
-            .GetMethod(nameof(CreateProducerInvokerAsync), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
-            .MakeGenericMethod(messageType);
-
-        var invoker = await (Task<ProducerInvoker>)method.Invoke(null, [_transport, topic, ct])!;
-        return _producers.GetOrAdd((topic, messageType), invoker);
+        catch
+        {
+            // Do not cache a failed creation attempt: transient transport errors should be
+            // retried on the next call rather than poisoning the cache forever.
+            _producers.TryRemove(key, out _);
+            throw;
+        }
     }
 
-    private static async Task<ProducerInvoker> CreateProducerInvokerAsync<T>(ITransport transport, string topic, CancellationToken ct)
+    private async Task<ProducerInvoker> CreateProducerInvokerAsync(string topic, Type messageType, CancellationToken ct)
+    {
+        var method = typeof(ProducerCache)
+            .GetMethod(nameof(CreateProducerInvokerTypedAsync), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+            .MakeGenericMethod(messageType);
+
+        return await ((Task<ProducerInvoker>)method.Invoke(null, [_transport, topic, ct])!).ConfigureAwait(false);
+    }
+
+    private static async Task<ProducerInvoker> CreateProducerInvokerTypedAsync<T>(ITransport transport, string topic, CancellationToken ct)
         where T : class
     {
-        var producer = await transport.CreateProducerAsync<T>(topic, new ProducerOptions(), ct);
+        var producer = await transport.CreateProducerAsync<T>(topic, new ProducerOptions(), ct).ConfigureAwait(false);
         return new ProducerInvoker(
-            async (msg, headers, partitionKey, token) => await producer.ProduceAsync((T)msg, headers, partitionKey, token),
+            async (msg, headers, partitionKey, token) => await producer.ProduceAsync((T)msg, headers, partitionKey, token).ConfigureAwait(false),
             producer);
     }
 
     public async ValueTask DisposeAsync()
     {
-        foreach (var invoker in _producers.Values)
+        foreach (var lazy in _producers.Values)
         {
-            await invoker.Producer.DisposeAsync();
+            if (!lazy.IsValueCreated)
+            {
+                continue;
+            }
+
+            try
+            {
+                var invoker = await lazy.Value.ConfigureAwait(false);
+                await invoker.Producer.DisposeAsync().ConfigureAwait(false);
+            }
+            catch
+            {
+                // Best effort: a faulted producer does not prevent disposing the rest.
+            }
         }
 
         _producers.Clear();
