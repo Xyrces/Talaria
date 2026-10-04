@@ -34,7 +34,7 @@ internal sealed class SqlSagaStore<TDb, TState>(DatabaseWork<TDb> database, Tala
         {
             var id = Key(correlationId);
             var query = db.Database.IsSqlServer()
-                ? db.Set<TalariaSagaRow>().FromSqlInterpolated($"SELECT * FROM TalariaSagas WITH (UPDLOCK, HOLDLOCK) WHERE Id = {id}")
+                ? db.Set<TalariaSagaRow>().FromSqlInterpolated($"SELECT * FROM dbo.TalariaSagas WITH (UPDLOCK, HOLDLOCK) WHERE Id = {id}")
                 : db.Set<TalariaSagaRow>().Where(x => x.Id == id);
             var row = await query.SingleOrDefaultAsync(token);
             var receiptId = Receipt(id, messageId);

@@ -15,7 +15,7 @@ internal sealed class SqlFailedMessageStore<TDb>(DatabaseWork<TDb> database, Tal
         => database.Run(async (db, token) =>
         {
             var query = db.Database.IsSqlServer()
-                ? db.Set<TalariaFailedMessageRow>().FromSqlInterpolated($"SELECT * FROM TalariaFailedMessages WITH (UPDLOCK, HOLDLOCK) WHERE Application = {options.ApplicationName} AND Id = {message.Id}")
+                ? db.Set<TalariaFailedMessageRow>().FromSqlInterpolated($"SELECT * FROM dbo.TalariaFailedMessages WITH (UPDLOCK, HOLDLOCK) WHERE Application = {options.ApplicationName} AND Id = {message.Id}")
                 : db.Set<TalariaFailedMessageRow>().Where(x => x.Application == options.ApplicationName && x.Id == message.Id);
             var row = await query.SingleOrDefaultAsync(token);
             if (row is null)

@@ -36,6 +36,7 @@ public sealed class AzureServiceBusTransport : ITransport, ITopologyProvisioner,
     private readonly ILoggerFactory? _loggerFactory;
     private readonly ILogger? _logger;
     private readonly bool _includeDlqExceptionDetails;
+    private readonly Func<IServiceBusAdministration>? _administrationFactory;
 
     private readonly ServiceBusClient _client;
     private readonly ConcurrentDictionary<string, ServiceBusSender> _senders = new(StringComparer.Ordinal);
@@ -69,11 +70,26 @@ public sealed class AzureServiceBusTransport : ITransport, ITopologyProvisioner,
         AzureServiceBusTransportOptions options,
         ILoggerFactory? loggerFactory = null,
         bool includeDlqExceptionDetails = false)
+        : this(options, loggerFactory, includeDlqExceptionDetails, null)
+    {
+    }
+
+    internal AzureServiceBusTransport(AzureServiceBusTransportOptions options, IServiceBusAdministration administration)
+        : this(options, null, false, () => administration)
+    {
+    }
+
+    private AzureServiceBusTransport(
+        AzureServiceBusTransportOptions options,
+        ILoggerFactory? loggerFactory,
+        bool includeDlqExceptionDetails,
+        Func<IServiceBusAdministration>? administrationFactory)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _loggerFactory = loggerFactory;
         _logger = loggerFactory?.CreateLogger<AzureServiceBusTransport>();
         _includeDlqExceptionDetails = includeDlqExceptionDetails;
+        _administrationFactory = administrationFactory;
 
         if (string.IsNullOrWhiteSpace(_options.ConnectionString)
             && string.IsNullOrWhiteSpace(_options.FullyQualifiedNamespace))
@@ -200,7 +216,6 @@ public sealed class AzureServiceBusTransport : ITransport, ITopologyProvisioner,
     {
         var admin = CreateAdministrationClient();
 
-        _entityKinds[entityName] = kind;
         if (kind == TopologyEntityKind.Queue)
         {
             if (!await admin.QueueExistsAsync(entityName, ct).ConfigureAwait(false))
@@ -211,7 +226,9 @@ public sealed class AzureServiceBusTransport : ITransport, ITopologyProvisioner,
                     MaxDeliveryCount = _options.MaxRetries + 1,
                     DeadLetteringOnMessageExpiration = true,
                 };
-                await admin.CreateQueueAsync(opts, ct).ConfigureAwait(false);
+                await CreateOrVerifyAsync(
+                    () => admin.QueueExistsAsync(entityName, ct),
+                    () => admin.CreateQueueAsync(opts, ct), ct).ConfigureAwait(false);
             }
 
             var dlq = entityName + _options.DlqSuffix;
@@ -222,21 +239,66 @@ public sealed class AzureServiceBusTransport : ITransport, ITopologyProvisioner,
                     LockDuration = _options.LockDuration,
                     MaxDeliveryCount = _options.MaxRetries + 1,
                 };
-                await admin.CreateQueueAsync(dlqOpts, ct).ConfigureAwait(false);
+                await CreateOrVerifyAsync(
+                    () => admin.QueueExistsAsync(dlq, ct),
+                    () => admin.CreateQueueAsync(dlqOpts, ct), ct).ConfigureAwait(false);
             }
         }
         else if (kind == TopologyEntityKind.Topic)
         {
-            if (!await admin.TopicExistsAsync(entityName, ct)) await admin.CreateTopicAsync(entityName, ct);
+            if (!await admin.TopicExistsAsync(entityName, ct))
+                await CreateOrVerifyAsync(
+                    () => admin.TopicExistsAsync(entityName, ct),
+                    () => admin.CreateTopicAsync(entityName, ct), ct).ConfigureAwait(false);
             if (!await admin.QueueExistsAsync(entityName + _options.DlqSuffix, ct))
-                await admin.CreateQueueAsync(entityName + _options.DlqSuffix, ct);
+            {
+                var dlq = entityName + _options.DlqSuffix;
+                await CreateOrVerifyAsync(
+                    () => admin.QueueExistsAsync(dlq, ct),
+                    () => admin.CreateQueueAsync(new CreateQueueOptions(dlq), ct), ct).ConfigureAwait(false);
+            }
         }
         else throw new ArgumentException("Subscriptions require a parent topic; use ProvisionAsync.", nameof(kind));
+        _entityKinds[entityName] = kind;
     }
 
-    private ServiceBusAdministrationClient CreateAdministrationClient() => string.IsNullOrWhiteSpace(_options.ConnectionString)
-        ? new ServiceBusAdministrationClient(_options.FullyQualifiedNamespace, _options.Credential!)
-        : new ServiceBusAdministrationClient(_options.ConnectionString);
+    private IServiceBusAdministration CreateAdministrationClient()
+    {
+        if (_administrationFactory is not null) return _administrationFactory();
+        var client = string.IsNullOrWhiteSpace(_options.ConnectionString)
+            ? new ServiceBusAdministrationClient(_options.FullyQualifiedNamespace, _options.Credential!)
+            : new ServiceBusAdministrationClient(_options.ConnectionString);
+        return new ServiceBusAdministrationAdapter(client);
+    }
+
+    private static async Task CreateOrVerifyAsync(
+        Func<Task<bool>> exists,
+        Func<Task> create,
+        CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        try
+        {
+            await create().ConfigureAwait(false);
+        }
+        catch (RequestFailedException ex) when (IsAlreadyExistsConflict(ex))
+        {
+            // Another provisioner won the create race. Treat it as success only
+            // after the management API confirms the intended entity exists.
+            if (!await exists().ConfigureAwait(false)) throw;
+        }
+        catch (ServiceBusException ex) when (ex.Reason == ServiceBusFailureReason.MessagingEntityAlreadyExists)
+        {
+            // The administration SDK reports duplicate entities using this
+            // Service Bus-specific exception rather than RequestFailedException.
+            if (!await exists().ConfigureAwait(false)) throw;
+        }
+    }
+
+    private static bool IsAlreadyExistsConflict(RequestFailedException exception)
+        => exception.Status == 409
+            && (string.Equals(exception.ErrorCode, "EntityAlreadyExists", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(exception.ErrorCode, "MessagingEntityAlreadyExists", StringComparison.OrdinalIgnoreCase));
 
     public async Task ProvisionAsync(IEnumerable<TopologyDeclaration> declarations, CancellationToken ct = default)
     {
@@ -249,11 +311,17 @@ public sealed class AzureServiceBusTransport : ITransport, ITopologyProvisioner,
             {
                 if (string.IsNullOrWhiteSpace(declaration.ParentName)) throw new ArgumentException("A subscription requires a parent topic.");
                 if (!await admin.SubscriptionExistsAsync(declaration.ParentName, declaration.Name, ct))
-                    await admin.CreateSubscriptionAsync(new CreateSubscriptionOptions(declaration.ParentName, declaration.Name)
-                    {
-                        LockDuration = declaration.LockDuration ?? _options.LockDuration,
-                        MaxDeliveryCount = declaration.MaxDeliveryCount ?? _options.MaxRetries + 1,
-                    }, ct);
+                {
+                    var topic = declaration.ParentName;
+                    var subscription = declaration.Name;
+                    await CreateOrVerifyAsync(
+                        () => admin.SubscriptionExistsAsync(topic, subscription, ct),
+                        () => admin.CreateSubscriptionAsync(new CreateSubscriptionOptions(topic, subscription)
+                        {
+                            LockDuration = declaration.LockDuration ?? _options.LockDuration,
+                            MaxDeliveryCount = declaration.MaxDeliveryCount ?? _options.MaxRetries + 1,
+                        }, ct), ct).ConfigureAwait(false);
+                }
             }
         }
     }

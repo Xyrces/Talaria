@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using RabbitMQ.Client;
@@ -44,12 +45,15 @@ public sealed class RabbitMqTransport(RabbitMqOptions options) : ITransport, ITo
         await using var channel = await ChannelAsync(false, ct);
         foreach (var item in declarations.OrderBy(x => x.Kind == TopologyEntityKind.Subscription ? 1 : 0))
         {
-            var exchange = item.ParentName ?? item.Name;
+            var exchange = item.Kind == TopologyEntityKind.Subscription
+                ? item.ParentName ?? throw new ArgumentException("A subscription requires a parent topic.", nameof(declarations))
+                : item.Name;
             await channel.ExchangeDeclareAsync(exchange, ExchangeType.Fanout, durable: true, autoDelete: false, cancellationToken: ct);
             if (item.Kind is TopologyEntityKind.Queue or TopologyEntityKind.Subscription)
             {
-                await channel.QueueDeclareAsync(item.Name, durable: true, exclusive: false, autoDelete: false, cancellationToken: ct);
-                await channel.QueueBindAsync(item.Name, exchange, "", cancellationToken: ct);
+                var queue = item.Kind == TopologyEntityKind.Queue ? item.Name : SubscriptionQueueName(exchange, item.Name);
+                await channel.QueueDeclareAsync(queue, durable: true, exclusive: false, autoDelete: false, cancellationToken: ct);
+                await channel.QueueBindAsync(queue, exchange, "", cancellationToken: ct);
             }
             var dlq = exchange + options.DlqSuffix;
             await channel.ExchangeDeclareAsync(dlq, ExchangeType.Fanout, durable: true, autoDelete: false, cancellationToken: ct);
@@ -62,9 +66,19 @@ public sealed class RabbitMqTransport(RabbitMqOptions options) : ITransport, ITo
         => new Producer<T>(await ChannelAsync(true, ct), topic);
 
     public async Task<IConsumer<T>> CreateConsumerAsync<T>(string topic, ConsumerOptions consumerOptions, CancellationToken ct = default)
-        => new Consumer<T>(await ChannelAsync(false, ct), await ChannelAsync(true, ct), topic,
-            consumerOptions.EntityKind == TopologyEntityKind.Queue ? topic : consumerOptions.ConsumerGroup
-                ?? throw new ArgumentException("An event subscription requires a consumer group."), options);
+    {
+        var queue = consumerOptions.EntityKind == TopologyEntityKind.Queue
+            ? topic
+            : SubscriptionQueueName(topic, consumerOptions.ConsumerGroup
+                ?? throw new ArgumentException("An event subscription requires a consumer group.", nameof(consumerOptions)));
+        return new Consumer<T>(await ChannelAsync(false, ct), await ChannelAsync(true, ct), topic, queue, options);
+    }
+
+    private static string SubscriptionQueueName(string topic, string group)
+    {
+        var identity = Encoding.UTF8.GetBytes($"{topic.Length}:{topic}{group.Length}:{group}");
+        return "talaria.subscription." + Convert.ToHexString(SHA256.HashData(identity)).ToLowerInvariant();
+    }
 
     public Task<ITransactionalSession> BeginTransactionAsync(string? consumerGroup = null, TransactionOffsetSource? offsetSource = null, CancellationToken ct = default)
         => throw new NotSupportedException("Use a persistence outbox for atomic Talaria dispatch; RabbitMQ publisher confirms do not provide a database transaction.");
@@ -157,7 +171,7 @@ public sealed class RabbitMqTransport(RabbitMqOptions options) : ITransport, ITo
                     }
                     await _messages.Writer.WriteAsync(new MessageEnvelope<T>
                     {
-                        Payload = payload, Headers = headers, SourceTopic = topic, Offset = checked((long)args.DeliveryTag),
+                        Payload = payload, Headers = headers, SourceTopic = args.Exchange, Offset = checked((long)args.DeliveryTag),
                         PartitionKey = headers.TryGetValue("talaria.partition_key", out var partition) ? partition : null,
                         CorrelationId = headers.TryGetValue(MessageHeaders.CorrelationIdKey, out var correlation) ? correlation : null,
                         Timestamp = DateTimeOffset.UtcNow,

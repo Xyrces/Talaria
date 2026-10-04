@@ -34,6 +34,8 @@ internal sealed class SagaConsumerEngine
         SagaStepRegistration Step,
         IStateStoreAccessor StateStore);
 
+    private sealed record StepResolution(StepRoute? Route, bool BelongsToAnotherSaga);
+
     public SagaConsumerEngine(
         ITransport transport,
         IServiceProvider serviceProvider,
@@ -68,6 +70,10 @@ internal sealed class SagaConsumerEngine
             .SelectMany(r => r.Steps.Select(s => new StepRoute(r, s, CreateStateStoreAccessor(r.StateType))))
             .GroupBy(x => (Topic: x.Step.TopicName, StateType: x.Registration.StateType))
             .ToDictionary(g => g.Key, g => (IReadOnlyList<StepRoute>)g.ToList());
+        var knownMessageTypesByTopic = _registrations
+            .SelectMany(r => r.Steps.Select(s => (s.TopicName, s.MessageType)))
+            .GroupBy(x => x.TopicName)
+            .ToDictionary(g => g.Key, g => (IReadOnlyList<Type>)g.Select(x => x.MessageType).Distinct().ToList());
 
         if (_deferralStore is null && stepsByTopic.Count > 0)
         {
@@ -87,7 +93,7 @@ internal sealed class SagaConsumerEngine
             var name = EndpointName(kvp.Value[0].Registration, kvp.Key.Topic);
             health?.SetEndpoint(name, false);
             return ConsumerSupervision.RunSupervisedAsync(name,
-                _ => ConsumeTopicLoopAsync(kvp.Key.Topic, kvp.Value, retryCoordinator, ct), _logger,
+                _ => ConsumeTopicLoopAsync(kvp.Key.Topic, kvp.Value, knownMessageTypesByTopic[kvp.Key.Topic], retryCoordinator, ct), _logger,
                 _intake, ex => health?.SetEndpoint(name, false, ex.GetType().Name));
         }).ToList();
 
@@ -134,6 +140,7 @@ internal sealed class SagaConsumerEngine
     private async Task ConsumeTopicLoopAsync(
         string topic,
         IReadOnlyList<StepRoute> routes,
+        IReadOnlyList<Type> knownMessageTypes,
         RetryCoordinator retryCoordinator,
         CancellationToken ct)
     {
@@ -150,7 +157,14 @@ internal sealed class SagaConsumerEngine
                 await consumer.CommitAsync(env, ct);
                 continue;
             }
-            var route = ResolveStep(env, routes);
+            var resolution = ResolveStep(env, routes, knownMessageTypes);
+            if (resolution.BelongsToAnotherSaga)
+            {
+                await consumer.CommitAsync(env, ct);
+                continue;
+            }
+
+            var route = resolution.Route;
             if (route is null)
             {
                 var typeHeader = env.Headers.TryGetValue(MessageHeaders.MessageTypeKey, out var v) ? v : "(none)";
@@ -175,24 +189,31 @@ internal sealed class SagaConsumerEngine
     private string EndpointName(SagaRegistration registration, string topic)
         => EndpointName(_options.ApplicationName, registration.StateType, topic);
 
-    private static StepRoute? ResolveStep(
+    private static StepResolution ResolveStep(
         MessageEnvelope<JsonElement> env,
-        IReadOnlyList<StepRoute> routes)
+        IReadOnlyList<StepRoute> routes,
+        IReadOnlyList<Type> knownMessageTypes)
     {
-        if (routes.Count == 1)
-        {
-            return routes[0];
-        }
-
         var typeName = env.Headers.TryGetValue(MessageHeaders.MessageTypeKey, out var v) ? v : null;
         if (typeName is null)
         {
-            return null;
+            // Preserve the legacy untagged-message behavior for a subscription with a
+            // single local route. Ambiguous subscriptions still require a type header.
+            return new StepResolution(routes.Count == 1 ? routes[0] : null, BelongsToAnotherSaga: false);
         }
 
-        return routes.FirstOrDefault(r =>
-            string.Equals(r.Step.MessageType.FullName, typeName, StringComparison.Ordinal) ||
-            string.Equals(r.Step.MessageType.Name, typeName, StringComparison.Ordinal));
+        static bool Matches(Type messageType, string name)
+            => string.Equals(messageType.FullName, name, StringComparison.Ordinal)
+                || string.Equals(messageType.Name, name, StringComparison.Ordinal);
+
+        var route = routes.FirstOrDefault(r => Matches(r.Step.MessageType, typeName));
+        if (route is not null)
+        {
+            return new StepResolution(route, BelongsToAnotherSaga: false);
+        }
+
+        var belongsToAnotherSaga = knownMessageTypes.Any(messageType => Matches(messageType, typeName));
+        return new StepResolution(null, belongsToAnotherSaga);
     }
 
     private async Task ProcessStepMessageAsync(

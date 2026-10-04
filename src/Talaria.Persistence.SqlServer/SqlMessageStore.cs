@@ -32,7 +32,7 @@ internal sealed class SqlMessageStore<TDb>(DatabaseWork<TDb> database, TalariaOp
         return database.Run(async (db, token) =>
         {
             var query = db.Database.IsSqlServer()
-                ? db.Set<TalariaMessageRow>().FromSqlInterpolated($"SELECT TOP ({batch}) * FROM TalariaMessages WITH (UPDLOCK, READPAST, ROWLOCK) WHERE Application = {options.ApplicationName} AND Kind = {kind} AND VisibleAt <= {now} ORDER BY VisibleAt, Id")
+                ? db.Set<TalariaMessageRow>().FromSqlInterpolated($"SELECT TOP ({batch}) * FROM dbo.TalariaMessages WITH (UPDLOCK, READPAST, READCOMMITTEDLOCK) WHERE Application = {options.ApplicationName} AND Kind = {kind} AND VisibleAt <= {now} ORDER BY VisibleAt, Id")
                 : db.Set<TalariaMessageRow>().Where(x => x.Application == options.ApplicationName && x.Kind == kind && x.VisibleAt <= now).OrderBy(x => x.VisibleAt).Take(batch);
             var rows = await query.ToListAsync(token);
             foreach (var row in rows)

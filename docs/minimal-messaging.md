@@ -66,6 +66,8 @@ Apply the application's EF migrations before starting Talaria. `WithTransaction(
 
 Transactional receive receipts use the original message identity across retry attempts. If a commit succeeds but its confirmation is lost, a subsequent retry checks the same receipt before running business code again.
 
+Talaria SQL tables and its lease sequence live in `dbo`; an application's default schema still applies to its business tables. SQL acquisition supports `READ_COMMITTED_SNAPSHOT`. RabbitMQ subscriptions have a separate queue for each topic and consumer group, so the same group can safely subscribe to multiple topics. See the [migration guide](migrations.md) when upgrading existing deployments or managing broker topology externally.
+
 Mapped broker entities are provisioned at startup by default. With externally managed topology, set `TalariaOptions.AutoProvisionTopology = false` and create the entities before running the host. `TalariaListener.GetTopology()` exports the required queues, topics, and subscriptions, including sagas. `TopicRegistry.GetTopology(options)` exports just the stateless and request mappings. Start receivers before sending to a destination whose broker entities have not yet been created.
 
 Request/reply factories use a dedicated reply address per factory. With automatic topology disabled, provision `RequestClientFactory.InboxTopic` as a queue before issuing requests. Retire old reply queues through the broker's operational tooling when their factory is no longer used.

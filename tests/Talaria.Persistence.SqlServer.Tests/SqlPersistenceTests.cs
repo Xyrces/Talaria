@@ -46,10 +46,19 @@ public sealed class SqlServerFixture : IAsyncLifetime
 
     public async Task ResetAsync()
     {
-        await using var scope = Services.CreateAsyncScope();
-        var db = scope.ServiceProvider.GetRequiredService<TestDbContext>();
-        await db.Database.EnsureDeletedAsync();
-        await db.Database.EnsureCreatedAsync();
+        await using (var scope = Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TestDbContext>();
+            await db.Database.EnsureDeletedAsync();
+            await db.Database.EnsureCreatedAsync();
+        }
+
+        var masterConnectionString = new SqlConnectionStringBuilder(ConnectionString) { InitialCatalog = "master" }.ConnectionString;
+        await using var connection = new SqlConnection(masterConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "ALTER DATABASE [TalariaPersistenceTests] SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE";
+        await command.ExecuteNonQueryAsync();
     }
 
     public async Task DisposeAsync()
@@ -292,6 +301,42 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public async Task Talaria_objects_use_dbo_when_application_context_has_a_default_schema()
+    {
+        await fixture.ResetAsync();
+        await using var scope = fixture.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TestDbContext>();
+        var schemas = new List<string>();
+        await using var command = db.Database.GetDbConnection().CreateCommand();
+        command.CommandText = "SELECT s.name + '.' + t.name FROM sys.tables AS t JOIN sys.schemas AS s ON s.schema_id = t.schema_id WHERE t.name LIKE 'Talaria%' UNION ALL SELECT s.name + '.' + seq.name FROM sys.sequences AS seq JOIN sys.schemas AS s ON s.schema_id = seq.schema_id WHERE seq.name = 'TalariaMessageLeaseSequence'";
+        if (command.Connection!.State != System.Data.ConnectionState.Open) await command.Connection.OpenAsync();
+        await using (var reader = await command.ExecuteReaderAsync())
+            while (await reader.ReadAsync()) schemas.Add(reader.GetString(0));
+
+        Assert.Equal(6, schemas.Count);
+        Assert.All(schemas, name => Assert.StartsWith("dbo.Talaria", name));
+        Assert.Equal("messaging", db.Model.FindEntityType(typeof(BusinessRow))!.GetSchema());
+        Assert.All(db.Model.GetEntityTypes().Where(entity => entity.ClrType.Namespace == typeof(TalariaMessageRow).Namespace),
+            entity => Assert.Equal("dbo", entity.GetSchema()));
+    }
+
+    [Fact]
+    public async Task Due_deferrals_are_acquired_under_read_committed_snapshot()
+    {
+        await fixture.ResetAsync();
+        var store = fixture.Services.GetRequiredService<IDeferralStore>();
+        var deferred = new DeferredMessage(Guid.NewGuid(), "orders", typeof(string).AssemblyQualifiedName!, "\"payload\"",
+            new MessageHeaders(), "order-1", 1, DateTimeOffset.UtcNow.AddSeconds(-1));
+        await store.EnqueueAsync(deferred);
+
+        var leased = Assert.Single(await store.AcquireDueAsync(DateTimeOffset.UtcNow, TimeSpan.FromSeconds(5), 1));
+
+        Assert.Equal(deferred.Id, leased.Message.Id);
+        Assert.False(leased.IsReacquired);
+        Assert.True(await store.CompleteAsync(leased.Lease));
+    }
+
+    [Fact]
     public async Task Transactional_command_shares_scoped_db_context_and_publishes_only_committed_messages()
     {
         await fixture.ResetAsync();
@@ -421,6 +466,7 @@ public sealed class TestDbContext(DbContextOptions<TestDbContext> options) : DbC
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.HasDefaultSchema("messaging");
         modelBuilder.AddTalaria();
         modelBuilder.Entity<BusinessRow>(entity =>
         {

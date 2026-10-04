@@ -57,10 +57,10 @@ public static class TalariaModelExtensions
     /// <summary>Adds Talaria tables to the application's normal EF migration model.</summary>
     public static ModelBuilder AddTalaria(this ModelBuilder model)
     {
-        model.HasSequence<long>("TalariaMessageLeaseSequence").StartsAt(1).IncrementsBy(1);
+        model.HasSequence<long>("TalariaMessageLeaseSequence", "dbo").StartsAt(1).IncrementsBy(1);
         model.Entity<TalariaMessageRow>(b =>
         {
-            b.ToTable("TalariaMessages"); b.HasKey(x => x.Id);
+            b.ToTable("TalariaMessages", "dbo"); b.HasKey(x => x.Id);
             b.Property(x => x.Application).HasMaxLength(200);
             b.Property(x => x.Data).IsRequired();
             b.Property(x => x.LeaseToken).IsConcurrencyToken();
@@ -68,24 +68,24 @@ public static class TalariaModelExtensions
         });
         model.Entity<TalariaInboxRow>(b =>
         {
-            b.ToTable("TalariaInbox"); b.HasKey(x => x.Id);
+            b.ToTable("TalariaInbox", "dbo"); b.HasKey(x => x.Id);
             b.Property(x => x.Id).HasMaxLength(64); b.Property(x => x.Token).HasMaxLength(64);
             b.HasIndex(x => x.ExpiresAt);
         });
         model.Entity<TalariaReceiptRow>(b =>
         {
-            b.ToTable("TalariaReceipts"); b.HasKey(x => x.Id);
+            b.ToTable("TalariaReceipts", "dbo"); b.HasKey(x => x.Id);
             b.Property(x => x.Id).HasMaxLength(64); b.HasIndex(x => x.ExpiresAt);
         });
         model.Entity<TalariaSagaRow>(b =>
         {
-            b.ToTable("TalariaSagas"); b.HasKey(x => x.Id);
+            b.ToTable("TalariaSagas", "dbo"); b.HasKey(x => x.Id);
             b.Property(x => x.Id).HasMaxLength(64);
             b.Property(x => x.Version).IsConcurrencyToken(); b.HasIndex(x => x.ExpiresAt);
         });
         model.Entity<TalariaFailedMessageRow>(b =>
         {
-            b.ToTable("TalariaFailedMessages"); b.HasKey(x => new { x.Application, x.Id });
+            b.ToTable("TalariaFailedMessages", "dbo"); b.HasKey(x => new { x.Application, x.Id });
             b.Property(x => x.Application).HasMaxLength(200);
             b.Property(x => x.Topic).HasMaxLength(500);
             b.Property(x => x.MessageType).HasMaxLength(1000);

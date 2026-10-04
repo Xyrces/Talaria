@@ -14,7 +14,7 @@ internal sealed class SqlInboxStore<TDb>(DatabaseWork<TDb> database) : IIdempote
         {
             var id = Key(messageId, consumerQueue);
             var query = db.Database.IsSqlServer()
-                ? db.Set<TalariaInboxRow>().FromSqlInterpolated($"SELECT * FROM TalariaInbox WITH (UPDLOCK, HOLDLOCK) WHERE Id = {id}")
+                ? db.Set<TalariaInboxRow>().FromSqlInterpolated($"SELECT * FROM dbo.TalariaInbox WITH (UPDLOCK, HOLDLOCK) WHERE Id = {id}")
                 : db.Set<TalariaInboxRow>().Where(x => x.Id == id);
             var row = await query.SingleOrDefaultAsync(token);
             var now = DateTimeOffset.UtcNow;

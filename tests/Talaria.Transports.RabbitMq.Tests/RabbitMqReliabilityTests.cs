@@ -4,6 +4,9 @@ using Testcontainers.RabbitMq;
 
 namespace Talaria.Transports.RabbitMq.Tests;
 
+public sealed record RabbitTopicARecord(int Id);
+public sealed record RabbitTopicBRecord(int Id);
+
 public sealed class RabbitMqReliabilityTests : IAsyncLifetime
 {
     private RabbitMqContainer? _container;
@@ -69,8 +72,48 @@ public sealed class RabbitMqReliabilityTests : IAsyncLifetime
         var receivedB = await TryNextAsync(eventB, TimeSpan.FromSeconds(5));
         Assert.Equal("one event", receivedA!.Payload);
         Assert.Equal("one event", receivedB!.Payload);
+        Assert.Equal(topic, receivedA.SourceTopic);
+        Assert.Equal(topic, receivedB.SourceTopic);
         await eventA.DisposeAsync();
         await eventB.DisposeAsync();
+    }
+
+    [DockerFact]
+    public async Task SameGroupOnDifferentTopics_UsesIsolatedQueuesAndTypedConsumers()
+    {
+        var topicA = Name("typed-a");
+        var topicB = Name("typed-b");
+        var group = Name("shared-group");
+        await _transport.ProvisionAsync([
+            new(TopologyEntityKind.Topic, topicA),
+            new(TopologyEntityKind.Subscription, group, topicA),
+            new(TopologyEntityKind.Topic, topicB),
+            new(TopologyEntityKind.Subscription, group, topicB)]);
+
+        // The record shapes match, while their CLR types differ. This lets the
+        // old shared queue silently deliver topic A's payload to consumer B.
+        await using var consumerB = await _transport.CreateConsumerAsync<RabbitTopicBRecord>(topicB,
+            new ConsumerOptions { EntityKind = TopologyEntityKind.Subscription, ConsumerGroup = group });
+        using var consumerCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await using var consumerBEnumerator = consumerB.ConsumeAsync(consumerCancellation.Token).GetAsyncEnumerator();
+        var pendingB = consumerBEnumerator.MoveNextAsync().AsTask();
+        await ((IConsumerReadiness)consumerB).Ready.WaitAsync(TimeSpan.FromSeconds(5));
+        var producerA = await _transport.CreateProducerAsync<RabbitTopicARecord>(topicA, new ProducerOptions());
+        await producerA.ProduceAsync(new RabbitTopicARecord(17));
+        Assert.NotSame(pendingB, await Task.WhenAny(pendingB, Task.Delay(TimeSpan.FromMilliseconds(500))));
+
+        await using var consumerA = await _transport.CreateConsumerAsync<RabbitTopicARecord>(topicA,
+            new ConsumerOptions { EntityKind = TopologyEntityKind.Subscription, ConsumerGroup = group });
+        var eventA = await TryNextAsync(consumerA, TimeSpan.FromSeconds(5));
+        Assert.NotNull(eventA);
+        Assert.Equal(17, eventA!.Payload.Id);
+        Assert.Equal(topicA, eventA.SourceTopic);
+
+        var producerB = await _transport.CreateProducerAsync<RabbitTopicBRecord>(topicB, new ProducerOptions());
+        await producerB.ProduceAsync(new RabbitTopicBRecord(42));
+        Assert.True(await pendingB.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(42, consumerBEnumerator.Current.Payload.Id);
+        Assert.Equal(topicB, consumerBEnumerator.Current.SourceTopic);
     }
 
     [DockerFact]

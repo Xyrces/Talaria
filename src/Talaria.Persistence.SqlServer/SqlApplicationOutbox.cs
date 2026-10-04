@@ -24,7 +24,7 @@ internal sealed class SqlApplicationOutbox<TDb>(TDb db, TalariaOptions options) 
             await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, ct);
             var id = DatabaseWork<TDb>.Key("handler", options.ApplicationName, endpoint, messageId);
             var query = db.Database.IsSqlServer()
-                ? db.Set<TalariaReceiptRow>().FromSqlInterpolated($"SELECT * FROM TalariaReceipts WITH (UPDLOCK, HOLDLOCK) WHERE Id = {id}")
+                ? db.Set<TalariaReceiptRow>().FromSqlInterpolated($"SELECT * FROM dbo.TalariaReceipts WITH (UPDLOCK, HOLDLOCK) WHERE Id = {id}")
                 : db.Set<TalariaReceiptRow>().Where(x => x.Id == id);
             var receipt = await query.SingleOrDefaultAsync(ct);
             if (receipt is not null && receipt.ExpiresAt > DateTimeOffset.UtcNow)
