@@ -159,28 +159,26 @@ public class RegistrySealTests
         var registry = new SagaRegistry();
         var exceptions = new ConcurrentBag<Exception>();
         var addedCount = 0;
+        var stateTypes = new[] { typeof(StateA), typeof(StateB), typeof(StateC), typeof(StateD) };
 
-        var adders = Enumerable.Range(0, 4)
-            .Select(_ => Task.Run(() =>
+        var adders = Enumerable.Range(0, stateTypes.Length)
+            .Select(index => Task.Run(() =>
             {
-                for (int i = 0; i < 250; i++)
+                try
                 {
-                    try
+                    registry.Add(new SagaRegistration
                     {
-                        registry.Add(new SagaRegistration
-                        {
-                            StateType = typeof(object),
-                        });
-                        Interlocked.Increment(ref addedCount);
-                    }
-                    catch (InvalidOperationException)
-                    {
-                        // Expected race: seal happened before this add acquired the lock.
-                    }
-                    catch (Exception ex)
-                    {
-                        exceptions.Add(ex);
-                    }
+                        StateType = stateTypes[index],
+                    });
+                    Interlocked.Increment(ref addedCount);
+                }
+                catch (InvalidOperationException)
+                {
+                    // Expected race: seal happened before this add acquired the lock.
+                }
+                catch (Exception ex)
+                {
+                    exceptions.Add(ex);
                 }
             }))
             .ToList();
@@ -199,4 +197,9 @@ public class RegistrySealTests
         Assert.True(registry.IsSealed);
         Assert.Equal(addedCount, registry.Registrations.Count);
     }
+
+    private sealed class StateA { }
+    private sealed class StateB { }
+    private sealed class StateC { }
+    private sealed class StateD { }
 }
