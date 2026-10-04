@@ -31,15 +31,23 @@ jobs:
             9.0.x
             10.0.x
 
+      - name: Require Docker for integration tests
+        run: docker info
+
       - name: Restore Dependencies
         run: dotnet restore Talaria.slnx
 
       - name: Build Solution
         run: dotnet build Talaria.slnx --configuration Release --no-restore
 
+      - name: Run Minimal Messaging Quickstart
+        run: dotnet run --project samples/MinimalMessaging --configuration Release
+
       - name: Run Integration Tests
-        # Ensure TestContainers can leverage docker locally on the ubuntu runner
-        run: dotnet test Talaria.slnx --configuration Release --no-build --verbosity normal
+        env:
+          TALARIA_REQUIRE_DOCKER: 1
+        # Bound broker memory use and avoid fixed emulator-port collisions between frameworks.
+        run: dotnet test Talaria.slnx --configuration Release --no-build --verbosity normal -m:1 -p:TestTfmsInParallel=false
 
       - name: Audit NuGet Packages for Vulnerabilities
         run: dotnet list package --vulnerable --include-transitive
@@ -59,6 +67,9 @@ jobs:
           dotnet pack src/Talaria.StateStores.Redis/Talaria.StateStores.Redis.csproj -c Release --no-build -o ./out $PACK_VERSION_ARG
           dotnet pack src/Talaria.Transports.InMemory/Talaria.Transports.InMemory.csproj -c Release --no-build -o ./out $PACK_VERSION_ARG
           dotnet pack src/Talaria.Transports.AzureServiceBus/Talaria.Transports.AzureServiceBus.csproj -c Release --no-build -o ./out $PACK_VERSION_ARG
+          dotnet pack src/Talaria.Transports.RabbitMq/Talaria.Transports.RabbitMq.csproj -c Release --no-build -o ./out $PACK_VERSION_ARG
+          dotnet pack src/Talaria.Persistence.SqlServer/Talaria.Persistence.SqlServer.csproj -c Release --no-build -o ./out $PACK_VERSION_ARG
+          dotnet pack src/Talaria.Testing/Talaria.Testing.csproj -c Release --no-build -o ./out $PACK_VERSION_ARG
 
       - name: Upload packages artifact
         uses: actions/upload-artifact@v4

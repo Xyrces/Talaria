@@ -118,12 +118,8 @@ public class TransportContractMatrix
     }
 
     /// <summary>
-    /// Resolves a Kafka row backed by the lazy-singleton Kafka container
-    /// fixture, or skips the test with the standard Docker-not-running
-    /// message. The fixture's <see cref="KafkaContainerFixture.IsAvailable"/>
-    /// is <c>false</c> when Docker is unavailable OR the container start
-    /// timed out, in which case the matrix's per-test <c>Skip.IfNot</c> in
-    /// <see cref="CreateHarnessAsync"/> suppresses the Kafka scenarios.
+    /// Resolves a Kafka row backed by the shared container. CI requires it;
+    /// local runs may opt in. Selected broker startup failures fail the suite.
     /// </summary>
     private static async Task<KafkaTransportRow> KafkaRowOrSkipAsync()
     {
@@ -133,7 +129,7 @@ public class TransportContractMatrix
         var fixture = await KafkaContainerFixture.EnsureStartedAsync().ConfigureAwait(false);
         Skip.IfNot(
             fixture.IsAvailable,
-            "Kafka transport contract is opt-in: set TALARIA_RUN_KAFKA_TRANSPORT_CONTRACT=1 with Docker running to enable.");
+            "Set TALARIA_RUN_KAFKA_TRANSPORT_CONTRACT=1 locally or TALARIA_REQUIRE_DOCKER=1 in CI to run Kafka contracts.");
         return new KafkaTransportRow { Fixture = fixture };
     }
 
@@ -218,9 +214,8 @@ public class TransportContractMatrix
         await using var consumer = await harness.Transport.CreateConsumerAsync<Msg>(
             topic, new ConsumerOptions { ConsumerGroup = $"g-{Guid.NewGuid():N}" });
         var envelope = TransportHarness.Must(
-            TransportHarness.ReadOneAsync(consumer, cts.Token),
+            TransportHarness.ReadOneAsync(consumer, cts.Token, e => consumer.NackAsync(e)),
             "consumer receives the message to nack");
-        await consumer.NackAsync(envelope);
 
         var topicDlq = await row.ReadAllFromTopicAsync<Msg>(harness, $"{topic}.dlq", TimeSpan.FromSeconds(5));
         Assert.Single(topicDlq);
@@ -255,13 +250,12 @@ public class TransportContractMatrix
         await using var consumer2 = await harness.Transport.CreateConsumerAsync<Msg>(
             topic, new ConsumerOptions { ConsumerGroup = group });
         var redelivered = TransportHarness.Must(
-            TransportHarness.ReadOneAsync(consumer2, cts.Token),
+            TransportHarness.ReadOneAsync(consumer2, cts.Token, e => consumer2.CommitAsync(e)),
             "unsettled message is redelivered");
 
         Assert.Equal(first.Offset, redelivered.Offset);
         Assert.Equal("work", redelivered.Payload.Id);
 
-        await consumer2.CommitAsync(redelivered);
     }
 
     private async Task RunCommittedMessageIsNotRedeliveredAfterConsumerRestartAsync(TransportContractRow row)
@@ -279,15 +273,17 @@ public class TransportContractMatrix
             topic, new ConsumerOptions { ConsumerGroup = group }))
         {
             var envelope = TransportHarness.Must(
-                TransportHarness.ReadOneAsync(consumer1, cts.Token),
+                TransportHarness.ReadOneAsync(consumer1, cts.Token, e => consumer1.CommitAsync(e)),
                 "first consumer instance reads the message");
-            await consumer1.CommitAsync(envelope);
         }
 
         await using var consumer2 = await harness.Transport.CreateConsumerAsync<Msg>(
             topic, new ConsumerOptions { ConsumerGroup = group });
         var read = TransportHarness.ReadOneAsync(consumer2, cts.Token);
-        var completed = await Task.WhenAny(read, Task.Delay(TimeSpan.FromMilliseconds(500), cts.Token));
+        if (consumer2 is IConsumerReadiness readiness) await readiness.Ready.WaitAsync(TimeSpan.FromSeconds(30));
+        var completed = await Task.WhenAny(read, Task.Delay(TimeSpan.FromSeconds(2), cts.Token));
         Assert.NotSame(read, completed);
+        cts.Cancel();
+        try { await read; } catch (OperationCanceledException) { }
     }
 }

@@ -11,43 +11,34 @@ namespace Talaria.Transports.AzureServiceBus.Tests;
 /// <summary>
 /// End-to-end integration tests that run against the Azure Service Bus
 /// emulator (<c>mcr.microsoft.com/azure-messaging/servicebus-emulator</c>)
-/// when the operator sets <c>TALARIA_RUN_ASB_EMULATOR=1</c>. The emulator
-/// speaks AMQP 1.0 on <c>localhost:5672</c>; outside an emulator-run, the
-/// tests skip with an actionable message (see
+/// when <c>TALARIA_REQUIRE_DOCKER=1</c> starts its SQL-backed Testcontainers
+/// fixture, or <c>TALARIA_RUN_ASB_EMULATOR=1</c> targets an already-running
+/// emulator. Outside those modes, the tests skip with an actionable message (see
 /// <see cref="EmulatorFactAttribute"/>).
 /// </summary>
 /// <remarks>
 /// <para>
 /// These tests deliberately mirror the behavioural matrix of the Kafka
-/// reliability suite (round-trip, two-group fan-out, poison DLQ, nack
-/// DLQ, transactional commit/abort visibility) so the divergence between
-/// ASB's buffered-produce-commit semantics and Kafka's broker-side
-/// transaction is exercised against a real broker. They are not a
+/// reliability suite (round-trip, subscription fan-out, poison DLQ, and
+/// nack DLQ). They are not a
 /// substitute for the divergence unit tests in
-/// <c>ProducerHeaderDivergenceTests</c> /
-/// <c>TransportOptionsTests</c> / <c>TransactionalSessionDivergenceTests</c>
+/// <c>ProducerHeaderDivergenceTests</c> / <c>TransportOptionsTests</c> /
+/// <c>AzureServiceBusTransactionTests</c>
 /// — those cover behaviour that doesn't need an emulator.
 /// </para>
 /// <para>
-/// To run this suite:
-/// <list type="number">
-///   <item><c>docker run -d -p 5672:5672 -p 5300:5300 -e ACCEPT_EULA=y mcr.microsoft.com/azure-messaging/servicebus-emulator:latest</c></item>
-///   <item><c>export TALARIA_RUN_ASB_EMULATOR=1</c></item>
-///   <item><c>export TALARIA_ASB_CONNECTION_STRING="Endpoint=sb://localhost:5672;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE=;UseDevelopmentEmulator=true"</c></item>
-///   <item><c>dotnet test tests/Talaria.Transports.AzureServiceBus.Tests</c></item>
-/// </list>
-/// The connection string is read from the optional
-/// <c>TALARIA_ASB_CONNECTION_STRING</c> environment variable so the suite
-/// remains configurable across emulator versions and downstream test
-/// forks.
+/// Set <c>TALARIA_REQUIRE_DOCKER=1</c> and run
+/// <c>dotnet test tests/Talaria.Transports.AzureServiceBus.Tests --framework net8.0</c>
+/// to start SQL Server and the emulator with the checked-in entity configuration.
 /// </para>
 /// </remarks>
-public class EmulatorIntegrationTests : IAsyncLifetime
+[Collection(AsbEmulatorCollection.Name)]
+public class EmulatorIntegrationTests(AsbEmulatorFixture fixture) : IAsyncLifetime
 {
     /// <summary>
     /// Environment variable carrying the emulator connection string. When
     /// unset, the suite uses the documented default
-    /// (<c>Endpoint=sb://localhost:5672;...;UseDevelopmentEmulator=true</c>).
+    /// (<c>Endpoint=sb://localhost;...;UseDevelopmentEmulator=true</c>).
     /// </summary>
     public const string ConnectionStringEnvironmentVariable = "TALARIA_ASB_CONNECTION_STRING";
 
@@ -57,7 +48,7 @@ public class EmulatorIntegrationTests : IAsyncLifetime
     /// the local emulator uses a different SAS key or port.
     /// </summary>
     public const string DefaultConnectionString =
-        "Endpoint=sb://localhost:5672;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE=;UseDevelopmentEmulator=true";
+        "Endpoint=sb://localhost;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true";
 
     private AzureServiceBusTransport? _transport;
 
@@ -69,10 +60,7 @@ public class EmulatorIntegrationTests : IAsyncLifetime
         }
 
         var connectionString = Environment.GetEnvironmentVariable(ConnectionStringEnvironmentVariable);
-        if (string.IsNullOrWhiteSpace(connectionString))
-        {
-            connectionString = DefaultConnectionString;
-        }
+        if (string.IsNullOrWhiteSpace(connectionString)) connectionString = fixture.ConnectionString;
 
         var options = new AzureServiceBusTransportOptions
         {
@@ -83,17 +71,9 @@ public class EmulatorIntegrationTests : IAsyncLifetime
 
         _transport = new AzureServiceBusTransport(options);
 
-        // Pre-provision the queues used by the tests so the first run
-        // doesn't race the broker's entity-existence checks. EnsureEntityAsync
-        // is idempotent: subsequent runs are no-ops if the entity already
-        // exists with matching settings.
-        return Task.WhenAll(
-            _transport.EnsureEntityAsync("it-roundtrip", TopologyEntityKind.Queue),
-            _transport.EnsureEntityAsync("it-fanout", TopologyEntityKind.Queue),
-            _transport.EnsureEntityAsync("it-poison", TopologyEntityKind.Queue),
-            _transport.EnsureEntityAsync("it-nack", TopologyEntityKind.Queue),
-            _transport.EnsureEntityAsync("it-tx-commit", TopologyEntityKind.Queue),
-            _transport.EnsureEntityAsync("it-tx-abort", TopologyEntityKind.Queue));
+        // The emulator loads the checked-in entity config at startup; it does
+        // not support changing entities dynamically during a test run.
+        return Task.CompletedTask;
     }
 
     public async Task DisposeAsync()
@@ -115,7 +95,7 @@ public class EmulatorIntegrationTests : IAsyncLifetime
         };
 
         await using var producer = await _transport!.CreateProducerAsync<string>(topic, new ProducerOptions());
-        await using var consumer = await _transport.CreateConsumerAsync<string>(topic, new ConsumerOptions { ConsumerGroup = $"rt-{Guid.NewGuid():N}" });
+        await using var consumer = await _transport.CreateConsumerAsync<string>(topic, new ConsumerOptions { ConsumerGroup = "rt-group" });
 
         await producer.ProduceAsync("hello", headers);
 
@@ -132,29 +112,19 @@ public class EmulatorIntegrationTests : IAsyncLifetime
     [EmulatorFact]
     public async Task TwoConsumerGroups_EachReceiveTheirOwnCopy()
     {
-        // ASB queues are competing-consumer: only ONE of two freshly-created
-        // groups receives a given message — they share the same entity, not
-        // a pub/sub topic. This test pins the ASB semantics so a future
-        // refactor that accidentally wires queues like pub/sub topics
-        // surfaces as a failure here rather than in the saga sample.
+        // Separate subscriptions each receive their own copy of a topic event.
         var topic = "it-fanout";
         await using var producer = await _transport!.CreateProducerAsync<string>(topic, new ProducerOptions());
-        await using var consumerA = await _transport.CreateConsumerAsync<string>(topic, new ConsumerOptions { ConsumerGroup = $"a-{Guid.NewGuid():N}" });
-        await using var consumerB = await _transport.CreateConsumerAsync<string>(topic, new ConsumerOptions { ConsumerGroup = $"b-{Guid.NewGuid():N}" });
+        await using var consumerA = await _transport.CreateConsumerAsync<string>(topic, new ConsumerOptions { ConsumerGroup = "fanout-a" });
+        await using var consumerB = await _transport.CreateConsumerAsync<string>(topic, new ConsumerOptions { ConsumerGroup = "fanout-b" });
 
         await producer.ProduceAsync("fanout-1", new MessageHeaders { MessageId = "f-1" });
 
         var a = await FirstAsync(consumerA, TimeSpan.FromSeconds(20));
         var b = await FirstAsync(consumerB, TimeSpan.FromSeconds(5));
 
-        // At least one group must receive the message; the other may not,
-        // depending on which group the broker routes to. We assert that
-        // exactly one of them receives it (competing-consumer semantics).
-        Assert.True(
-            (a is not null && b is null) || (a is null && b is not null),
-            "ASB competing-consumer queues route each message to exactly one group.");
-        if (a is not null) Assert.Equal("fanout-1", a.Payload);
-        if (b is not null) Assert.Equal("fanout-1", b.Payload);
+        Assert.Equal("fanout-1", Assert.IsType<MessageEnvelope<string>>(a).Payload);
+        Assert.Equal("fanout-1", Assert.IsType<MessageEnvelope<string>>(b).Payload);
     }
 
     [EmulatorFact]
@@ -162,16 +132,19 @@ public class EmulatorIntegrationTests : IAsyncLifetime
     {
         var topic = "it-poison";
         await using var producer = await _transport!.CreateProducerAsync<string>(topic, new ProducerOptions());
+        await using var poisonConsumer = await _transport.CreateConsumerAsync<int>(
+            topic, new ConsumerOptions { ConsumerGroup = "poison-handler" });
         await using var dlqConsumer = await _transport.CreateConsumerAsync<string>(
             topic + ".dlq",
-            new ConsumerOptions { ConsumerGroup = $"poison-dlq-{Guid.NewGuid():N}" });
+            new ConsumerOptions { ConsumerGroup = "poison-dlq" });
 
         await producer.ProduceAsync("not-a-number", new MessageHeaders { MessageId = "p-1" });
 
         // The poison message is deserialization-failed by the int-typed
         // consumer (not created here, since it would block forever
         // waiting for one) and routed to the DLQ entity directly by the
-        // consumer pipeline. Wait for it on the DLQ consumer.
+        // consumer pipeline. The failed typed reader should yield no payload.
+        Assert.Null(await FirstAsync(poisonConsumer, TimeSpan.FromSeconds(5)));
         var dlq = await FirstAsync(dlqConsumer, TimeSpan.FromSeconds(30));
         Assert.NotNull(dlq);
         Assert.Equal("not-a-number", dlq!.Payload);
@@ -183,10 +156,10 @@ public class EmulatorIntegrationTests : IAsyncLifetime
     {
         var topic = "it-nack";
         await using var producer = await _transport!.CreateProducerAsync<string>(topic, new ProducerOptions());
-        await using var consumer = await _transport.CreateConsumerAsync<string>(topic, new ConsumerOptions { ConsumerGroup = $"nack-{Guid.NewGuid():N}" });
+        await using var consumer = await _transport.CreateConsumerAsync<string>(topic, new ConsumerOptions { ConsumerGroup = "nack-handler" });
         await using var dlqConsumer = await _transport.CreateConsumerAsync<string>(
             topic + ".dlq",
-            new ConsumerOptions { ConsumerGroup = $"nack-dlq-{Guid.NewGuid():N}" });
+            new ConsumerOptions { ConsumerGroup = "nack-dlq" });
 
         await producer.ProduceAsync("nack-me", new MessageHeaders { MessageId = "n-1" });
 
@@ -199,68 +172,9 @@ public class EmulatorIntegrationTests : IAsyncLifetime
         Assert.Equal("nack-me", dlq!.Payload);
     }
 
-    [EmulatorFact]
-    public async Task TransactionalCommit_MakesProducesVisible()
-    {
-        var topic = "it-tx-commit";
-        await using var consumer = await _transport!.CreateConsumerAsync<string>(topic, new ConsumerOptions { ConsumerGroup = $"txc-{Guid.NewGuid():N}" });
-
-        await using (var session = await _transport.BeginTransactionAsync())
-        {
-            var txProducer = await session.GetProducerAsync<string>(topic);
-            await txProducer.ProduceAsync("tx-1");
-            await txProducer.ProduceAsync("tx-2");
-            await session.CommitAsync();
-        }
-
-        // Read both messages within a single enumeration; a second call to
-        // ConsumeAsync on the same consumer instance is forbidden by contract.
-        var received = new List<MessageEnvelope<string>>();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-        try
-        {
-            await foreach (var env in consumer.ConsumeAsync(cts.Token))
-            {
-                received.Add(env);
-                if (received.Count == 2)
-                {
-                    break;
-                }
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            // Timeout — fall through to the assertion.
-        }
-
-        Assert.Equal(2, received.Count);
-        Assert.Equal("tx-1", received[0].Payload);
-        Assert.Equal("tx-2", received[1].Payload);
-    }
-
-    [EmulatorFact]
-    public async Task TransactionalAbort_ProducesNothing()
-    {
-        var topic = "it-tx-abort";
-        await using var consumer = await _transport!.CreateConsumerAsync<string>(topic, new ConsumerOptions { ConsumerGroup = $"txa-{Guid.NewGuid():N}" });
-
-        await using (var session = await _transport.BeginTransactionAsync())
-        {
-            var txProducer = await session.GetProducerAsync<string>(topic);
-            await txProducer.ProduceAsync("aborted-1");
-            await txProducer.ProduceAsync("aborted-2");
-            await session.AbortAsync();
-        }
-
-        var none = await FirstAsync(consumer, TimeSpan.FromSeconds(8));
-        Assert.Null(none);
-    }
-
     /// <summary>
     /// Returns the first envelope the consumer yields within the timeout,
-    /// or null if none arrives. Cancellation-suppressing on timeout — the
-    /// negative assertions (<c>TransactionalAbort_ProducesNothing</c>)
-    /// rely on the no-throw timeout path.
+    /// or null if none arrives. Cancellation-suppressing on timeout for negative assertions.
     /// </summary>
     private static async Task<MessageEnvelope<T>?> FirstAsync<T>(IConsumer<T> consumer, TimeSpan timeout)
     {

@@ -253,6 +253,15 @@ public class TopicConsumerScopeTests
 
         public int AcquireCount => _acquireCount;
 
+        public async Task<IdempotencyAcquisition> AcquireAsync(string messageId, string consumerQueue, TimeSpan expiration, CancellationToken ct = default)
+        {
+            Interlocked.Increment(ref _acquireCount);
+            return await _inner.AcquireAsync(messageId, consumerQueue, expiration, ct);
+        }
+
+        public Task<bool> RenewAsync(IdempotencyLock lease, TimeSpan expiration, CancellationToken ct = default)
+            => _inner.RenewAsync(lease, expiration, ct);
+
         public async Task<IdempotencyLock?> TryAcquireLockAsync(
             string messageId,
             string consumerQueue,

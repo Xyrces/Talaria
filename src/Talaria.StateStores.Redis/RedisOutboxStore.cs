@@ -22,17 +22,20 @@ public sealed class RedisOutboxStore : IOutboxStore
 {
     // Atomically lease up to ARGV[3] entries visible at or before ARGV[1]: bump each
     // entry's fencing counter and hide it until ARGV[2] (lease expiry). Returns a flat
-    // array of [id, lease token, payload json] triples.
-    // KEYS: 1=zset, 2=hash. ARGV: 1=now ms, 2=lease-expiry ms, 3=max batch.
+    // array of [id, lease token, payload json, reacquired] quadruples.
+    // KEYS: 1=zset, 2=hash, 3=monotonic lease counter. ARGV: 1=now ms, 2=lease-expiry ms, 3=max batch.
     private const string AcquireScript = """
         local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[3])
         local out = {}
         for i, id in ipairs(ids) do
-            local lease = redis.call('HINCRBY', KEYS[2], id .. ':lease', 1)
+            local reacquired = redis.call('HEXISTS', KEYS[2], id .. ':lease')
+            local lease = redis.call('INCR', KEYS[3])
+            redis.call('HSET', KEYS[2], id .. ':lease', lease)
             redis.call('ZADD', KEYS[1], ARGV[2], id)
             out[#out + 1] = id
             out[#out + 1] = tostring(lease)
             out[#out + 1] = redis.call('HGET', KEYS[2], id)
+            out[#out + 1] = reacquired == 1 and '1' or '0'
         end
         return out
         """;
@@ -63,6 +66,7 @@ public sealed class RedisOutboxStore : IOutboxStore
     private readonly IDatabase _db;
     private readonly string _key;
     private readonly string _entriesKey;
+    private readonly string _leasesKey;
 
     /// <summary>
     /// Creates the store. Keys match the ones <see cref="RedisStateStore{TState}"/>
@@ -74,8 +78,9 @@ public sealed class RedisOutboxStore : IOutboxStore
         IOptions<TalariaOptions> talariaOptions)
     {
         _db = redis.GetDatabase();
-        _key = $"{options.Value.KeyPrefix}outbox:{talariaOptions.Value.ApplicationName}";
+        _key = RedisKeySpace.Prefix(options.Value, talariaOptions.Value.ApplicationName) + "outbox";
         _entriesKey = $"{_key}:entries";
+        _leasesKey = $"{_key}:leases";
     }
 
     public async Task<IReadOnlyList<LeasedOutboxMessage>> AcquirePendingAsync(
@@ -84,9 +89,12 @@ public sealed class RedisOutboxStore : IOutboxStore
         int maxBatch,
         CancellationToken ct = default)
     {
+        if (leaseDuration <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(leaseDuration));
+        if (maxBatch <= 0) throw new ArgumentOutOfRangeException(nameof(maxBatch));
+        ct.ThrowIfCancellationRequested();
         var result = await _db.ScriptEvaluateAsync(
             AcquireScript,
-            new RedisKey[] { _key, _entriesKey },
+            new RedisKey[] { _key, _entriesKey, _leasesKey },
             new RedisValue[]
             {
                 now.ToUnixTimeMilliseconds(),
@@ -95,13 +103,16 @@ public sealed class RedisOutboxStore : IOutboxStore
             });
 
         var flat = (RedisValue[])result!;
-        var leased = new List<LeasedOutboxMessage>(flat.Length / 3);
-        for (var i = 0; i < flat.Length; i += 3)
+        var leased = new List<LeasedOutboxMessage>(flat.Length / 4);
+        for (var i = 0; i < flat.Length; i += 4)
         {
             var message = Deserialize((string)flat[i + 2]!);
             leased.Add(new LeasedOutboxMessage(
                 message,
-                new OutboxLease(message.Id, long.Parse((string)flat[i + 1]!))));
+                new OutboxLease(message.Id, long.Parse((string)flat[i + 1]!)))
+            {
+                IsReacquired = (string)flat[i + 3]! == "1"
+            });
         }
 
         return leased;

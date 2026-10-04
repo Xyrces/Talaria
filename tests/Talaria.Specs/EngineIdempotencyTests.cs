@@ -24,6 +24,10 @@ public class EngineIdempotencyTests
 
     private sealed class ThrowingIdempotencyStore : IIdempotencyStore
     {
+        public Task<IdempotencyAcquisition> AcquireAsync(string id, string group, TimeSpan ttl, CancellationToken ct = default)
+            => throw new InvalidOperationException("Simulated inbox outage.");
+        public Task<bool> RenewAsync(IdempotencyLock lease, TimeSpan ttl, CancellationToken ct = default)
+            => throw new InvalidOperationException("Simulated inbox outage.");
         public Task<IdempotencyLock?> TryAcquireLockAsync(
             string messageId, string consumerQueue, TimeSpan expiration, CancellationToken ct = default)
             => throw new InvalidOperationException("Simulated idempotency store outage.");

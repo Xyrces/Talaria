@@ -44,6 +44,14 @@ public sealed class SagaRegistry
     {
         lock (_lock)
         {
+            var duplicateState = _registrations.GroupBy(x => x.StateType).FirstOrDefault(g => g.Count() > 1);
+            if (duplicateState is not null)
+                throw new InvalidOperationException($"Saga state '{duplicateState.Key.Name}' is mapped more than once.");
+            foreach (var saga in _registrations)
+            {
+                if (saga.Steps.GroupBy(x => (x.TopicName, x.MessageType)).Any(g => g.Count() > 1))
+                    throw new InvalidOperationException($"Saga '{saga.StateType.Name}' has multiple handlers for the same topic and message type.");
+            }
             _sealed = true;
         }
     }

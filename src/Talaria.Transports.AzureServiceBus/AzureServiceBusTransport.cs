@@ -30,19 +30,21 @@ namespace Talaria.Transports.AzureServiceBus;
 /// </para>
 /// </summary>
 /// <since>1.0.0</since>
-public sealed class AzureServiceBusTransport : ITransport, IAsyncDisposable
+public sealed class AzureServiceBusTransport : ITransport, ITopologyProvisioner, IAsyncDisposable
 {
     private readonly AzureServiceBusTransportOptions _options;
     private readonly ILoggerFactory? _loggerFactory;
     private readonly ILogger? _logger;
     private readonly bool _includeDlqExceptionDetails;
+    private readonly Func<IServiceBusAdministration>? _administrationFactory;
 
     private readonly ServiceBusClient _client;
     private readonly ConcurrentDictionary<string, ServiceBusSender> _senders = new(StringComparer.Ordinal);
 
     // (entity, consumer-group) → processor. The transport is the sole owner
     // and disposes every processor it created on shutdown.
-    private readonly ConcurrentDictionary<(string Topic, string Group), ServiceBusProcessor> _processors = new();
+    private readonly ConcurrentDictionary<Guid, ServiceBusProcessor> _processors = new();
+    private readonly ConcurrentDictionary<string, TopologyEntityKind> _entityKinds = new();
 
     // Disposal guard.
     private int _disposed;
@@ -68,11 +70,26 @@ public sealed class AzureServiceBusTransport : ITransport, IAsyncDisposable
         AzureServiceBusTransportOptions options,
         ILoggerFactory? loggerFactory = null,
         bool includeDlqExceptionDetails = false)
+        : this(options, loggerFactory, includeDlqExceptionDetails, null)
+    {
+    }
+
+    internal AzureServiceBusTransport(AzureServiceBusTransportOptions options, IServiceBusAdministration administration)
+        : this(options, null, false, () => administration)
+    {
+    }
+
+    private AzureServiceBusTransport(
+        AzureServiceBusTransportOptions options,
+        ILoggerFactory? loggerFactory,
+        bool includeDlqExceptionDetails,
+        Func<IServiceBusAdministration>? administrationFactory)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _loggerFactory = loggerFactory;
         _logger = loggerFactory?.CreateLogger<AzureServiceBusTransport>();
         _includeDlqExceptionDetails = includeDlqExceptionDetails;
+        _administrationFactory = administrationFactory;
 
         if (string.IsNullOrWhiteSpace(_options.ConnectionString)
             && string.IsNullOrWhiteSpace(_options.FullyQualifiedNamespace))
@@ -83,7 +100,8 @@ public sealed class AzureServiceBusTransport : ITransport, IAsyncDisposable
         }
 
         _client = string.IsNullOrWhiteSpace(_options.ConnectionString)
-            ? new ServiceBusClient(_options.FullyQualifiedNamespace)
+            ? new ServiceBusClient(_options.FullyQualifiedNamespace, _options.Credential
+                ?? throw new ArgumentException("Credential is required with FullyQualifiedNamespace.", nameof(options)))
             : new ServiceBusClient(_options.ConnectionString);
     }
 
@@ -109,7 +127,21 @@ public sealed class AzureServiceBusTransport : ITransport, IAsyncDisposable
             ? "talaria-default"
             : options.ConsumerGroup;
 
-        var processor = GetOrCreateProcessor(topic, consumerGroup);
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        var processorOptions = new ServiceBusProcessorOptions
+        {
+            MaxConcurrentCalls = 1,
+            PrefetchCount = _options.PrefetchCount,
+            AutoCompleteMessages = false,
+            ReceiveMode = ServiceBusReceiveMode.PeekLock,
+            MaxAutoLockRenewalDuration = _options.MaxAutoLockRenewalDuration,
+        };
+        var kind = _entityKinds.TryGetValue(topic, out var known) ? known : options.EntityKind;
+        var processor = kind == TopologyEntityKind.Queue
+            ? _client.CreateProcessor(topic, processorOptions)
+            : _client.CreateProcessor(topic, consumerGroup, processorOptions);
+        var processorId = Guid.NewGuid();
+        _processors[processorId] = processor;
         var dlqSender = GetOrCreateSender(topic + _options.DlqSuffix);
 
         IConsumer<T> consumer = new AzureServiceBusConsumer<T>(
@@ -119,7 +151,8 @@ public sealed class AzureServiceBusTransport : ITransport, IAsyncDisposable
             topic + _options.DlqSuffix,
             options.BufferCapacity > 0 ? options.BufferCapacity : _options.BufferCapacity,
             _includeDlqExceptionDetails,
-            _loggerFactory?.CreateLogger<AzureServiceBusConsumer<T>>());
+            _loggerFactory?.CreateLogger<AzureServiceBusConsumer<T>>(),
+            () => _processors.TryRemove(processorId, out _));
 
         return Task.FromResult(consumer);
     }
@@ -140,10 +173,8 @@ public sealed class AzureServiceBusTransport : ITransport, IAsyncDisposable
         string? consumerGroup = null,
         TransactionOffsetSource? offsetSource = null,
         CancellationToken ct = default)
-    {
-        ITransactionalSession session = new AzureServiceBusTransactionalSession(this, consumerGroup, offsetSource);
-        return Task.FromResult(session);
-    }
+        => throw new NotSupportedException(
+            "Azure Service Bus transport does not provide atomic Talaria transactions. Use a persistence outbox for reliable state changes and outbound messages.");
 
     /// <summary>
     /// Returns a cached <see cref="ServiceBusSender"/> for the given topic or
@@ -169,35 +200,6 @@ public sealed class AzureServiceBusTransport : ITransport, IAsyncDisposable
         });
     }
 
-    private ServiceBusProcessor GetOrCreateProcessor(string topic, string consumerGroup)
-    {
-        var key = (topic, consumerGroup);
-        return _processors.GetOrAdd(key, tuple =>
-        {
-            try
-            {
-                return _client.CreateProcessor(
-                    tuple.Topic,
-                    tuple.Group,
-                    new ServiceBusProcessorOptions
-                    {
-                        // One pump thread per processor — matches
-                        // KafkaConsumer's single-writer channel invariant.
-                        MaxConcurrentCalls = 1,
-                        PrefetchCount = _options.PrefetchCount,
-                        AutoCompleteMessages = false,
-                        ReceiveMode = ServiceBusReceiveMode.PeekLock,
-                        MaxAutoLockRenewalDuration = _options.LockDuration,
-                    });
-            }
-            catch
-            {
-                _processors.TryRemove(key, out _);
-                throw;
-            }
-        });
-    }
-
     /// <summary>
     /// Idempotently ensure that a queue or topic exists on the namespace.
     /// Best-effort: callers that lack management permissions get an
@@ -212,7 +214,7 @@ public sealed class AzureServiceBusTransport : ITransport, IAsyncDisposable
         TopologyEntityKind kind,
         CancellationToken ct = default)
     {
-        var admin = new ServiceBusAdministrationClient(_options.ConnectionString ?? _options.FullyQualifiedNamespace);
+        var admin = CreateAdministrationClient();
 
         if (kind == TopologyEntityKind.Queue)
         {
@@ -224,7 +226,9 @@ public sealed class AzureServiceBusTransport : ITransport, IAsyncDisposable
                     MaxDeliveryCount = _options.MaxRetries + 1,
                     DeadLetteringOnMessageExpiration = true,
                 };
-                await admin.CreateQueueAsync(opts, ct).ConfigureAwait(false);
+                await CreateOrVerifyAsync(
+                    () => admin.QueueExistsAsync(entityName, ct),
+                    () => admin.CreateQueueAsync(opts, ct), ct).ConfigureAwait(false);
             }
 
             var dlq = entityName + _options.DlqSuffix;
@@ -235,16 +239,90 @@ public sealed class AzureServiceBusTransport : ITransport, IAsyncDisposable
                     LockDuration = _options.LockDuration,
                     MaxDeliveryCount = _options.MaxRetries + 1,
                 };
-                await admin.CreateQueueAsync(dlqOpts, ct).ConfigureAwait(false);
+                await CreateOrVerifyAsync(
+                    () => admin.QueueExistsAsync(dlq, ct),
+                    () => admin.CreateQueueAsync(dlqOpts, ct), ct).ConfigureAwait(false);
             }
         }
-        else
+        else if (kind == TopologyEntityKind.Topic)
         {
-            // Topics/subscriptions are outside the saga sample's scope — the
-            // current saga code uses competing-consumer queues, so any other
-            // shape raises a clear error rather than a silent fallback.
-            throw new NotSupportedException(
-                $"Azure Service Bus transport currently provisions only {nameof(TopologyEntityKind.Queue)} entities; topic/subscription provisioning will be added when the saga host grows those patterns.");
+            if (!await admin.TopicExistsAsync(entityName, ct))
+                await CreateOrVerifyAsync(
+                    () => admin.TopicExistsAsync(entityName, ct),
+                    () => admin.CreateTopicAsync(entityName, ct), ct).ConfigureAwait(false);
+            if (!await admin.QueueExistsAsync(entityName + _options.DlqSuffix, ct))
+            {
+                var dlq = entityName + _options.DlqSuffix;
+                await CreateOrVerifyAsync(
+                    () => admin.QueueExistsAsync(dlq, ct),
+                    () => admin.CreateQueueAsync(new CreateQueueOptions(dlq), ct), ct).ConfigureAwait(false);
+            }
+        }
+        else throw new ArgumentException("Subscriptions require a parent topic; use ProvisionAsync.", nameof(kind));
+        _entityKinds[entityName] = kind;
+    }
+
+    private IServiceBusAdministration CreateAdministrationClient()
+    {
+        if (_administrationFactory is not null) return _administrationFactory();
+        var client = string.IsNullOrWhiteSpace(_options.ConnectionString)
+            ? new ServiceBusAdministrationClient(_options.FullyQualifiedNamespace, _options.Credential!)
+            : new ServiceBusAdministrationClient(_options.ConnectionString);
+        return new ServiceBusAdministrationAdapter(client);
+    }
+
+    private static async Task CreateOrVerifyAsync(
+        Func<Task<bool>> exists,
+        Func<Task> create,
+        CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        try
+        {
+            await create().ConfigureAwait(false);
+        }
+        catch (RequestFailedException ex) when (IsAlreadyExistsConflict(ex))
+        {
+            // Another provisioner won the create race. Treat it as success only
+            // after the management API confirms the intended entity exists.
+            if (!await exists().ConfigureAwait(false)) throw;
+        }
+        catch (ServiceBusException ex) when (ex.Reason == ServiceBusFailureReason.MessagingEntityAlreadyExists)
+        {
+            // The administration SDK reports duplicate entities using this
+            // Service Bus-specific exception rather than RequestFailedException.
+            if (!await exists().ConfigureAwait(false)) throw;
+        }
+    }
+
+    private static bool IsAlreadyExistsConflict(RequestFailedException exception)
+        => exception.Status == 409
+            && (string.Equals(exception.ErrorCode, "EntityAlreadyExists", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(exception.ErrorCode, "MessagingEntityAlreadyExists", StringComparison.OrdinalIgnoreCase));
+
+    public async Task ProvisionAsync(IEnumerable<TopologyDeclaration> declarations, CancellationToken ct = default)
+    {
+        var admin = CreateAdministrationClient();
+        foreach (var declaration in declarations.OrderBy(x => x.Kind == TopologyEntityKind.Subscription ? 1 : 0))
+        {
+            if (declaration.Kind != TopologyEntityKind.Subscription)
+                await EnsureEntityAsync(declaration.Name, declaration.Kind, ct);
+            else
+            {
+                if (string.IsNullOrWhiteSpace(declaration.ParentName)) throw new ArgumentException("A subscription requires a parent topic.");
+                if (!await admin.SubscriptionExistsAsync(declaration.ParentName, declaration.Name, ct))
+                {
+                    var topic = declaration.ParentName;
+                    var subscription = declaration.Name;
+                    await CreateOrVerifyAsync(
+                        () => admin.SubscriptionExistsAsync(topic, subscription, ct),
+                        () => admin.CreateSubscriptionAsync(new CreateSubscriptionOptions(topic, subscription)
+                        {
+                            LockDuration = declaration.LockDuration ?? _options.LockDuration,
+                            MaxDeliveryCount = declaration.MaxDeliveryCount ?? _options.MaxRetries + 1,
+                        }, ct), ct).ConfigureAwait(false);
+                }
+            }
         }
     }
 

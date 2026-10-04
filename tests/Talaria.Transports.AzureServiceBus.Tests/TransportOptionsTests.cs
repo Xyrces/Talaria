@@ -37,10 +37,8 @@ public class TransportOptionsTests
     public void Defaults_PrefetchMatchesProcessorBackpressureBudget()
     {
         var opts = new AzureServiceBusTransportOptions();
-        // The transport widens the SDK's default (1 concurrent call) so the
-        // in-process pump can drain a transactional batch within one
-        // iteration. A regression here would make the saga sample flake
-        // under load.
+        // The in-process pump needs enough prefetch room to absorb normal
+        // handler concurrency without serializing broker callbacks.
         Assert.Equal(10, opts.PrefetchCount);
     }
 

@@ -92,6 +92,16 @@ public class RedisOutboxIntegrationTests : IAsyncLifetime
         Assert.True(await outbox.CompleteAsync(acquired.Lease));
         Assert.Empty(await outbox.AcquirePendingAsync(now.Add(lease).AddSeconds(1), lease, 10));
 
+        // Re-enqueue the same stable outbox id after completion. The store-wide
+        // monotonic token prevents the earlier lease from matching the new entry.
+        await stateStore.TransitionAsync("corr-1", new SagaState { Id = "corr-1", Step = 3 }, [entry]);
+        var reused = Assert.Single(await outbox.AcquirePendingAsync(DateTimeOffset.UtcNow.AddSeconds(1), lease, 10));
+        Assert.True(reused.Lease.Token > acquired.Lease.Token);
+        Assert.False(await outbox.CompleteAsync(acquired.Lease));
+        Assert.True(await outbox.CompleteAsync(reused.Lease));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => outbox.AcquirePendingAsync(now, TimeSpan.Zero, 10));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => outbox.AcquirePendingAsync(now, lease, 0));
+
         // Completion transition: state purged atomically with staging the final dispatch.
         await stateStore.TransitionAsync("corr-1", null, [entry with { Id = Guid.NewGuid() }]);
         Assert.Null(await stateStore.GetAsync("corr-1"));
@@ -115,10 +125,12 @@ public class RedisOutboxIntegrationTests : IAsyncLifetime
         now = DateTimeOffset.UtcNow;
 
         var first = Assert.Single(await outbox.AcquirePendingAsync(now, lease, 10));
+        Assert.False(first.IsReacquired);
 
         // Crash simulation: never completed → after lease expiry another relay acquires
         // the same entry with a bumped fencing token.
         var reacquired = Assert.Single(await outbox.AcquirePendingAsync(now.Add(lease).AddSeconds(1), lease, 10));
+        Assert.True(reacquired.IsReacquired);
         Assert.Equal(first.Message.Id, reacquired.Message.Id);
         Assert.True(reacquired.Lease.Token > first.Lease.Token);
 
@@ -131,5 +143,29 @@ public class RedisOutboxIntegrationTests : IAsyncLifetime
         Assert.True(await outbox.AbandonAsync(reacquired.Lease, retryAt));
         Assert.Empty(await outbox.AcquirePendingAsync(now.AddMinutes(30), lease, 10));
         Assert.Single(await outbox.AcquirePendingAsync(retryAt, lease, 10));
+    }
+
+    [DockerFact]
+    public async Task VersionedTransition_IsAtomicAndIdempotent_AndUsesHashedClusterSlot()
+    {
+        var stateStore = _serviceProvider.GetRequiredService<IStateStore<SagaState>>();
+        var outbox = _serviceProvider.GetRequiredService<IOutboxStore>();
+        const string correlationId = "receipt-saga";
+        const string messageId = "receipt-message";
+        var initial = await stateStore.ReadSnapshotAsync(correlationId, messageId);
+        var outbound = new OutboxMessage(Guid.NewGuid(), "receipt-topic", "System.String", "\"once\"",
+            new MessageHeaders { MessageId = "receipt-outbound" }, DateTimeOffset.UtcNow, null);
+
+        Assert.Equal(SagaCommitStatus.Committed, await stateStore.TryTransitionAsync(correlationId, messageId,
+            initial.Version, new SagaState { Id = correlationId, Step = 1 }, [outbound]));
+        Assert.Equal(SagaCommitStatus.AlreadyProcessed, await stateStore.TryTransitionAsync(correlationId, messageId,
+            initial.Version, new SagaState { Id = correlationId, Step = 99 }, [outbound with { Id = Guid.NewGuid() }]));
+        Assert.Equal(SagaCommitStatus.Conflict, await stateStore.TryTransitionAsync(correlationId, "different-message",
+            initial.Version, new SagaState { Id = correlationId, Step = 3 }, []));
+
+        var after = await stateStore.ReadSnapshotAsync(correlationId, messageId);
+        Assert.True(after.MessageProcessed);
+        Assert.Equal(1, after.State!.Step);
+        Assert.Single(await outbox.AcquirePendingAsync(DateTimeOffset.UtcNow.AddSeconds(1), TimeSpan.FromSeconds(10), 10));
     }
 }

@@ -31,12 +31,26 @@ public sealed class TalariaHostedService : BackgroundService
 
         try
         {
-            await Task.Delay(Timeout.Infinite, stoppingToken);
+            await _listener.Completion.WaitAsync(stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
             // Host is stopping — ExecuteAsync will exit and StopAsync will be called next.
         }
+    }
+
+    public override async Task StartAsync(CancellationToken cancellationToken)
+    {
+        // Host startup must observe mapping validation and topology provisioning errors.
+        try { await _listener.StartAsync().WaitAsync(cancellationToken); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Abort provisioning or consumers that started before the host start deadline.
+            try { await _listener.StopAsync(cancellationToken); }
+            catch (OperationCanceledException) { }
+            throw;
+        }
+        await base.StartAsync(cancellationToken);
     }
 
     public override async Task StopAsync(CancellationToken cancellationToken)

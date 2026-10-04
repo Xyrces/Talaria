@@ -26,6 +26,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Talaria.AppHost\Talaria.AppHost.csproj" />
+    <ProjectReference Include="..\..\src\Talaria.Client.Api\Talaria.Client.Api.csproj" />
+    <ProjectReference Include="..\..\src\Talaria.StateStores.Redis\Talaria.StateStores.Redis.csproj" />
   </ItemGroup>
 
 </Project>

@@ -34,9 +34,14 @@ public sealed class TalariaListener : IAsyncDisposable
 
     private readonly object _lifecycleLock = new();
     private CancellationTokenSource? _runCts;
+    private CancellationTokenSource? _intakeCts;
+    private Task? _stopTask;
     private Task? _runTask;
     private bool _stopped;
     private bool _disposed;
+    private readonly TaskCompletionSource _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public Task Completion => _runTask ?? Task.CompletedTask;
+    public TalariaHealth Health { get; } = new();
 
     /// <summary>
     /// Creates a new listener.
@@ -144,7 +149,7 @@ public sealed class TalariaListener : IAsyncDisposable
 
             if (_runTask is not null)
             {
-                return Task.CompletedTask;
+                return _started.Task;
             }
 
             if (_sagaRegistry.Registrations.Count > 0 && _serviceProvider is null)
@@ -154,7 +159,7 @@ public sealed class TalariaListener : IAsyncDisposable
                     "A service provider is required to resolve IStateStore<TState> instances and create handler scopes.");
             }
 
-            if (_topicRegistry.Registrations.Any(r => r.ConsumerType is not null) && _serviceProvider is null)
+            if (_topicRegistry.Registrations.Any(r => r.ConsumerType is not null || r.ScopedHandler is not null) && _serviceProvider is null)
             {
                 throw new InvalidOperationException(
                     "One or more topic registrations use class-based consumers but no IServiceProvider was supplied to TalariaListener. " +
@@ -162,20 +167,23 @@ public sealed class TalariaListener : IAsyncDisposable
             }
 
             _runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            _runTask = RunAsync(_runCts.Token);
+            _intakeCts = CancellationTokenSource.CreateLinkedTokenSource(_runCts.Token);
+            Health.SetState(ListenerState.Starting);
+            _runTask = RunAndSignalAsync(_runCts.Token);
 
             if (_runTask.IsCompleted)
             {
                 if (_runTask.IsFaulted)
                 {
                     _stopped = true;
+                    _intakeCts.Dispose();
                     _runCts.Dispose();
                 }
 
                 return _runTask;
             }
 
-            return Task.CompletedTask;
+            return _started.Task;
         }
     }
 
@@ -183,45 +191,57 @@ public sealed class TalariaListener : IAsyncDisposable
     /// Cancels all loops, awaits their exit, and disposes listener-created consumers
     /// and producers. Idempotent after stop.
     /// </summary>
-    public async Task StopAsync(CancellationToken cancellationToken = default)
+    public Task StopAsync(CancellationToken cancellationToken = default)
     {
-        Task? runTask;
-        CancellationTokenSource? runCts;
-
         lock (_lifecycleLock)
         {
-            if (_disposed || _stopped || _runTask is null)
-            {
-                return;
-            }
-
-            runTask = _runTask;
-            runCts = _runCts;
+            if (_stopTask is not null) return _stopTask.WaitAsync(cancellationToken);
+            if (_disposed || _stopped || _runTask is null) return Task.CompletedTask;
             _stopped = true;
+            _stopTask = StopCoreAsync(cancellationToken);
+            return _stopTask;
         }
-
-        runCts?.Cancel();
-
-        if (runTask is not null)
-        {
-            try
-            {
-                await runTask.WaitAsync(cancellationToken);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "TalariaListener RunAsync terminated with an unexpected exception.");
-                // Loops are supervised; absorb any fault so stop is idempotent.
-            }
-        }
-
-        runCts?.Dispose();
     }
 
+    private async Task StopCoreAsync(CancellationToken cancellationToken)
+    {
+        Health.SetState(ListenerState.Draining);
+        await _intakeCts!.CancelAsync();
+        try
+        {
+            try { await _runTask!.WaitAsync(_options.ShutdownDrainTimeout, cancellationToken); }
+            catch (TimeoutException)
+            {
+                _logger.LogWarning("Talaria drain timed out; canceling active handlers.");
+                await _runCts!.CancelAsync();
+                // Cancellation is cooperative; bound the second wait too.
+                await _runTask!.WaitAsync(_options.ShutdownDrainTimeout, cancellationToken);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            await _runCts!.CancelAsync();
+            throw;
+        }
+        catch (TimeoutException)
+        {
+            Health.SetState(ListenerState.Faulted);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Talaria listener terminated during shutdown.");
+        }
+        finally
+        {
+            if (_runTask!.IsCompleted)
+            {
+                _intakeCts.Dispose();
+                _runCts!.Dispose();
+                Health.SetState(ListenerState.Stopped);
+            }
+        }
+    }
     /// <summary>
     /// Stops the listener if it is running and disposes the internal request client factory.
     /// Does not dispose caller-owned transports or stores.
@@ -247,24 +267,70 @@ public sealed class TalariaListener : IAsyncDisposable
         GC.SuppressFinalize(this);
     }
 
+    /// <summary>Exports all mapped broker entities, including saga subscriptions, for external provisioning.</summary>
+    public IReadOnlyList<TopologyDeclaration> GetTopology()
+    {
+        var declarations = _topicRegistry.GetTopology(_options).ToList();
+        foreach (var saga in _sagaRegistry.Registrations)
+        foreach (var step in saga.Steps)
+        {
+            declarations.Add(new(TopologyEntityKind.Topic, step.TopicName));
+            declarations.Add(new(TopologyEntityKind.Subscription,
+                SagaConsumerEngine.EndpointName(_options.ApplicationName, saga.StateType, step.TopicName), step.TopicName));
+        }
+        if (declarations.GroupBy(x => x.Name).Any(g => g.Any(x => x.Kind == TopologyEntityKind.Queue) && g.Any(x => x.Kind == TopologyEntityKind.Topic)))
+            throw new InvalidOperationException("A destination cannot be both a command queue and an event topic.");
+        return declarations.Distinct().ToArray();
+    }
+    private async Task RunAndSignalAsync(CancellationToken ct)
+    {
+        try { await RunAsync(ct); }
+        catch (Exception ex)
+        {
+            Health.SetState(ListenerState.Faulted);
+            _started.TrySetException(ex);
+            throw;
+        }
+    }
+
     private async Task RunAsync(CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
+        var validation = new TalariaOptionsValidator().Validate(null, _options);
+        if (validation.Failed) throw new InvalidOperationException(validation.FailureMessage);
         _topicRegistry.Seal();
         _sagaRegistry.Seal();
 
         var topicRegistrations = _topicRegistry.Registrations;
         var sagaRegistrations = _sagaRegistry.Registrations;
 
-        var pipeline = new MessageProcessingPipeline(_stores.IdempotencyStore, _options, _logger);
+        if (_serviceProvider is not null && _serviceProvider.GetServices<ITransport>().Skip(1).Any())
+            throw new InvalidOperationException("Select one Talaria transport per host.");
+        if ((topicRegistrations.Any(r => RetryPolicy.IsEnabled(r.RetryPolicy ?? _options.DefaultRetryPolicy))
+            || sagaRegistrations.Count > 0 && RetryPolicy.IsEnabled(_options.DefaultRetryPolicy)) && _stores.DeferralStore is null)
+            throw new InvalidOperationException("Delayed retries require persistence. Configure UseInMemory(), UseRedisPersistence(), or UseSqlServerPersistence().");
+        if (topicRegistrations.Any(r => r.Transactional) && _serviceProvider?.GetService<IServiceProviderIsService>()?.IsService(typeof(IMessageTransaction)) != true)
+            throw new InvalidOperationException("Transactional endpoints require a registered IMessageTransaction provider.");
+        if (sagaRegistrations.Any(r => r.DispatchTopics.Count > 0) && _stores.OutboxStore is null)
+            throw new InvalidOperationException("Saga dispatch requires an outbox in the same persistence store. Configure UseInMemory(), UseRedisPersistence(), or UseSqlServerPersistence().");
+        var declarations = GetTopology();
+        if (_options.AutoProvisionTopology)
+        {
+            var provisioner = _serviceProvider?.GetService<ITopologyProvisioner>() ?? _transport as ITopologyProvisioner;
+            if (declarations.Count > 0 && provisioner is not null)
+                await provisioner.ProvisionAsync(declarations, ct);
+        }
+        var failures = _serviceProvider?.GetService<IFailedMessageStore>();
+        var pipeline = new MessageProcessingPipeline(_stores.IdempotencyStore, _options, _logger, failures);
 
         TopicConsumerEngine? topicEngine = null;
         SagaConsumerEngine? sagaEngine = null;
         DeferralSweeperEngine? sweeperEngine = null;
         OutboxRelayEngine? relayEngine = null;
+        var loopTasks = new List<Task>();
 
         try
         {
-            var loopTasks = new List<Task>();
 
             if (topicRegistrations.Count > 0)
             {
@@ -276,7 +342,7 @@ public sealed class TalariaListener : IAsyncDisposable
                     pipeline,
                     _logger,
                     _serviceProvider);
-                loopTasks.Add(topicEngine.RunAsync(ct));
+                loopTasks.Add(topicEngine.RunAsync(ct, _intakeCts!.Token, Health));
             }
 
             if (sagaRegistrations.Count > 0)
@@ -290,17 +356,14 @@ public sealed class TalariaListener : IAsyncDisposable
                     _stores.OutboxStore,
                     pipeline,
                     _logger);
-                loopTasks.Add(sagaEngine.RunAsync(ct));
+                loopTasks.Add(sagaEngine.RunAsync(ct, _intakeCts!.Token, Health));
 
-                if (_stores.OutboxStore is not null && sagaEngine.DispatchRoutes.Count > 0)
-                {
-                    relayEngine = new OutboxRelayEngine(
-                        _stores.OutboxStore,
-                        _transport,
-                        _options,
-                        _logger);
-                    loopTasks.Add(relayEngine.RunAsync(ct));
-                }
+            }
+
+            if (_stores.OutboxStore is not null)
+            {
+                relayEngine = new OutboxRelayEngine(_stores.OutboxStore, _transport, _options, _logger, failures, Health);
+                loopTasks.Add(relayEngine.RunAsync(_intakeCts!.Token));
             }
 
             if (_stores.DeferralStore is not null)
@@ -309,17 +372,29 @@ public sealed class TalariaListener : IAsyncDisposable
                     _stores.DeferralStore,
                     _transport,
                     _options,
-                    _logger);
-                loopTasks.Add(sweeperEngine.RunAsync(ct));
+                    _logger, failures, Health);
+                loopTasks.Add(sweeperEngine.RunAsync(_intakeCts!.Token));
             }
 
+            Health.SetState(ListenerState.Running);
+            _started.TrySetResult();
             if (loopTasks.Count > 0)
             {
                 try
                 {
-                    await Task.WhenAll(loopTasks);
+                    var remaining = loopTasks.ToList();
+                    while (remaining.Count > 0)
+                    {
+                        var completed = await Task.WhenAny(remaining);
+                        try { await completed; } // Surface failures without waiting for unrelated endless loops.
+                        catch (OperationCanceledException) when (ct.IsCancellationRequested || _intakeCts!.IsCancellationRequested)
+                        {
+                            // Relays stop immediately; active handlers still have their drain window.
+                        }
+                        remaining.Remove(completed);
+                    }
                 }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                catch (OperationCanceledException) when (ct.IsCancellationRequested || _intakeCts!.IsCancellationRequested)
                 {
                     // Expected during shutdown; the finally block disposes engine resources.
                 }
@@ -327,6 +402,9 @@ public sealed class TalariaListener : IAsyncDisposable
         }
         finally
         {
+            await _runCts!.CancelAsync();
+            try { await Task.WhenAll(loopTasks); }
+            catch (Exception) { /* Preserve the original engine error; all loops are now stopped. */ }
             if (relayEngine is not null)
             {
                 await relayEngine.DisposeAsync();

@@ -8,6 +8,8 @@ namespace Talaria.Core.Abstractions;
 /// <since>1.0.0</since>
 public sealed class ConsumerOptions
 {
+    /// <summary>Queue for commands, topic subscription for independent event consumers.</summary>
+    public TopologyEntityKind EntityKind { get; set; } = TopologyEntityKind.Topic;
     /// <summary>
     /// Consumer group identifier. If null, auto-generated as {ApplicationName}.{topic}.
     /// </summary>
