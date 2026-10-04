@@ -279,6 +279,66 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public async Task Inbox_keys_and_lease_operations_are_scoped_to_application()
+    {
+        await fixture.ResetAsync();
+        var otherServices = new ServiceCollection();
+        otherServices.AddLogging();
+        otherServices.AddDbContext<TestDbContext>(options => options.UseSqlServer(fixture.ConnectionString, sql =>
+            sql.EnableRetryOnFailure(3, TimeSpan.FromSeconds(2), null)));
+        otherServices.AddTalaria(options => options.ApplicationName = "sql-persistence-other-app")
+            .UseSqlServerPersistence<TestDbContext>();
+        await using var otherProvider = otherServices.BuildServiceProvider();
+
+        var storeA = fixture.Services.GetRequiredService<IIdempotencyStore>();
+        var storeB = otherProvider.GetRequiredService<IIdempotencyStore>();
+        const string messageId = "shared-message";
+        const string consumerGroup = "shared-worker-group";
+        var appAAcquisition = await storeA.AcquireAsync(messageId, consumerGroup, TimeSpan.FromSeconds(30));
+        Assert.Equal(IdempotencyStatus.Acquired, appAAcquisition.Status);
+        var appALock = Assert.IsType<IdempotencyLock>(appAAcquisition.Lock);
+        var appBAcquisition = await storeB.AcquireAsync(messageId, consumerGroup, TimeSpan.FromSeconds(30));
+        Assert.Equal(IdempotencyStatus.Acquired, appBAcquisition.Status);
+        var appBLock = Assert.IsType<IdempotencyLock>(appBAcquisition.Lock);
+
+        Assert.NotEqual(appALock.Token, appBLock.Token);
+        Assert.Equal(IdempotencyStatus.Busy, (await storeA.AcquireAsync(messageId, consumerGroup, TimeSpan.FromSeconds(30))).Status);
+        Assert.False(await storeA.RenewAsync(appBLock, TimeSpan.FromSeconds(30)));
+        Assert.False(await storeB.RenewAsync(appALock, TimeSpan.FromSeconds(30)));
+        await storeA.ReleaseLockAsync(appBLock);
+        await storeB.ReleaseLockAsync(appALock);
+        await Assert.ThrowsAsync<IdempotencyLeaseLostException>(() => storeA.MarkCompleteAsync(appBLock));
+        await Assert.ThrowsAsync<IdempotencyLeaseLostException>(() => storeB.MarkCompleteAsync(appALock));
+        Assert.True(await storeA.RenewAsync(appALock, TimeSpan.FromSeconds(30)));
+        Assert.True(await storeB.RenewAsync(appBLock, TimeSpan.FromSeconds(30)));
+
+        await storeA.MarkCompleteAsync(appALock);
+        Assert.Equal(IdempotencyStatus.Completed,
+            (await storeA.AcquireAsync(messageId, consumerGroup, TimeSpan.FromSeconds(30))).Status);
+        Assert.Equal(IdempotencyStatus.Busy,
+            (await storeB.AcquireAsync(messageId, consumerGroup, TimeSpan.FromSeconds(30))).Status);
+
+        await storeB.ReleaseLockAsync(appBLock);
+        var releasedAppBAcquisition = await storeB.AcquireAsync(messageId, consumerGroup, TimeSpan.FromSeconds(30));
+        Assert.Equal(IdempotencyStatus.Acquired, releasedAppBAcquisition.Status);
+        var releasedAppBLock = Assert.IsType<IdempotencyLock>(releasedAppBAcquisition.Lock);
+        Assert.True(await storeB.RenewAsync(releasedAppBLock, TimeSpan.FromSeconds(30)));
+        await storeB.MarkCompleteAsync(releasedAppBLock);
+        Assert.Equal(IdempotencyStatus.Completed,
+            (await storeB.AcquireAsync(messageId, consumerGroup, TimeSpan.FromSeconds(30))).Status);
+
+        const string appACompletedMessage = "app-a-completed-before-app-b";
+        var completedInA = await storeA.AcquireAsync(appACompletedMessage, consumerGroup, TimeSpan.FromSeconds(30));
+        Assert.Equal(IdempotencyStatus.Acquired, completedInA.Status);
+        await storeA.MarkCompleteAsync(Assert.IsType<IdempotencyLock>(completedInA.Lock));
+        Assert.Equal(IdempotencyStatus.Completed,
+            (await storeA.AcquireAsync(appACompletedMessage, consumerGroup, TimeSpan.FromSeconds(30))).Status);
+        var firstInB = await storeB.AcquireAsync(appACompletedMessage, consumerGroup, TimeSpan.FromSeconds(30));
+        Assert.Equal(IdempotencyStatus.Acquired, firstInB.Status);
+        await storeB.MarkCompleteAsync(Assert.IsType<IdempotencyLock>(firstInB.Lock));
+    }
+
+    [Fact]
     public async Task Failed_messages_are_application_scoped_and_can_be_listed_and_deleted()
     {
         await fixture.ResetAsync();

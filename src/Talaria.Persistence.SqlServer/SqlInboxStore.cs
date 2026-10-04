@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 using Microsoft.EntityFrameworkCore;
+using Talaria.Core;
 using Talaria.Core.Abstractions;
 
 namespace Talaria.Persistence.SqlServer;
 
-internal sealed class SqlInboxStore<TDb>(DatabaseWork<TDb> database) : IIdempotencyStore where TDb : DbContext
+internal sealed class SqlInboxStore<TDb>(DatabaseWork<TDb> database, TalariaOptions options) : IIdempotencyStore where TDb : DbContext
 {
-    private static string Key(string id, string endpoint) => DatabaseWork<TDb>.Key("inbox", endpoint, id);
+    private string Key(string id, string endpoint) => DatabaseWork<TDb>.Key("inbox", options.ApplicationName, endpoint, id);
     public Task<IdempotencyAcquisition> AcquireAsync(string messageId, string consumerQueue, TimeSpan expiration, CancellationToken ct = default)
     {
         if (expiration <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(expiration));

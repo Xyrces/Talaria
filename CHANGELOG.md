@@ -18,6 +18,7 @@ backwards-compatible fixes.
 - Fixed inbox ownership/renewal, Kafka settlement across pending offsets, atomic versioned saga transitions with processed-message receipts, endpoint-targeted retries, and durable JSON relay without loading historical CLR assemblies.
 - Fixed Azure Service Bus queue/subscription provisioning, token credentials, processor lifecycle, and settlement lifetime. Its former buffered transaction API now rejects unsupported transactions; use a persistence outbox.
 - Fixed review findings: RabbitMQ subscriptions isolate topic/group pairs; saga subscriptions honor message-type headers and skip known messages for other sagas; SQL acquisition supports read-committed snapshot isolation and uses consistent `dbo` infrastructure objects; Azure Service Bus provisioning tolerates verified concurrent creation.
+- Fixed SQL inbox isolation between applications sharing a database and consumer identity. Acquisition, renewal, completion, and release now use application-scoped keys; existing unscoped inbox receipts require the documented cutover.
 - Breaking: custom inbox/state-store interfaces, saga subscription identities, Redis v2 keys, and startup validation for retry/outbox requirements. See [migration instructions](docs/migrations.md). Redis deployments require an explicit drain/cutover or data migration.
 - Request/reply from the existing implementation remains available. Generated Native AOT bindings, public scheduling/timeouts, and compensation workflows remain later roadmap items.
 
