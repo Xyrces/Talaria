@@ -17,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      TALARIA_REQUIRE_DOCKER: 1
 
     steps:
       - name: Checkout Code
@@ -27,7 +29,13 @@ jobs:
       - name: Setup .NET SDK
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Require Docker
+        run: docker info
 
       - name: Restore Dependencies
         run: dotnet restore Talaria.slnx
