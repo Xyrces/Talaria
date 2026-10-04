@@ -119,6 +119,76 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public async Task Transaction_receipt_uses_retry_root_across_new_attempt_message_ids()
+    {
+        await fixture.ResetAsync();
+        const string application = "retry-root-tests";
+        const string rootMessageId = "root-message";
+        var transport = new InMemoryTransport();
+        var executions = 0;
+        var host = Host.CreateDefaultBuilder()
+            .ConfigureLogging(logging => logging.ClearProviders())
+            .ConfigureServices(services =>
+            {
+                services.AddDbContext<TestDbContext>(options => options.UseSqlServer(fixture.ConnectionString, sql =>
+                    sql.EnableRetryOnFailure(3, TimeSpan.FromSeconds(2), null)));
+                services.AddTalaria(options => options.ApplicationName = application)
+                    .UseTransport(transport)
+                    .UseSqlServerPersistence<TestDbContext>();
+            }).Build();
+
+        try
+        {
+            host.MapCommand<RetryIdentityCommand>((RetryIdentityCommand message, TestDbContext db) =>
+            {
+                if (message.Id == 5)
+                {
+                    var attempt = Interlocked.Increment(ref executions);
+                    db.BusinessRows.Add(new BusinessRow { Id = attempt, Value = "retry-sensitive" });
+                }
+                else
+                {
+                    db.BusinessRows.Add(new BusinessRow { Id = 100, Value = "barrier" });
+                }
+
+                return Task.CompletedTask;
+            }).WithTransaction();
+
+            await host.StartAsync();
+            var topic = MessageNames.Destination(MessageNames.Contract(typeof(RetryIdentityCommand)));
+            await using var producer = await transport.CreateProducerAsync<RetryIdentityCommand>(topic, new ProducerOptions());
+            await producer.ProduceAsync(new RetryIdentityCommand(5), new MessageHeaders { MessageId = rootMessageId });
+            await EventuallyAsync(async () =>
+            {
+                await using var scope = fixture.Services.CreateAsyncScope();
+                var db = scope.ServiceProvider.GetRequiredService<TestDbContext>();
+                return await db.BusinessRows.CountAsync() == 1 && await db.Set<TalariaReceiptRow>().CountAsync() == 1;
+            }, TimeSpan.FromSeconds(10));
+
+            await producer.ProduceAsync(new RetryIdentityCommand(5),
+                new MessageHeaders { MessageId = "attempt-2", RetryRootMessageId = rootMessageId });
+            // This ordered delivery proves the retry has settled before the assertions below.
+            await producer.ProduceAsync(new RetryIdentityCommand(100), new MessageHeaders { MessageId = "barrier" });
+            await EventuallyAsync(async () =>
+            {
+                await using var scope = fixture.Services.CreateAsyncScope();
+                var db = scope.ServiceProvider.GetRequiredService<TestDbContext>();
+                return await db.BusinessRows.AnyAsync(row => row.Id == 100) && await db.Set<TalariaReceiptRow>().CountAsync() == 2;
+            }, TimeSpan.FromSeconds(10));
+
+            await using var verificationScope = fixture.Services.CreateAsyncScope();
+            var verificationDb = verificationScope.ServiceProvider.GetRequiredService<TestDbContext>();
+            Assert.Equal(1, executions);
+            Assert.Equal(new[] { "retry-sensitive", "barrier" }, (await verificationDb.BusinessRows.OrderBy(row => row.Id).Select(row => row.Value).ToArrayAsync()));
+        }
+        finally
+        {
+            await host.StopAsync();
+            host.Dispose();
+        }
+    }
+
+    [Fact]
     public async Task Saga_transitions_enforce_versions_and_replay_completed_message_receipts()
     {
         await fixture.ResetAsync();
@@ -325,6 +395,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
     }
 
     private sealed record PlaceOrderCommand(int Id, bool Fail);
+    private sealed record RetryIdentityCommand(int Id);
     private sealed record OrderPlaced(int Id);
 
     private sealed class HandlerProbe

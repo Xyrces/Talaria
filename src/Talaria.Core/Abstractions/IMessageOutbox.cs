@@ -10,5 +10,6 @@ public interface IMessageOutbox
 /// <summary>Runs a handler and records completion in the same application database transaction.</summary>
 public interface IMessageTransaction
 {
+    /// <summary>Uses the original message identity across retry attempts so a committed handler is not repeated.</summary>
     Task ExecuteAsync(string endpoint, string messageId, Func<CancellationToken, Task> handler, CancellationToken ct);
 }

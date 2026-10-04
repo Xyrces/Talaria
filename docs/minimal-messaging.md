@@ -64,6 +64,8 @@ app.MapCommand<PlaceOrder>(async (PlaceOrder command, OrdersDb db, IMessageBus b
 
 Apply the application's EF migrations before starting Talaria. `WithTransaction()` commits the shared scoped context automatically on success; external HTTP calls and other side effects are outside that database transaction and must tolerate retries. Use one persistence bundle per host. The SQL bundle includes saga state, receive receipts, outbox, durable retry storage, and failure retention.
 
+Transactional receive receipts use the original message identity across retry attempts. If a commit succeeds but its confirmation is lost, a subsequent retry checks the same receipt before running business code again.
+
 Mapped broker entities are provisioned at startup by default. With externally managed topology, set `TalariaOptions.AutoProvisionTopology = false` and create the entities before running the host. `TalariaListener.GetTopology()` exports the required queues, topics, and subscriptions, including sagas. `TopicRegistry.GetTopology(options)` exports just the stateless and request mappings. Start receivers before sending to a destination whose broker entities have not yet been created.
 
 Request/reply factories use a dedicated reply address per factory. With automatic topology disabled, provision `RequestClientFactory.InboxTopic` as a queue before issuing requests. Retire old reply queues through the broker's operational tooling when their factory is no longer used.

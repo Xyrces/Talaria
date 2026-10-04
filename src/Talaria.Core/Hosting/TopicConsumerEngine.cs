@@ -187,7 +187,7 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
                                         envelope.Timestamp, envelope.CorrelationId, envelope.SourceTopic), scope.ServiceProvider, token);
                                 if (registration.Transactional)
                                     await scope.ServiceProvider.GetRequiredService<IMessageTransaction>().ExecuteAsync(consumerGroup,
-                                        envelope.Headers.MessageId ?? throw new InvalidOperationException("Transactions require MessageId."), Invoke, ownership.Token);
+                                        envelope.Headers.RetryRootMessageId ?? envelope.Headers.MessageId ?? throw new InvalidOperationException("Transactions require MessageId."), Invoke, ownership.Token);
                                 else await Invoke(ownership.Token);
                             }
                             else
