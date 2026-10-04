@@ -63,6 +63,17 @@ public class RedisStateStoreIntegrationTests : IAsyncLifetime
         var loadedAfterDelete = await stateStore.GetAsync(correlationId);
         Assert.Null(loadedAfterDelete);
     }
+
+    [DockerFact]
+    public async Task CorrelationIds_CannotOverlapSagaHistoryKeys()
+    {
+        var stateStore = _serviceProvider.GetRequiredService<IStateStore<DummyState>>();
+        await stateStore.SaveAsync("x", new DummyState { Value = "first", StepCount = 1 });
+        await stateStore.SaveAsync("x:history", new DummyState { Value = "second", StepCount = 2 });
+
+        Assert.Equal("first", (await stateStore.GetAsync("x"))!.Value);
+        Assert.Equal("second", (await stateStore.GetAsync("x:history"))!.Value);
+    }
     
     public class DummyState
     {

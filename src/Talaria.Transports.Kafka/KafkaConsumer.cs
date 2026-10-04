@@ -16,9 +16,8 @@ namespace Talaria.Transports.Kafka;
 /// All <see cref="IConsumer{T}"/> access happens on a single long-running poll thread:
 /// commit requests from <see cref="CommitAsync"/>/<see cref="NackAsync"/> are marshaled
 /// through an internal channel and drained by the poll loop (Confluent consumers are not
-/// thread-safe). Commits are therefore asynchronous — <see cref="CommitAsync"/> returns
-/// once the request is queued; a crash before the next drain means redelivery, which the
-/// idempotency stores cover. Any still-queued commits are flushed on dispose.
+/// thread-safe). <see cref="CommitAsync"/> returns after the broker confirms the contiguous
+/// settled offset; a crash before confirmation means redelivery, which idempotency stores cover.
 /// <para>
 /// A consumer instance supports exactly one enumeration. The host restarts consumption by
 /// creating a new consumer via <see cref="ITransport.CreateConsumerAsync{T}"/>. Reusing a
@@ -26,7 +25,7 @@ namespace Talaria.Transports.Kafka;
 /// than once, throws <see cref="InvalidOperationException"/>.
 /// </para>
 /// </summary>
-internal sealed class KafkaConsumer<T> : IConsumer<T>
+internal sealed class KafkaConsumer<T> : IConsumer<T>, IConsumerReadiness
 {
     private readonly IConsumer<string, byte[]> _consumer;
     private readonly IProducer<string, byte[]> _producer;
@@ -37,18 +36,24 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
     private readonly ILogger? _logger;
 
     // Commit requests marshaled to the poll thread (the only thread touching _consumer).
-    private readonly Channel<TopicPartitionOffset> _commitRequests =
-        Channel.CreateUnbounded<TopicPartitionOffset>(new UnboundedChannelOptions
+    private sealed record CommitRequest(TopicPartitionOffset Position, TaskCompletionSource Completion);
+    private readonly SettlementTracker _settlements = new();
+    private readonly List<CommitRequest> _waitingCommits = new();
+    private readonly Channel<CommitRequest> _commitRequests =
+        Channel.CreateUnbounded<CommitRequest>(new UnboundedChannelOptions
         {
             SingleReader = true,
             SingleWriter = false
         });
 
     private readonly CancellationTokenSource _disposeCts = new();
+    private readonly TaskCompletionSource _ready;
     private volatile Task? _pumpTask;
     private int _disposed;
     private int _consuming;
     private int _enumerating;
+
+    public Task Ready => _ready.Task;
 
     public KafkaConsumer(
         IConsumer<string, byte[]> consumer,
@@ -57,7 +62,8 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
         string dlqSuffix,
         ILogger? logger = null,
         int bufferCapacity = 100,
-        bool includeDlqExceptionDetails = false)
+        bool includeDlqExceptionDetails = false,
+        TaskCompletionSource? readiness = null)
     {
         _consumer = consumer;
         _producer = producer;
@@ -66,6 +72,7 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
         _logger = logger;
         _bufferCapacity = bufferCapacity > 0 ? bufferCapacity : 100;
         _includeDlqExceptionDetails = includeDlqExceptionDetails;
+        _ready = readiness ?? new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
     public IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsync(CancellationToken ct = default)
@@ -151,10 +158,18 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
 
                 DrainCommits();
 
+                // A factory-created consumer signals readiness through Confluent's
+                // assignment callback, including a successful empty assignment for an
+                // extra replica. Directly constructed consumers use this fallback.
+                if (!_ready.Task.IsCompleted && _consumer.Assignment.Count > 0)
+                    _ready.TrySetResult();
+
                 if (consumeResult == null || consumeResult.IsPartitionEOF)
                 {
                     continue;
                 }
+
+                _settlements.Delivered(consumeResult.TopicPartitionOffset);
 
                 var talariaHeaders = new MessageHeaders();
                 if (consumeResult.Message.Headers != null)
@@ -178,7 +193,8 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
                         : "Failed to deserialize the message payload. Enable IncludeExceptionDetailsInDlq for details.";
 
                     await RouteToDlqAsync(consumeResult, talariaHeaders, ct).ConfigureAwait(false);
-                    _consumer.Commit(consumeResult);
+                    _settlements.Settle(consumeResult.TopicPartitionOffset);
+                    DrainCommits();
                     continue;
                 }
 
@@ -186,7 +202,8 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
                 {
                     talariaHeaders.DlqReason = "null_payload";
                     await RouteToDlqAsync(consumeResult, talariaHeaders, ct).ConfigureAwait(false);
-                    _consumer.Commit(consumeResult);
+                    _settlements.Settle(consumeResult.TopicPartitionOffset);
+                    DrainCommits();
                     continue;
                 }
 
@@ -202,12 +219,31 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
                     Offset = consumeResult.Offset.Value
                 };
 
-                await writer.WriteAsync(env, ct).ConfigureAwait(false);
+                if (!writer.TryWrite(env))
+                {
+                    var paused = _consumer.Assignment;
+                    _consumer.Pause(paused);
+                    try
+                    {
+                        while (!writer.TryWrite(env))
+                        {
+                            ct.ThrowIfCancellationRequested();
+                            DrainCommits();
+                            // Keep group membership alive while the application applies backpressure.
+                            var unexpected = _consumer.Consume(TimeSpan.FromMilliseconds(10));
+                            if (unexpected is not null && !unexpected.IsPartitionEOF)
+                                throw new InvalidOperationException("Kafka assignment changed while buffered; restarting from settled offsets.");
+                            await Task.Delay(10, ct);
+                        }
+                    }
+                    finally { _consumer.Resume(paused.Intersect(_consumer.Assignment)); }
+                }
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (Exception ex)
         {
+            _ready.TrySetException(ex);
             writer.TryComplete(ex);
             return;
         }
@@ -215,7 +251,13 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
         {
             // Best-effort flush of any commits queued just before the pump stops, then
             // leave the group: the next enumeration rejoins and resumes from committed offsets.
-            DrainCommits();
+            try { DrainCommits(); }
+            catch (Exception ex) { _logger?.LogError(ex, "Final Kafka settlement failed; records remain recoverable."); }
+            _commitRequests.Writer.TryComplete();
+            while (_commitRequests.Reader.TryRead(out var request)) _waitingCommits.Add(request);
+            foreach (var request in _waitingCommits)
+                request.Completion.TrySetException(new InvalidOperationException("Kafka consumer stopped before settlement was confirmed."));
+            _waitingCommits.Clear();
             try { _consumer.Unsubscribe(); } catch { }
             writer.TryComplete();
         }
@@ -233,24 +275,33 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
     /// </summary>
     private void DrainCommits()
     {
-        List<TopicPartitionOffset>? batch = null;
-        while (_commitRequests.Reader.TryRead(out var tpo))
+        while (_commitRequests.Reader.TryRead(out var request))
         {
-            (batch ??= new List<TopicPartitionOffset>()).Add(tpo);
+            _waitingCommits.Add(request);
+            _settlements.Settle(request.Position);
         }
-
-        if (batch is null)
-        {
-            return;
-        }
-
+        var batch = _settlements.Ready();
+        if (batch.Count == 0) return;
         try
         {
             _consumer.Commit(batch);
+            foreach (var next in batch)
+            {
+                _settlements.Committed(next);
+                foreach (var completed in _waitingCommits.Where(x => x.Position.TopicPartition.Equals(next.TopicPartition)
+                    && x.Position.Offset.Value < next.Offset.Value).ToArray())
+                {
+                    completed.Completion.TrySetResult();
+                    _waitingCommits.Remove(completed);
+                }
+            }
         }
         catch (Exception ex)
         {
             _logger?.LogError(ex, "Failed to commit offsets on topic {Topic}; affected messages will be redelivered.", _topic);
+            foreach (var request in _waitingCommits) request.Completion.TrySetException(ex);
+            _waitingCommits.Clear();
+            throw;
         }
     }
 
@@ -259,13 +310,16 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
         if (!string.IsNullOrEmpty(message.SourceTopic) && message.Partition is int partition)
         {
             // Kafka committed offsets mean "the next offset to fetch", hence + 1.
-            var tpo = new TopicPartitionOffset(message.SourceTopic, new Partition(partition), new Offset(message.Offset + 1));
-            if (!_commitRequests.Writer.TryWrite(tpo))
+            var tpo = new TopicPartitionOffset(message.SourceTopic, new Partition(partition), new Offset(message.Offset));
+            var request = new CommitRequest(tpo, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+            if (!_commitRequests.Writer.TryWrite(request))
             {
                 _logger?.LogError(
                     "Cannot queue offset commit for message on topic {Topic}: the consumer is shutting down. Leaving the message uncommitted for redelivery.",
                     message.SourceTopic);
+                throw new InvalidOperationException("Kafka consumer is stopping; settlement was not queued.");
             }
+            return request.Completion.Task.WaitAsync(ct);
         }
         else
         {
@@ -275,7 +329,7 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
                 "Cannot commit offset for message on topic {Topic}: missing partition metadata. Leaving the message uncommitted for redelivery.",
                 message.SourceTopic);
         }
-        return Task.CompletedTask;
+        throw new InvalidOperationException("Kafka settlement requires source topic and partition metadata.");
     }
 
     public async Task NackAsync(MessageEnvelope<T> message, CancellationToken ct = default)
@@ -337,7 +391,7 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>
         }
 
         // Safe to touch _consumer here: the pump (the only other accessor) has finished.
-        DrainCommits();
+        // The pump settles and fails all outstanding requests before returning.
 
         try { _consumer.Close(); } catch { }
         _consumer.Dispose();

@@ -1,6 +1,27 @@
 # Talaria Saga Engine
 
-Talaria is a distributed messaging and saga orchestration library for **.NET** (multi-targeting `net8.0`, `net9.0`, `net10.0`) built on **Confluent Kafka**, **Azure Service Bus**, and **Redis**, with a zero-dependency in-memory provider for lightweight single-process deployments, prototyping, and tests.
+Build messaging workflows with typed commands and events on a Generic Host. Start with the runnable, broker-free example:
+
+```bash
+dotnet run --project samples/MinimalMessaging
+```
+
+```csharp
+builder.Services.AddTalaria(t => t.UseInMemory());
+
+var app = builder.Build();
+app.MapCommand<PlaceOrder>(async (PlaceOrder command, IMessageBus bus, CancellationToken ct) =>
+{
+    await bus.PublishAsync(new OrderPlaced(command.OrderId), ct);
+});
+app.MapEvent<OrderPlaced>((OrderPlaced message, ILogger<OrderPlaced> log) =>
+{
+    log.LogInformation("Order placed: {OrderId}", message.OrderId);
+});
+```
+`MapCommand<T>` handles work through a shared queue. `MapEvent<T>` gives each application subscriber its own event stream. Handlers can receive the message, `CancellationToken`, `ConsumeContext<T>`, and services from dependency injection. Read the [minimal messaging guide](docs/minimal-messaging.md) for retries and SQL transactions, and the [migration guide](docs/migrations.md) before changing persistence formats or endpoint identities.
+
+Talaria is a distributed messaging and saga orchestration library for **.NET** (multi-targeting `net8.0`, `net9.0`, `net10.0`) with **Kafka**, **RabbitMQ**, and **Azure Service Bus** transports, plus **Redis** and **SQL Server/EF Core** persistence, with a zero-dependency in-memory provider for lightweight single-process deployments, prototyping, and tests.
 
 ## Delivery guarantees — stated precisely
 
@@ -8,8 +29,8 @@ Talaria provides **at-least-once delivery with idempotent processing**:
 
 - When delayed retries are disabled (the default), consumers commit offsets only after successful processing; unhandled handler failures are routed to the DLQ. When retries are enabled, a handler failure commits the original delivery as soon as a retry copy is durably scheduled in the `IDeferralStore`; the sweeper republishes the retry copy later. The original message is therefore acknowledged before the retry runs, and the idempotency store (keyed by `MessageId` scoped to the consumer group) ensures the retry copy — which carries a freshly minted `MessageId` — is processed once per consumer group.
 - A distributed idempotency store (`IIdempotencyStore`) deduplicates by `MessageId` within a consumer group using fencing-token locks, so redeliveries and duplicate publishes are processed once per consumer group.
-- Saga outbound messages go through a **transactional outbox**: the state transition and its outbound messages are staged in one atomic store operation (`IStateStore<TState>.TransitionAsync`), then a leased relay publishes them at-least-once. Each staged message carries a minted `MessageId`, so a duplicate publish after a relay crash is deduplicated by the downstream idempotency gate. A crash after the atomic transition loses nothing.
-- The replay window that remains is between the atomic transition and the offset commit: a crash there replays the message against transitioned state. Starter steps are protected by a built-in replay guard; custom step handlers should be idempotent.
+- Saga outbound messages go through a **transactional outbox**: the state transition and its outbound messages are staged in one atomic store operation (`IStateStore<TState>.TryTransitionAsync`), then a leased relay publishes them at-least-once. Each staged message carries a minted `MessageId`, so a duplicate publish after a relay crash is deduplicated by the downstream idempotency gate. A crash after the atomic transition loses nothing.
+- Versioned saga transitions persist the triggering message receipt with state and outgoing messages. A replay after that commit skips the transition; concurrent state versions are rejected and retried from fresh state. Handlers still need idempotent external effects, and receipts expire after the retention window.
 - Deferrals and outbox entries use **lease (visibility-timeout) semantics**, the Azure Service Bus peek-lock analogue: acquiring an entry hides it for the lease duration instead of removing it, so a sweeper/relay crash never loses a message; the lease expires and another worker re-acquires it. Completions are fenced by a monotonic lease token.
 
 ## Core Features
@@ -112,7 +133,7 @@ builder.Services.AddTalaria()
 
 > The ASB transport implements the same `ITransport` / `IConsumer<T>` / `IProducer<T>` contract as Kafka and InMemory, so existing saga code runs unchanged. See [`src/Talaria.Client.Api/Sagas/OnboardingSaga.cs`](src/Talaria.Client.Api/Sagas/OnboardingSaga.cs) and the `ServiceBus` branch of the `Messaging:Provider` switch in [`src/Talaria.Client.Api/Program.cs`](src/Talaria.Client.Api/Program.cs).
 >
-> The ASB transport currently provides buffered transactional semantics (mirroring the in-memory transport): produces obtained via `BeginTransactionAsync` are committed atomically when the session commits and discarded on abort. Consumer-offset transactions (KIP-98-style exactly-once with the broker) are not yet implemented; the saga state store + idempotency store provide at-least-once delivery with idempotent duplicate suppression, and saga step handlers must remain idempotent.
+> Azure Service Bus and RabbitMQ reject `BeginTransactionAsync`: buffered sends cannot atomically commit application state. Use the persistence outbox for reliable saga dispatch, and SQL Server `WithTransaction()` for atomic application writes and outgoing messages.
 >
 > Entity provisioning (queues, topics, subscriptions) is the host's responsibility and is exposed through the `ITopologyProvisioner` abstraction. The transport exposes a convenience `EnsureEntityAsync(name, kind, ct)` helper for the saga sample; production deployments should call `ITopologyProvisioner.ProvisionAsync(declarations, ct)` from their startup code so the host's full topology is declared in one place.
 >
@@ -136,13 +157,9 @@ builder.Services.AddTalaria()
 > for the lifetime of the process. In long-running processes with high dead-letter
 > volume, monitor memory usage accordingly.
 
-> Without an `IDeferralStore`, out-of-order saga messages and delayed retry copies
-> are routed to the DLQ (`deferral_unavailable` / `retry_unavailable`) instead of
-> being deferred.
+> Delayed retries require an `IDeferralStore` and fail startup without one. Out-of-order saga messages without deferral storage are routed to the DLQ (`deferral_unavailable`).
 >
-> Without an `IOutboxStore` (registered automatically by both state stores above),
-> saga dispatch falls back to direct transactional produce: the state save and the
-> message publish are not atomic in that mode, and a startup warning is logged.
+> Saga dispatch requires an `IOutboxStore` in the same persistence provider as the state store. Startup rejects dispatch mappings without an outbox.
 
 ### Simple Stateless Handlers
 
@@ -409,4 +426,4 @@ The commercial offering is delivered under its own repository and license terms 
 
 ## Publishing & CI/CD
 
-The GitHub Actions workflow runs restore, build, the test suite, and a `dotnet list package --vulnerable --include-transitive` audit on every push and PR with `contents: read` only. Docker-backed AppHost and integration tests run locally but are skipped in GitHub Actions (see `DockerFactAttribute` gating on `GITHUB_ACTIONS`/`CI`). Pushes to `main` additionally run a separate publish job (the only job holding `packages: write`) that packs the five libraries and pushes them to GitHub Packages via `GITHUB_TOKEN`.
+The GitHub Actions workflow restores and builds the solution, runs the minimal messaging quickstart, and runs the test suite with Docker required. It audits NuGet packages and packs the core, transport, persistence, and testing packages. Pushes to `main` additionally publish packages to GitHub Packages via `GITHUB_TOKEN`.

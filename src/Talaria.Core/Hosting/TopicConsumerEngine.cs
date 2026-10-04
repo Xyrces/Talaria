@@ -20,6 +20,8 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
     private readonly ILogger _logger;
     private readonly IServiceProvider? _serviceProvider;
     private readonly ProducerCache _producerCache;
+    private CancellationToken _intake;
+    private TalariaHealth? _health;
 
     public TopicConsumerEngine(
         ITransport transport,
@@ -39,7 +41,7 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
         _serviceProvider = serviceProvider;
         _producerCache = new ProducerCache(transport);
 
-        var classConsumerWithoutProvider = _registrations.FirstOrDefault(r => r.ConsumerType is not null && serviceProvider is null);
+        var classConsumerWithoutProvider = _registrations.FirstOrDefault(r => (r.ConsumerType is not null || r.ScopedHandler is not null) && serviceProvider is null);
         if (classConsumerWithoutProvider is not null)
         {
             throw new InvalidOperationException(
@@ -56,8 +58,10 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
         }
     }
 
-    public async Task RunAsync(CancellationToken ct)
+    public async Task RunAsync(CancellationToken ct, CancellationToken? intake = null, TalariaHealth? health = null)
     {
+        _intake = intake ?? ct;
+        _health = health;
         var retryCoordinator = new RetryCoordinator(_deferralStore, _options, _logger);
 
         if (_deferralStore is null && _registrations.Any(r => IsRetryEnabled(r)))
@@ -69,11 +73,13 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
         }
 
         var tasks = _registrations.Select(registration =>
-            ConsumerSupervision.RunSupervisedAsync(
-                $"topic:{registration.TopicName}",
-                ct => ConsumeTopicAsync(registration, retryCoordinator, ct),
-                _logger,
-                ct)).ToList();
+        {
+            var name = HealthName(registration);
+            health?.SetEndpoint(name, false);
+            return ConsumerSupervision.RunSupervisedAsync(name,
+                _ => ConsumeTopicAsync(registration, retryCoordinator, ct), _logger,
+                _intake, ex => health?.SetEndpoint(name, false, ex.GetType().Name));
+        }).ToList();
 
         if (tasks.Count > 0)
         {
@@ -86,6 +92,9 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
         var policy = registration.RetryPolicy ?? _options.DefaultRetryPolicy;
         return RetryPolicy.IsEnabled(policy);
     }
+
+    private string HealthName(TopicRegistration registration)
+        => $"topic:{registration.TopicName}:{registration.ConsumerGroup ?? _options.ConsumerGroupOverride ?? _options.ApplicationName}";
 
     private async Task ConsumeTopicAsync(
         TopicRegistration registration,
@@ -112,7 +121,7 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
     {
         await using var consumer = await _transport.CreateConsumerAsync<T>(
             registration.TopicName,
-            new ConsumerOptions { ConsumerGroup = consumerGroup },
+            new ConsumerOptions { ConsumerGroup = consumerGroup, EntityKind = registration.EntityKind },
             ct);
 
         _logger.LogInformation(
@@ -122,8 +131,13 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
         var pipeline = _pipeline;
         var isRequest = registration.RequestHandler is not null || registration.RequestConsumerType is not null;
 
-        await foreach (var envelope in consumer.ConsumeAsync(ct))
+        await foreach (var envelope in ConsumerReader.ReadAsync(consumer, _health, HealthName(registration), _intake, ct))
         {
+            if (envelope.Headers.TryGetValue("talaria.retry.endpoint", out var target) && target != consumerGroup)
+            {
+                await consumer.CommitAsync(envelope, ct);
+                continue;
+            }
             using var activity = Diagnostics.TalariaDiagnostics.StartConsumerActivity(
                 registration.TopicName, typeof(T).Name, envelope.Headers);
 
@@ -150,23 +164,34 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
                 }
 
                 activity?.SetTag("talaria.consumer.type", registration.ConsumerType?.FullName ?? registration.RequestConsumerType?.FullName ?? "delegate");
+                await using var ownership = pipeline.Renew(gate.Lock, ct);
 
                 Exception? handlerException = null;
                 try
                 {
-                    if (registration.ConsumerType is not null)
+                    if (registration.ConsumerType is not null || registration.ScopedHandler is not null)
                     {
                         var scope = _serviceProvider!.CreateAsyncScope();
                         try
                         {
-                            var topicConsumer = (ITopicConsumer<T>)scope.ServiceProvider.GetRequiredService(registration.ConsumerType);
                             var context = new ConsumeContext<T>
                             {
                                 Envelope = envelope,
-                                CancellationToken = ct,
+                                CancellationToken = ownership.Token,
                                 Services = scope.ServiceProvider,
                             };
-                            await topicConsumer.ConsumeAsync(context);
+                            if (registration.ScopedHandler is not null)
+                            {
+                                Task Invoke(CancellationToken token) => registration.ScopedHandler(envelope.Payload!, envelope.Headers,
+                                    new EnvelopeMetadata(envelope.PartitionKey, envelope.Partition, envelope.Offset,
+                                        envelope.Timestamp, envelope.CorrelationId, envelope.SourceTopic), scope.ServiceProvider, token);
+                                if (registration.Transactional)
+                                    await scope.ServiceProvider.GetRequiredService<IMessageTransaction>().ExecuteAsync(consumerGroup,
+                                        envelope.Headers.MessageId ?? throw new InvalidOperationException("Transactions require MessageId."), Invoke, ownership.Token);
+                                else await Invoke(ownership.Token);
+                            }
+                            else
+                                await ((ITopicConsumer<T>)scope.ServiceProvider.GetRequiredService(registration.ConsumerType!)).ConsumeAsync(context);
                         }
                         catch (Exception ex)
                         {
@@ -197,7 +222,7 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
                     }
                     else if (isRequest)
                     {
-                        var response = await InvokeRequestHandlerAsync(registration, envelope, ct).ConfigureAwait(false);
+                        var response = await InvokeRequestHandlerAsync(registration, envelope, ownership.Token).ConfigureAwait(false);
                         if (response is not null)
                         {
                             var replyTo = envelope.Headers.ReplyTo;
@@ -213,7 +238,7 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
                                 // failure flows through the same retry/fault path as a handler
                                 // failure. The handler may therefore run more than once if the
                                 // response publish fails and retries are enabled.
-                                await PublishResponseAsync(registration, replyTo, response, envelope.Headers, ct).ConfigureAwait(false);
+                                await PublishResponseAsync(registration, replyTo, response, envelope.Headers, ownership.Token).ConfigureAwait(false);
                             }
                         }
                         else
@@ -231,7 +256,7 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
                             envelope.Offset,
                             envelope.Timestamp,
                             envelope.CorrelationId);
-                        await registration.Handler!(envelope.Payload!, envelope.Headers, metadata, ct).ConfigureAwait(false);
+                        await registration.Handler!(envelope.Payload!, envelope.Headers, metadata, ownership.Token);
                     }
                 }
                 catch (Exception ex)
@@ -239,6 +264,7 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
                     handlerException = ex;
                 }
 
+                ownership.ThrowIfLost();
                 if (handlerException is not null)
                 {
                     // During shutdown the handler may observe OperationCanceledException (or any

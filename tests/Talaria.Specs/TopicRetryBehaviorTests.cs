@@ -134,10 +134,11 @@ public class TopicRetryBehaviorTests
         Assert.True(succeeded, "Handler did not succeed within timeout.");
 
         Assert.Equal(2, captured.Count);
-        Assert.Equal("root-1:retry:1", captured[0].Headers.MessageId);
+        Assert.StartsWith("retry-", captured[0].Headers.MessageId);
         Assert.Equal("root-1", captured[0].Headers.RetryRootMessageId);
         Assert.Equal(1, captured[0].Headers.RetryAttempt);
-        Assert.Equal("root-1:retry:2", captured[1].Headers.MessageId);
+        Assert.StartsWith("retry-", captured[1].Headers.MessageId);
+        Assert.NotEqual(captured[0].Headers.MessageId, captured[1].Headers.MessageId);
         Assert.Equal("root-1", captured[1].Headers.RetryRootMessageId);
         Assert.Equal(2, captured[1].Headers.RetryAttempt);
 
@@ -194,7 +195,7 @@ public class TopicRetryBehaviorTests
     }
 
     [Fact]
-    public async Task RetryEnabledWithoutDeferralStore_RoutesToDLQ_AsRetryUnavailable()
+    public async Task RetryEnabledWithoutDeferralStore_FailsStartup()
     {
         var transport = new InMemoryTransport();
 
@@ -220,14 +221,8 @@ public class TopicRetryBehaviorTests
         var producer = await transport.CreateProducerAsync<RetryMessage>("retry.topic", new ProducerOptions());
         await producer.ProduceAsync(new RetryMessage { Id = "MSG-UNAVAIL" }, new MessageHeaders { MessageId = "unavail-1" });
 
-        await host.StartAsync();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => host.StartAsync());
 
-        var dlq = await TestAsyncHelpers.ReadUntilAsync<RetryMessage>(transport, "retry.topic.dlq", 1);
-
-        Assert.Single(dlq);
-        Assert.Equal("retry_unavailable", dlq[0].Headers.DlqReason);
-
-        await host.StopAsync();
         host.Dispose();
     }
 
@@ -517,7 +512,7 @@ public class TopicRetryBehaviorTests
                 ApplicationName = "shutdown-app",
                 MinRetryDelay = TimeSpan.FromMilliseconds(50),
             },
-            NullLogger<TalariaListener>.Instance);
+            NullLogger<TalariaListener>.Instance, stores: new TalariaListenerStores(DeferralStore: new InMemoryDeferralStore()));
 
         await listener.StartAsync();
 
@@ -548,7 +543,7 @@ public class TopicRetryBehaviorTests
             topicReg2,
             new SagaRegistry(),
             new TalariaOptions { ApplicationName = "shutdown-app" },
-            NullLogger<TalariaListener>.Instance);
+            NullLogger<TalariaListener>.Instance, stores: new TalariaListenerStores(DeferralStore: new InMemoryDeferralStore()));
 
         await listener2.StartAsync();
 

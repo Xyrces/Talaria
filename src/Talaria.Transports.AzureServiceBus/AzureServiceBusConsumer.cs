@@ -43,7 +43,7 @@ namespace Talaria.Transports.AzureServiceBus;
 /// </para>
 /// </summary>
 /// <since>1.0.0</since>
-internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
+internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>, IConsumerReadiness
 {
     private readonly ServiceBusProcessor _processor;
     private readonly ServiceBusSender _dlqSender;
@@ -52,6 +52,8 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
     private readonly int _bufferCapacity;
     private readonly bool _includeDlqExceptionDetails;
     private readonly ILogger? _logger;
+    private readonly Action? _onDisposed;
+    private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     // Pending envelopes awaiting Commit/Nack, keyed by ASB sequence number.
     // A disposal re-abandon any still-pending entries by relying on the
@@ -64,6 +66,8 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
     private int _consuming;
     private int _enumerating;
 
+    public Task Ready => _ready.Task;
+
     public AzureServiceBusConsumer(
         ServiceBusProcessor processor,
         ServiceBusSender dlqSender,
@@ -71,7 +75,8 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
         string dlqEntity,
         int bufferCapacity,
         bool includeDlqExceptionDetails,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        Action? onDisposed = null)
     {
         _processor = processor;
         _dlqSender = dlqSender;
@@ -80,9 +85,13 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
         _bufferCapacity = bufferCapacity > 0 ? bufferCapacity : 100;
         _includeDlqExceptionDetails = includeDlqExceptionDetails;
         _logger = logger;
+        _onDisposed = onDisposed;
     }
 
-    private readonly record struct PendingEntry(ServiceBusReceivedMessage Message, ProcessMessageEventArgs Args, MessageEnvelope<T> Envelope);
+    private sealed record PendingEntry(ServiceBusReceivedMessage Message, ProcessMessageEventArgs Args, MessageEnvelope<T> Envelope)
+    {
+        public TaskCompletionSource Settled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
 
     /// <inheritdoc />
     public IAsyncEnumerable<MessageEnvelope<T>> ConsumeAsync(CancellationToken ct = default)
@@ -166,9 +175,11 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
         try
         {
             await _processor.StartProcessingAsync().ConfigureAwait(false);
+            _ready.TrySetResult();
         }
-        catch
+        catch (Exception ex)
         {
+            _ready.TrySetException(ex);
             _processor.ProcessMessageAsync -= OnProcessorMessageAsync;
             _processor.ProcessErrorAsync -= OnProcessorErrorAsync;
             Interlocked.Exchange(ref _subscribed, 0);
@@ -250,11 +261,20 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
             Offset = sbMessage.SequenceNumber,
         };
 
-        _pending[envelope.Offset] = new PendingEntry(sbMessage, args, envelope);
+        var pending = new PendingEntry(sbMessage, args, envelope);
+        _pending.AddOrUpdate(envelope.Offset, pending, (_, previous) =>
+        {
+            // A lock can expire and ASB can redeliver the same sequence number while
+            // the old callback is still waiting for settlement. Release that waiter.
+            previous.Settled.TrySetCanceled();
+            return pending;
+        });
 
         try
         {
             await channel.Writer.WriteAsync(envelope, args.CancellationToken).ConfigureAwait(false);
+            // Keep the SDK callback alive: automatic lock renewal ends when it returns.
+            await pending.Settled.Task.WaitAsync(_activeReaderCts!.Token).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is OperationCanceledException or System.Threading.Channels.ChannelClosedException)
         {
@@ -275,6 +295,7 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
         var isTransient = args.Exception is ServiceBusException sbEx && sbEx.IsTransient;
         if (!isTransient)
         {
+            _ready.TrySetException(args.Exception);
             // Fatal errors (non-transient ServiceBusException, AMQP link failures,
             // credentials expiry, or any other exception) must fault the active
             // enumeration so the host's supervised loop can restart with backoff.
@@ -311,6 +332,7 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
         // If CompleteMessageAsync threw, keeping the entry lets the uncommitted
         // delivery redeliver and keeps it visible to DisposeAsync cleanup.
         _pending.TryRemove(message.Offset, out _);
+        entry.Settled.TrySetResult();
     }
 
     /// <inheritdoc />
@@ -425,6 +447,7 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
         // Complete/Abandon explicitly, we let the broker's peek-lock
         // expire and redeliver. This matches the "uncommitted messages
         // are redelivered" guarantee Kafka gives the host.
+        foreach (var entry in _pending.Values) entry.Settled.TrySetCanceled();
         _pending.Clear();
 
         _activeChannel?.Writer.TryComplete();
@@ -433,6 +456,6 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>
         _activeReaderCts = null;
 
         await _processor.DisposeAsync().ConfigureAwait(false);
+        _onDisposed?.Invoke();
     }
 }
-

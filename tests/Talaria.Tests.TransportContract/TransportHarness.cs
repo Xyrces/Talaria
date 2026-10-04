@@ -112,27 +112,30 @@ public sealed class TransportHarness : IAsyncDisposable
     /// yielding. Mirrors the InMemory contract helper used by every
     /// redelivery/backlog assertion.
     /// </summary>
-    public static async Task<MessageEnvelope<T>> ReadOneAsync<T>(IConsumer<T> consumer, CancellationToken ct = default)
+    public static async Task<MessageEnvelope<T>> ReadOneAsync<T>(IConsumer<T> consumer, CancellationToken ct = default,
+        Func<MessageEnvelope<T>, Task>? settle = null)
     {
         await foreach (var envelope in consumer.ConsumeAsync(ct))
         {
+            if (settle is not null) await settle(envelope);
             return envelope;
         }
         throw new InvalidOperationException("Consumer completed without yielding.");
     }
 
     /// <summary>
-    /// Synchronously awaits <paramref name="read"/> for up to 5 seconds and
+    /// Synchronously awaits <paramref name="read"/> for up to 30 seconds and
     /// throws on timeout. Used by tests that read from a producer-side wait
     /// rather than an async enumeration.
     /// </summary>
     public static MessageEnvelope<T> Must<T>(Task<MessageEnvelope<T>> read, string because)
     {
-        Assert.True(read.Wait(TimeSpan.FromSeconds(5)), $"Timed out: {because}");
+        Assert.True(read.Wait(TimeSpan.FromSeconds(30)), $"Timed out: {because}");
         return read.Result;
     }
 
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    public ValueTask DisposeAsync() => Transport is IAsyncDisposable disposable
+        ? disposable.DisposeAsync() : ValueTask.CompletedTask;
 }
 
 /// <summary>

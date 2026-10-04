@@ -172,7 +172,7 @@ public class SagaRetryBehaviorTests
     }
 
     [Fact]
-    public async Task SagaStep_RetryEnabledWithoutDeferralStore_RoutesToDLQ_AsRetryUnavailable()
+    public async Task SagaRetryEnabledWithoutDeferralStore_FailsStartup()
     {
         var transport = new InMemoryTransport();
         var registry = new SagaRegistry();
@@ -212,24 +212,9 @@ public class SagaRetryBehaviorTests
             services);
 
         using var cts = new CancellationTokenSource();
-        await listener.StartAsync(cts.Token);
-
-        var startProducer = await transport.CreateProducerAsync<SagaRetryStart>("sr-start", new ProducerOptions());
-        await startProducer.ProduceAsync(new SagaRetryStart { Id = "c3" });
-
-        var store = services.GetRequiredService<IStateStore<SagaRetryState>>();
-        var started = await TestAsyncHelpers.PollUntilAsync(async () => await store.GetAsync("c3") != null, TimeSpan.FromSeconds(5));
-        Assert.True(started, "Saga state was never created by the starter.");
-
-        var stepProducer = await transport.CreateProducerAsync<SagaRetryStep>("sr-step", new ProducerOptions());
-        await stepProducer.ProduceAsync(new SagaRetryStep { Id = "c3" }, new MessageHeaders { MessageId = "sr-step-3" });
-
-        var dlq = await TestAsyncHelpers.ReadUntilAsync<SagaRetryStep>(transport, "sr-step.dlq", 1);
-
-        Assert.Single(dlq);
-        Assert.Equal("retry_unavailable", dlq[0].Headers.DlqReason);
-
-        await listener.StopAsync(cts.Token);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => listener.StartAsync(cts.Token));
+        Assert.Contains("Delayed retries require persistence", error.Message);
+        Assert.Null(await services.GetRequiredService<IStateStore<SagaRetryState>>().GetAsync("c3"));
     }
 
     [Fact]

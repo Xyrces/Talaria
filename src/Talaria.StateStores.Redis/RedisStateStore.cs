@@ -47,6 +47,56 @@ public sealed class RedisStateStore<TState> : IStateStore<TState>
     private readonly string _outboxKey;
     private readonly string _outboxEntriesKey;
 
+    private const string SnapshotScript = """
+        return {redis.call('GET', KEYS[1]) or '',
+            redis.call('HGET', KEYS[2], 'version') or '0',
+            redis.call('HGET', KEYS[2], 'completed') or '0',
+            redis.call('HGET', KEYS[2], 'message:' .. ARGV[1]) or '0'}
+        """;
+    private static readonly string VersionedTransitionScript = """
+        if redis.call('HGET', KEYS[4], 'message:' .. ARGV[#ARGV]) then return 1 end
+        local version = redis.call('HGET', KEYS[4], 'version') or '0'
+        if version ~= ARGV[#ARGV - 1] then return 2 end
+        """ + "\n" + TransitionScript.Replace("return 1", """
+        redis.call('HSET', KEYS[4], 'version', tonumber(version) + 1,
+            'completed', ARGV[1] == '' and '1' or '0', 'message:' .. ARGV[#ARGV], '1')
+        if tonumber(ARGV[2]) > 0 then redis.call('EXPIRE', KEYS[4], ARGV[2]) end
+        return 0
+        """);
+
+    public async Task<SagaSnapshot<TState>> ReadSnapshotAsync(string correlationId, string messageId, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        var key = _prefix + RedisKeySpace.Component(correlationId);
+        var result = (RedisResult[])(await _db.ScriptEvaluateAsync(SnapshotScript,
+            new RedisKey[] { key, key + ":history" }, new RedisValue[] { messageId }))!;
+        var json = (string?)result[0];
+        return new(string.IsNullOrEmpty(json) ? null : JsonSerializer.Deserialize<TState>(json),
+            (long)result[1], (string?)result[2] == "1", (string?)result[3] == "1");
+    }
+
+    public async Task<SagaCommitStatus> TryTransitionAsync(string correlationId, string messageId, long expectedVersion,
+        TState? newState, IReadOnlyList<OutboxMessage> outbox, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        var key = _prefix + RedisKeySpace.Component(correlationId);
+        var args = new List<RedisValue>
+        {
+            newState is null ? RedisValue.EmptyString : JsonSerializer.Serialize(newState),
+            Math.Max(1, (long)_options.DefaultStateTtl.TotalSeconds), outbox.Count,
+        };
+        foreach (var message in outbox)
+        {
+            args.Add(message.Id.ToString());
+            args.Add(RedisOutboxStore.Serialize(message));
+            args.Add(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        }
+        args.Add(expectedVersion.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        args.Add(messageId);
+        return (SagaCommitStatus)(int)await _db.ScriptEvaluateAsync(VersionedTransitionScript,
+            new RedisKey[] { key, _outboxKey, _outboxEntriesKey, key + ":history" }, args.ToArray());
+    }
+
     /// <summary>
     /// Creates the store. Options are shared across all UseRedis* registrations.
     /// </summary>
@@ -57,14 +107,15 @@ public sealed class RedisStateStore<TState> : IStateStore<TState>
     {
         _options = options.Value;
         _db = redis.GetDatabase();
-        _prefix = $"{_options.KeyPrefix}{typeof(TState).Name.ToLowerInvariant()}:";
-        _outboxKey = $"{_options.KeyPrefix}outbox:{talariaOptions.Value.ApplicationName}";
+        var prefix = RedisKeySpace.Prefix(_options, talariaOptions.Value.ApplicationName);
+        _prefix = $"{prefix}saga:{typeof(TState).FullName}:";
+        _outboxKey = $"{prefix}outbox";
         _outboxEntriesKey = $"{_outboxKey}:entries";
     }
 
     public async Task<TState?> GetAsync(string correlationId, CancellationToken ct = default)
     {
-        var key = $"{_prefix}{correlationId}";
+        var key = $"{_prefix}{RedisKeySpace.Component(correlationId)}";
 
         var value = await _db.StringGetAsync(key);
         if (value.IsNullOrEmpty)
@@ -73,46 +124,21 @@ public sealed class RedisStateStore<TState> : IStateStore<TState>
         return JsonSerializer.Deserialize<TState>(value.ToString());
     }
 
-    public async Task SaveAsync(string correlationId, TState state, CancellationToken ct = default)
+    public Task SaveAsync(string correlationId, TState state, CancellationToken ct = default)
+        => TransitionAsync(correlationId, state, [], ct);
+
+    public Task DeleteAsync(string correlationId, CancellationToken ct = default)
+        => TransitionAsync(correlationId, null, [], ct);
+
+    public async Task TransitionAsync(string correlationId, TState? newState,
+        IReadOnlyList<OutboxMessage> outbox, CancellationToken ct = default)
     {
-        var key = $"{_prefix}{correlationId}";
-        var json = JsonSerializer.Serialize(state);
-
-        await _db.StringSetAsync(key, json, _options.DefaultStateTtl);
-    }
-
-    public async Task DeleteAsync(string correlationId, CancellationToken ct = default)
-    {
-        var key = $"{_prefix}{correlationId}";
-        await _db.KeyDeleteAsync(key);
-    }
-
-    public async Task TransitionAsync(
-        string correlationId,
-        TState? newState,
-        IReadOnlyList<OutboxMessage> outbox,
-        CancellationToken ct = default)
-    {
-        var key = $"{_prefix}{correlationId}";
-
-        var args = new List<RedisValue>(4 + outbox.Count * 3)
+        var messageId = Guid.NewGuid().ToString("N");
+        while (true)
         {
-            newState is null ? RedisValue.EmptyString : JsonSerializer.Serialize(newState),
-            (long)_options.DefaultStateTtl.TotalSeconds,
-            outbox.Count
-        };
-
-        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        foreach (var message in outbox)
-        {
-            args.Add(message.Id.ToString());
-            args.Add(RedisOutboxStore.Serialize(message));
-            args.Add(now);
+            var snapshot = await ReadSnapshotAsync(correlationId, messageId, ct);
+            if (await TryTransitionAsync(correlationId, messageId, snapshot.Version, newState, outbox, ct)
+                != SagaCommitStatus.Conflict) return;
         }
-
-        await _db.ScriptEvaluateAsync(
-            TransitionScript,
-            new RedisKey[] { key, _outboxKey, _outboxEntriesKey },
-            args.ToArray());
     }
 }

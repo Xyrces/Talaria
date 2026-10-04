@@ -39,12 +39,6 @@ public static class AzureServiceBusTransportExtensions
 
         // Singleton client so deferral adapters and any other consumer of the
         // ServiceBusClient type share one AMQP connection.
-        builder.Services.AddSingleton(_ => new ServiceBusClient(
-            string.IsNullOrWhiteSpace(options.ConnectionString)
-                ? options.FullyQualifiedNamespace ?? throw new InvalidOperationException(
-                    $"{nameof(AzureServiceBusTransportOptions.ConnectionString)} or {nameof(AzureServiceBusTransportOptions.FullyQualifiedNamespace)} is required.")
-                : options.ConnectionString));
-
         builder.Services.AddSingleton(options);
 
         builder.Services.AddSingleton<ITransport>(sp =>
@@ -53,6 +47,8 @@ public static class AzureServiceBusTransportExtensions
             var includeDetails = sp.GetService<Microsoft.Extensions.Options.IOptions<Talaria.Core.TalariaOptions>>()?.Value.IncludeExceptionDetailsInDlq ?? false;
             return new AzureServiceBusTransport(options, loggerFactory, includeDetails);
         });
+        builder.Services.AddSingleton(sp => ((AzureServiceBusTransport)sp.GetRequiredService<ITransport>()).Client);
+        builder.Services.AddSingleton<ITopologyProvisioner>(sp => (AzureServiceBusTransport)sp.GetRequiredService<ITransport>());
 
         return builder;
     }

@@ -21,8 +21,9 @@ namespace Talaria.Transports.InMemory;
 /// redelivering uncommitted messages.
 /// </para>
 /// </summary>
-internal sealed class InMemoryConsumer<T> : IConsumer<T>
+internal sealed class InMemoryConsumer<T> : IConsumer<T>, IConsumerReadiness
 {
+    public Task Ready => Task.CompletedTask;
     private readonly Channel<InMemoryMessage> _groupChannel;
     private readonly InMemoryTransport.TopicBus _dlqBus;
     private readonly InMemoryTransport.TopicBus _appDlqBus;

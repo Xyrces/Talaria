@@ -43,7 +43,7 @@ internal sealed class KafkaProducer<T> : IProducer<T>
 
         // Engine-owned routing metadata: the CLR type of the payload, used by consumers
         // that fan a topic out to multiple typed handlers.
-        finalHeaders[MessageHeaders.MessageTypeKey] = typeof(T).FullName ?? typeof(T).Name;
+        finalHeaders[MessageHeaders.MessageTypeKey] = typeof(T) == typeof(System.Text.Json.JsonElement) && finalHeaders.TryGetValue(MessageHeaders.MessageTypeKey, out var storedType) ? storedType : typeof(T).FullName ?? typeof(T).Name;
 
         // Engine-owned hop counter: fresh messages start at 0; forwarded messages (already
         // carrying a count) are incremented so cyclic flows trip the max-hop guard.

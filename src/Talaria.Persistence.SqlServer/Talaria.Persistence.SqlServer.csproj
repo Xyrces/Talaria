@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Description>SQL Server and EF Core inbox, outbox, scheduling, and saga persistence for Talaria.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Talaria.Core/Talaria.Core.csproj" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="8.0.24" />
+  </ItemGroup>
+</Project>

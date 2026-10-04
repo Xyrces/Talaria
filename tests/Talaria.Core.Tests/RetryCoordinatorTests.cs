@@ -95,13 +95,49 @@ public class RetryCoordinatorTests
         Assert.Equal(1, deferred.Attempt);
         Assert.Equal("part-1", deferred.PartitionKey);
         Assert.True(deferred.DueAt > DateTimeOffset.UtcNow);
-        Assert.Equal("msg-1:retry:1", deferred.Headers.MessageId);
+        var identity = RetryCoordinator.CreateDeferredIdentity("msg-1", "test-app.test.topic", 1, "retry");
+        Assert.Equal(identity.MessageId, deferred.Headers.MessageId);
+        Assert.Equal(identity.EntryId, deferred.Id);
         Assert.Equal("msg-1", deferred.Headers.RetryRootMessageId);
         Assert.Equal(1, deferred.Headers.RetryAttempt);
+        Assert.Equal("test-app.test.topic", deferred.Headers["talaria.retry.endpoint"]);
         Assert.Null(deferred.Headers.DlqReason);
         Assert.Null(deferred.Headers.DlqException);
         Assert.Single(consumer.Committed);
         Assert.Empty(consumer.Nacked);
+    }
+
+    [Fact]
+    public async Task RetryIdentityIsStablePerEndpointAndDistinctAcrossSubscribers()
+    {
+        var store = new FakeDeferralStore();
+        var options = OptionsWithRetries();
+        var coordinator = new RetryCoordinator(store, options, NullLogger.Instance);
+        var pipeline = new MessageProcessingPipeline(null, options, NullLogger.Instance);
+        var consumer = new FakeConsumer<string>();
+        var envelope = Envelope<string>("payload", "shared-root");
+
+        TopicRegistration Registration(string group) => new()
+        {
+            TopicName = "shared.topic",
+            ConsumerGroup = group,
+            MessageType = typeof(string),
+            Handler = (_, _, _, _) => Task.CompletedTask,
+        };
+
+        await coordinator.TryCoordinateTopicRetryAsync(Registration("audit"), pipeline, consumer, envelope,
+            new InvalidOperationException("boom"), null, default);
+        await coordinator.TryCoordinateTopicRetryAsync(Registration("email"), pipeline, consumer, envelope,
+            new InvalidOperationException("boom"), null, default);
+        await coordinator.TryCoordinateTopicRetryAsync(Registration("audit"), pipeline, consumer, envelope,
+            new InvalidOperationException("boom"), null, default);
+
+        Assert.Equal(3, store.Enqueued.Count);
+        Assert.Equal("audit", store.Enqueued[0].Headers["talaria.retry.endpoint"]);
+        Assert.Equal("email", store.Enqueued[1].Headers["talaria.retry.endpoint"]);
+        Assert.NotEqual(store.Enqueued[0].Headers.MessageId, store.Enqueued[1].Headers.MessageId);
+        Assert.Equal(store.Enqueued[0].Headers.MessageId, store.Enqueued[2].Headers.MessageId);
+        Assert.Equal(store.Enqueued[0].Id, store.Enqueued[2].Id);
     }
 
     [Fact]
@@ -131,6 +167,30 @@ public class RetryCoordinatorTests
     }
 
     [Fact]
+    public async Task MaximumRetryAttemptCannotOverflowBackIntoAnotherRetry()
+    {
+        var store = new FakeDeferralStore();
+        var options = OptionsWithRetries(maxAttempts: 2);
+        var coordinator = new RetryCoordinator(store, options, NullLogger.Instance);
+        var pipeline = new MessageProcessingPipeline(null, options, NullLogger.Instance);
+        var consumer = new FakeConsumer<string>();
+        var envelope = Envelope<string>("payload", "msg-1", retryAttempt: int.MaxValue);
+        var registration = new TopicRegistration
+        {
+            TopicName = "test.topic",
+            MessageType = typeof(string),
+            Handler = (_, _, _, _) => Task.CompletedTask,
+        };
+
+        var outcome = await coordinator.TryCoordinateTopicRetryAsync(registration, pipeline, consumer, envelope,
+            new InvalidOperationException("boom"), null, default);
+
+        Assert.Equal(RetryCoordinator.RetryOutcome.Exhausted, outcome);
+        Assert.Empty(store.Enqueued);
+        Assert.Equal("retries_exhausted", Assert.Single(consumer.Nacked).Headers.DlqReason);
+    }
+
+    [Fact]
     public async Task TryCoordinateTopicRetryAsync_NoDeferralStore_RoutesToDLQ_AsRetryUnavailable()
     {
         var options = OptionsWithRetries(maxAttempts: 2);
@@ -154,7 +214,7 @@ public class RetryCoordinatorTests
     }
 
     [Fact]
-    public async Task TryCoordinateTopicRetryAsync_EnqueueThrows_RoutesToDLQ_AsRetryUnavailable()
+    public async Task TryCoordinateTopicRetryAsync_EnqueueThrows_PreservesDelivery()
     {
         var store = new FakeDeferralStore { ThrowOnEnqueue = true };
         var options = OptionsWithRetries(maxAttempts: 2);
@@ -169,12 +229,11 @@ public class RetryCoordinatorTests
             Handler = (_, _, _, _) => Task.CompletedTask,
         };
 
-        var outcome = await coordinator.TryCoordinateTopicRetryAsync(
-            registration, pipeline, consumer, envelope, new InvalidOperationException("boom"), null, default);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.TryCoordinateTopicRetryAsync(
+            registration, pipeline, consumer, envelope, new InvalidOperationException("boom"), null, default));
 
-        Assert.Equal(RetryCoordinator.RetryOutcome.Unavailable, outcome);
-        Assert.Single(consumer.Nacked);
-        Assert.Equal("retry_unavailable", consumer.Nacked[0].Headers.DlqReason);
+        Assert.Empty(consumer.Committed);
+        Assert.Empty(consumer.Nacked);
     }
 
     [Fact]
@@ -393,10 +452,10 @@ public class RetryCoordinatorTests
             Handler = (_, _, _, _) => Task.CompletedTask,
         };
 
-        var outcome = await coordinator.TryCoordinateTopicRetryAsync(
-            registration, pipeline, consumer, envelope, new InvalidOperationException("boom"), lck, default);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.TryCoordinateTopicRetryAsync(
+            registration, pipeline, consumer, envelope, new InvalidOperationException("boom"), lck, default));
 
-        Assert.Equal(RetryCoordinator.RetryOutcome.Scheduled, outcome);
+        Assert.Empty(consumer.Committed);
         Assert.Contains(lck, idempotencyStore.Released);
     }
 
@@ -446,7 +505,7 @@ public class RetryCoordinatorTests
         Assert.Single(store.Enqueued);
         var first = store.Enqueued[0];
         Assert.NotNull(first.Headers.RetryRootMessageId);
-        Assert.Equal($"{first.Headers.RetryRootMessageId}:retry:1", first.Headers.MessageId);
+        Assert.StartsWith("retry-", first.Headers.MessageId);
 
         // Simulate the second attempt: the deferred copy is republished with RetryAttempt = 1.
         var secondEnvelope = new MessageEnvelope<string>
@@ -463,12 +522,14 @@ public class RetryCoordinatorTests
         Assert.Equal(2, store.Enqueued.Count);
         var second = store.Enqueued[1];
         Assert.Equal(first.Headers.RetryRootMessageId, second.Headers.RetryRootMessageId);
-        Assert.Equal($"{first.Headers.RetryRootMessageId}:retry:2", second.Headers.MessageId);
+        Assert.StartsWith("retry-", second.Headers.MessageId);
+        Assert.NotEqual(first.Headers.MessageId, second.Headers.MessageId);
     }
 
     [Theory]
     [InlineData("not-a-number")]
     [InlineData("2147483648")]
+    [InlineData("-1")]
     public async Task TryCoordinateTopicRetryAsync_MalformedRetryAttempt_LogsWarning_AndTreatsAsZero(string rawValue)
     {
         var store = new FakeDeferralStore();
@@ -523,7 +584,7 @@ public class RetryCoordinatorTests
     }
 
     [Fact]
-    public async Task TryCoordinateTopicRetryAsync_EnqueueThrows_SetsDlqAttempts()
+    public async Task TryCoordinateTopicRetryAsync_EnqueueThrows_DoesNotDeadLetterRetry()
     {
         var store = new FakeDeferralStore { ThrowOnEnqueue = true };
         var options = OptionsWithRetries(maxAttempts: 2);
@@ -538,13 +599,11 @@ public class RetryCoordinatorTests
             Handler = (_, _, _, _) => Task.CompletedTask,
         };
 
-        var outcome = await coordinator.TryCoordinateTopicRetryAsync(
-            registration, pipeline, consumer, envelope, new InvalidOperationException("boom"), null, default);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.TryCoordinateTopicRetryAsync(
+            registration, pipeline, consumer, envelope, new InvalidOperationException("boom"), null, default));
 
-        Assert.Equal(RetryCoordinator.RetryOutcome.Unavailable, outcome);
-        Assert.Single(consumer.Nacked);
-        Assert.Equal("retry_unavailable", consumer.Nacked[0].Headers.DlqReason);
-        Assert.Equal(1, consumer.Nacked[0].Headers.DlqAttempts);
+        Assert.Empty(consumer.Committed);
+        Assert.Empty(consumer.Nacked);
     }
 
     private sealed class CollectingLogger : ILogger
@@ -626,6 +685,9 @@ public class RetryCoordinatorTests
 
     private sealed class FakeIdempotencyStore : IIdempotencyStore
     {
+        public async Task<IdempotencyAcquisition> AcquireAsync(string id, string group, TimeSpan ttl, CancellationToken ct = default)
+            => new(IdempotencyStatus.Acquired, await TryAcquireLockAsync(id, group, ttl, ct));
+        public Task<bool> RenewAsync(IdempotencyLock lease, TimeSpan ttl, CancellationToken ct = default) => Task.FromResult(true);
         private readonly Dictionary<string, IdempotencyLock> _locks = new();
         public List<IdempotencyLock> Released { get; } = new();
         public int ReleaseCallCount { get; private set; }

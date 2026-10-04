@@ -116,7 +116,10 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
             EnableAutoCommit = false // We commit manually in the consumer or via Nack Async
         };
 
-        var confluentConsumer = new ConsumerBuilder<string, byte[]>(config).Build();
+        var readiness = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var confluentConsumer = new ConsumerBuilder<string, byte[]>(config)
+            .SetPartitionsAssignedHandler((_, _) => readiness.TrySetResult())
+            .Build();
         var dlqProducer = GetOrCreateSharedProducer(enableIdempotence: true);
 
         // Track the group's metadata so transactions can commit this group's offsets.
@@ -126,7 +129,8 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
             confluentConsumer, dlqProducer, topic, _kafkaOptions.DlqSuffix,
             _loggerFactory?.CreateLogger<KafkaConsumer<T>>(),
             bufferCapacity: options.BufferCapacity > 0 ? options.BufferCapacity : 100,
-            includeDlqExceptionDetails: _includeDlqExceptionDetails);
+            includeDlqExceptionDetails: _includeDlqExceptionDetails,
+            readiness: readiness);
 
         _trackedConsumers.Add(wrapper);
         return Task.FromResult<IConsumer<T>>(wrapper);

@@ -375,8 +375,8 @@ public class TalariaListenerTests
             NullLogger<TalariaListener>.Instance,
             services);
 
-        // SagaConsumerEngine pre-creates producers before starting supervised loops,
-        // so a synchronously faulting CreateProducerAsync faults RunAsync itself.
+        // Provisioning must finish before startup succeeds. A topology failure
+        // must surface to the caller before supervised loops are started.
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => listener.StartAsync());
         Assert.Contains("transport fault", ex.Message);
 
@@ -411,7 +411,7 @@ public class TalariaListenerTests
             transport,
             topicReg,
             new SagaRegistry(),
-            new TalariaOptions { ApplicationName = "test-app" },
+            new TalariaOptions { ApplicationName = "test-app", ShutdownDrainTimeout = TimeSpan.FromMilliseconds(100) },
             NullLogger<TalariaListener>.Instance);
 
         await listener.StartAsync();
@@ -511,8 +511,10 @@ public class TalariaListenerTests
         public string Id { get; set; } = "";
     }
 
-    private class FaultingTransport : ITransport
+    private class FaultingTransport : ITransport, ITopologyProvisioner
     {
+        public Task ProvisionAsync(IEnumerable<TopologyDeclaration> declarations, CancellationToken ct = default)
+            => throw new InvalidOperationException("transport fault");
         public string Name => "Faulting";
 
         public Task<IConsumer<T>> CreateConsumerAsync<T>(string topic, ConsumerOptions options, CancellationToken ct = default)

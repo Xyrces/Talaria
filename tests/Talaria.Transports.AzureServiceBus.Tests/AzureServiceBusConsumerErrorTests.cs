@@ -21,11 +21,11 @@ public class AzureServiceBusConsumerErrorTests
     private const string FakeConnectionString =
         "Endpoint=sb://fake.servicebus.windows.net/;SharedAccessKeyName=x;SharedAccessKey=eQ==";
 
-    private static AzureServiceBusConsumer<string> CreateConsumer()
+    private static AzureServiceBusConsumer<string> CreateConsumer(ServiceBusSender? dlqSender = null)
     {
         var client = new ServiceBusClient(FakeConnectionString);
         var processor = client.CreateProcessor("topic", "subscription");
-        var sender = client.CreateSender("topic-dlq");
+        var sender = dlqSender ?? client.CreateSender("topic-dlq");
 
         return new AzureServiceBusConsumer<string>(
             processor,
@@ -161,6 +161,7 @@ public class AzureServiceBusConsumerErrorTests
         };
 
         AddPendingEntry(consumer, message, args, envelope);
+        var settlement = GetSettlement(consumer, 42);
 
         // Act & Assert: the completion failure must propagate so the engine's
         // commit-before-release path can keep the message uncommitted.
@@ -170,8 +171,76 @@ public class AzureServiceBusConsumerErrorTests
         // The entry must stay in the pending dictionary: the original broker
         // delivery is still uncompleted and will redeliver.
         Assert.True(GetPending(consumer).Contains(42L));
+        Assert.False(settlement.IsCompleted);
 
         try { await consumer.DisposeAsync(); } catch { /* best effort */ }
+    }
+
+    [Fact]
+    public async Task CommitAsync_CompletesPendingCallbackSettlementSignal()
+    {
+        var consumer = CreateConsumer();
+        var message = ServiceBusModelFactory.ServiceBusReceivedMessage(
+            body: new BinaryData("test"u8.ToArray()), sequenceNumber: 43);
+        var args = CreateProcessMessageEventArgs(message, new CompletingReceiver());
+        var envelope = new MessageEnvelope<string>
+        {
+            Payload = "test", Headers = new MessageHeaders { MessageId = "m-2" },
+            SourceTopic = "topic", Offset = 43,
+        };
+        AddPendingEntry(consumer, message, args, envelope);
+        var settlement = GetSettlement(consumer, 43);
+
+        Assert.False(settlement.IsCompleted);
+        await consumer.CommitAsync(envelope);
+
+        Assert.True(settlement.IsCompletedSuccessfully);
+        Assert.False(GetPending(consumer).Contains(43L));
+        await consumer.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task DisposeAsync_CancelsPendingCallbackSettlementSignal()
+    {
+        var consumer = CreateConsumer();
+        var message = ServiceBusModelFactory.ServiceBusReceivedMessage(
+            body: new BinaryData("test"u8.ToArray()), sequenceNumber: 44);
+        var args = CreateProcessMessageEventArgs(message, new CompletingReceiver());
+        var envelope = new MessageEnvelope<string>
+        {
+            Payload = "test", Headers = new MessageHeaders { MessageId = "m-3" },
+            SourceTopic = "topic", Offset = 44,
+        };
+        AddPendingEntry(consumer, message, args, envelope);
+        var settlement = GetSettlement(consumer, 44);
+
+        await consumer.DisposeAsync();
+
+        Assert.True(settlement.IsCanceled);
+    }
+
+    [Fact]
+    public async Task NackAsync_CompletesPendingCallbackOnlyAfterDlqSendAndBrokerSettlement()
+    {
+        var sender = new RecordingSender();
+        var consumer = CreateConsumer(sender);
+        var message = ServiceBusModelFactory.ServiceBusReceivedMessage(
+            body: new BinaryData("test"u8.ToArray()), sequenceNumber: 45);
+        var args = CreateProcessMessageEventArgs(message, new CompletingReceiver());
+        var envelope = new MessageEnvelope<string>
+        {
+            Payload = "test", Headers = new MessageHeaders { MessageId = "m-4" },
+            SourceTopic = "topic", Offset = 45,
+        };
+        AddPendingEntry(consumer, message, args, envelope);
+        var settlement = GetSettlement(consumer, 45);
+
+        await consumer.NackAsync(envelope);
+
+        Assert.Single(sender.Sent);
+        Assert.True(settlement.IsCompletedSuccessfully);
+        Assert.False(GetPending(consumer).Contains(45L));
+        await consumer.DisposeAsync();
     }
 
     [Fact]
@@ -220,6 +289,13 @@ public class AzureServiceBusConsumerErrorTests
         return (System.Collections.IDictionary)pendingField.GetValue(consumer)!;
     }
 
+    private static Task GetSettlement(AzureServiceBusConsumer<string> consumer, long sequenceNumber)
+    {
+        var entry = GetPending(consumer)[sequenceNumber]!;
+        var source = entry.GetType().GetProperty("Settled")!.GetValue(entry)!;
+        return (Task)source.GetType().GetProperty("Task")!.GetValue(source)!;
+    }
+
     private static void SetActiveChannel(
         AzureServiceBusConsumer<string> consumer,
         System.Threading.Channels.Channel<MessageEnvelope<string>> channel)
@@ -248,5 +324,11 @@ public class AzureServiceBusConsumerErrorTests
     {
         public override Task CompleteMessageAsync(ServiceBusReceivedMessage message, CancellationToken cancellationToken = default)
             => throw new InvalidOperationException("simulated completion failure");
+    }
+
+    private sealed class CompletingReceiver : ServiceBusReceiver
+    {
+        public override Task CompleteMessageAsync(ServiceBusReceivedMessage message, CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
     }
 }

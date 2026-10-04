@@ -10,6 +10,16 @@ namespace Talaria.Transports.InMemory;
 /// </summary>
 public static class InMemoryTransportExtensions
 {
+    /// <summary>Complete local transport, saga persistence, inbox, outbox, and retry storage.</summary>
+    public static TalariaBuilder UseInMemory(this TalariaBuilder builder)
+    {
+        if (builder.Services.Any(x => x.ServiceType == typeof(Talaria.Core.Abstractions.IStateStoreFactory)
+            || x.ServiceType == typeof(Talaria.Core.Abstractions.IStateStore<>) && x.ImplementationType != typeof(InMemoryStateStore<>)))
+            throw new InvalidOperationException("Select one persistence bundle. UseInMemory includes local persistence.");
+        Microsoft.Extensions.DependencyInjection.Extensions.ServiceCollectionDescriptorExtensions.TryAddSingleton<
+            Talaria.Core.Abstractions.IFailedMessageStore, InMemoryFailedMessageStore>(builder.Services);
+        return builder.UseInMemoryTransport().UseInMemoryIdempotencyStore().UseInMemoryDeferralStore();
+    }
     /// <summary>
     /// Configures Talaria to use the in-memory transport.
     /// Also registers the in-memory saga state store.

@@ -10,7 +10,7 @@ namespace Talaria.Core.Abstractions;
 /// </summary>
 /// <param name="Id">Unique identifier of this outbox entry.</param>
 /// <param name="Topic">The topic the message must be published to.</param>
-/// <param name="MessageType">Assembly-qualified CLR type name of the payload, used to resolve the deserializer and producer.</param>
+/// <param name="MessageType">Stable contract name, or a legacy assembly-qualified name, preserved when forwarding stored JSON.</param>
 /// <param name="PayloadJson">The message payload serialized as JSON.</param>
 /// <param name="Headers">Headers to publish with the message (minted message id, trace context).</param>
 /// <param name="CreatedAt">When the entry was staged.</param>
@@ -31,7 +31,7 @@ public sealed record OutboxMessage(
 /// lease expired) cannot remove an entry another relay has since acquired.
 /// </summary>
 /// <param name="Id">Identifier of the leased <see cref="OutboxMessage"/>.</param>
-/// <param name="Token">Monotonic fencing token incremented on every acquisition.</param>
+/// <param name="Token">Opaque fencing token changed on every acquisition; never infer an attempt count from it.</param>
 /// <since>1.0.0</since>
 public sealed record OutboxLease(Guid Id, long Token);
 
@@ -40,7 +40,10 @@ public sealed record OutboxLease(Guid Id, long Token);
 /// until the lease expires.
 /// </summary>
 /// <since>1.0.0</since>
-public sealed record LeasedOutboxMessage(OutboxMessage Message, OutboxLease Lease);
+public sealed record LeasedOutboxMessage(OutboxMessage Message, OutboxLease Lease)
+{
+    public bool IsReacquired { get; init; }
+}
 
 /// <summary>
 /// Read side of the transactional outbox. Saga state transitions stage their outbound

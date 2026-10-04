@@ -81,6 +81,8 @@ public class TalariaListenerBehaviorTests
 
         var services = new ServiceCollection()
             .AddSingleton<ITransport>(transport)
+            .AddSingleton<InMemoryOutboxStore>()
+            .AddSingleton<IOutboxStore>(sp => sp.GetRequiredService<InMemoryOutboxStore>())
             .AddSingleton(typeof(IStateStore<>), typeof(InMemoryStateStore<>))
             .BuildServiceProvider();
 

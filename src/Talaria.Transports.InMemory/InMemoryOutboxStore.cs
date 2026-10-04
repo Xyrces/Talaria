@@ -20,14 +20,44 @@ public sealed class InMemoryOutboxStore : IOutboxStore
     internal object Gate { get; } = new();
 
     private readonly List<Entry> _entries = [];
+    private readonly HashSet<Guid> _ids = [];
+    private long _nextLeaseToken;
 
-    /// <summary>Stages entries. Callers must hold <see cref="Gate"/>.</summary>
-    internal void Stage(IReadOnlyList<OutboxMessage> messages)
+    /// <summary>Validates and clones a batch before its state transition begins.</summary>
+    internal static IReadOnlyList<OutboxMessage> Prepare(IReadOnlyList<OutboxMessage> messages)
+    {
+        ArgumentNullException.ThrowIfNull(messages);
+        var ids = new HashSet<Guid>();
+        var prepared = new OutboxMessage[messages.Count];
+        for (var i = 0; i < messages.Count; i++)
+        {
+            var message = messages[i] ?? throw new ArgumentException("Outbox entries cannot be null.", nameof(messages));
+            ArgumentException.ThrowIfNullOrWhiteSpace(message.Topic);
+            ArgumentException.ThrowIfNullOrWhiteSpace(message.MessageType);
+            ArgumentNullException.ThrowIfNull(message.PayloadJson);
+            ArgumentNullException.ThrowIfNull(message.Headers);
+            if (!ids.Add(message.Id))
+                throw new ArgumentException($"Outbox entry id '{message.Id}' appears more than once in the batch.", nameof(messages));
+            prepared[i] = Clone(message);
+        }
+        return prepared;
+    }
+
+    /// <summary>Checks ID uniqueness while callers hold <see cref="Gate"/>.</summary>
+    internal void EnsureCanStage(IReadOnlyList<OutboxMessage> messages)
+    {
+        if (messages.Any(message => _ids.Contains(message.Id)))
+            throw new InvalidOperationException("An outbox entry id is already stored.");
+    }
+
+    /// <summary>Stages a prepared batch. Callers must hold <see cref="Gate"/> and validate IDs first.</summary>
+    internal void StagePrepared(IReadOnlyList<OutboxMessage> messages)
     {
         var now = DateTimeOffset.UtcNow;
         foreach (var message in messages)
         {
             _entries.Add(new Entry(message, LeaseToken: 0, now));
+            _ids.Add(message.Id);
         }
     }
 
@@ -37,6 +67,9 @@ public sealed class InMemoryOutboxStore : IOutboxStore
         int maxBatch,
         CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
+        if (leaseDuration <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(leaseDuration));
+        if (maxBatch <= 0) throw new ArgumentOutOfRangeException(nameof(maxBatch));
         lock (Gate)
         {
             var due = _entries
@@ -49,11 +82,11 @@ public sealed class InMemoryOutboxStore : IOutboxStore
             foreach (var entry in due)
             {
                 var index = _entries.IndexOf(entry);
-                var token = entry.LeaseToken + 1;
+                var token = checked(++_nextLeaseToken);
                 _entries[index] = entry with { LeaseToken = token, VisibleAt = now.Add(leaseDuration) };
                 leased.Add(new LeasedOutboxMessage(
-                    entry.Message,
-                    new OutboxLease(entry.Message.Id, token)));
+                    Clone(entry.Message),
+                    new OutboxLease(entry.Message.Id, token)) { IsReacquired = entry.LeaseToken != 0 });
             }
 
             return Task.FromResult<IReadOnlyList<LeasedOutboxMessage>>(leased);
@@ -62,15 +95,18 @@ public sealed class InMemoryOutboxStore : IOutboxStore
 
     public Task<bool> CompleteAsync(OutboxLease lease, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         lock (Gate)
         {
             var removed = _entries.RemoveAll(e => e.Message.Id == lease.Id && e.LeaseToken == lease.Token);
+            if (removed > 0) _ids.Remove(lease.Id);
             return Task.FromResult(removed > 0);
         }
     }
 
     public Task<bool> AbandonAsync(OutboxLease lease, DateTimeOffset? visibleAt = null, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         lock (Gate)
         {
             var index = _entries.FindIndex(e => e.Message.Id == lease.Id && e.LeaseToken == lease.Token);
@@ -83,6 +119,9 @@ public sealed class InMemoryOutboxStore : IOutboxStore
             return Task.FromResult(true);
         }
     }
+
+    private static OutboxMessage Clone(OutboxMessage message)
+        => message with { Headers = new MessageHeaders(message.Headers) };
 
     /// <summary>Returns the number of pending (not yet completed) entries — test/diagnostic use.</summary>
     public int Count

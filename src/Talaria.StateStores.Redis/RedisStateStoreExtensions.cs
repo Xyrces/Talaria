@@ -18,6 +18,15 @@ namespace Talaria.StateStores.Redis;
 /// </summary>
 public static class RedisStateStoreExtensions
 {
+    /// <summary>Registers all Redis persistence components using one configuration.</summary>
+    public static TalariaBuilder UseRedisPersistence(this TalariaBuilder builder, Action<TalariaRedisOptions> configure)
+    {
+        EnsureNoMixedPersistence(builder);
+        return builder.UseRedisStateStore(configure).UseRedisIdempotencyStore().UseRedisDeferralStore().UseRedisFailedMessageStore();
+    }
+
+    public static TalariaBuilder UseRedisPersistence(this TalariaBuilder builder, string connectionString)
+        => builder.UseRedisPersistence(options => options.Configuration = connectionString);
     /// <summary>
     /// Configures Talaria to use the Redis state store (singleton, matching the InMemory store).
     /// Also registers the Redis transactional outbox: saga state transitions then stage
@@ -63,6 +72,29 @@ public static class RedisStateStoreExtensions
         builder.Services.TryAddSingleton<IDeferralStore, RedisDeferralStore>();
 
         return builder;
+    }
+
+    /// <summary>Registers durable failed-message retention for inspection and replay.</summary>
+    public static TalariaBuilder UseRedisFailedMessageStore(
+        this TalariaBuilder builder,
+        Action<TalariaRedisOptions>? configure = null)
+    {
+        EnsureNoMixedPersistence(builder);
+        builder.ConfigureRedis(configure);
+        builder.Services.TryAddSingleton<IFailedMessageStore, RedisFailedMessageStore>();
+        return builder;
+    }
+
+    private static void EnsureNoMixedPersistence(TalariaBuilder builder)
+    {
+        var conflictingOutbox = builder.Services.Any(descriptor =>
+            descriptor.ServiceType == typeof(IOutboxStore)
+            && descriptor.ImplementationType != typeof(RedisOutboxStore));
+        if (conflictingOutbox || builder.Services.Any(descriptor => descriptor.ServiceType == typeof(IStateStoreFactory)))
+        {
+            throw new InvalidOperationException(
+                "Redis state and outbox persistence must be registered as one bundle. Remove the existing non-Redis IOutboxStore or IStateStoreFactory registration before calling UseRedisStateStore/UseRedisPersistence.");
+        }
     }
 
     /// <summary>
