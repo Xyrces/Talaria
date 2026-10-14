@@ -9,7 +9,8 @@ public sealed class DockerFactAttribute : FactAttribute
     {
         if (!IsDockerRunning())
         {
-            Skip = "Docker daemon is not running on this host environment.";
+            if (Environment.GetEnvironmentVariable("TALARIA_REQUIRE_DOCKER") != "1")
+                Skip = "Docker daemon is not running on this host environment.";
         }
     }
 
@@ -18,7 +19,13 @@ public sealed class DockerFactAttribute : FactAttribute
     // short per-call timeout makes the same run randomly pass or skip.
     private static readonly Lazy<bool> DockerAvailable = new(ProbeDocker);
 
-    public static bool IsDockerRunning() => DockerAvailable.Value;
+    public static bool IsDockerRunning()
+    {
+        var available = DockerAvailable.Value;
+        if (!available && Environment.GetEnvironmentVariable("TALARIA_REQUIRE_DOCKER") == "1")
+            throw new InvalidOperationException("TALARIA_REQUIRE_DOCKER=1 but Docker is unavailable; provider tests cannot be skipped.");
+        return available;
+    }
 
     private static bool ProbeDocker()
     {

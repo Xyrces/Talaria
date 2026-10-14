@@ -24,6 +24,8 @@ public enum RetryBackoffType
 /// <since>1.0.0</since>
 public sealed class RetryPolicy
 {
+    /// <summary>Randomize delays to avoid synchronized retry bursts.</summary>
+    public bool UseJitter { get; set; }
     /// <summary>
     /// Maximum number of delayed retry attempts before the message is routed to the DLQ.
     /// Defaults to <c>0</c> (retries disabled).

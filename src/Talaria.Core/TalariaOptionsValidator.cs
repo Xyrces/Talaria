@@ -13,6 +13,12 @@ internal sealed class TalariaOptionsValidator : IValidateOptions<TalariaOptions>
 {
     public ValidateOptionsResult Validate(string? name, TalariaOptions options)
     {
+        if (options.ShutdownDrainTimeout <= TimeSpan.Zero)
+            return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.ShutdownDrainTimeout)} must be greater than zero.");
+        if (string.IsNullOrWhiteSpace(options.ApplicationName))
+            return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.ApplicationName)} is required.");
+        if (options.ApplicationName.Length > 200)
+            return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.ApplicationName)} must not exceed 200 characters.");
         if (options.MaxHopCount <= 0)
         {
             return ValidateOptionsResult.Fail($"{nameof(TalariaOptions.MaxHopCount)} must be greater than zero.");

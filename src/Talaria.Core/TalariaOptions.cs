@@ -10,6 +10,10 @@ namespace Talaria.Core;
 /// <since>1.0.0</since>
 public sealed class TalariaOptions
 {
+    /// <summary>Create missing broker entities for minimal mappings at startup.</summary>
+    public bool AutoProvisionTopology { get; set; } = true;
+    /// <summary>Time allowed for active handlers to finish before cancellation is requested.</summary>
+    public TimeSpan ShutdownDrainTimeout { get; set; } = TimeSpan.FromSeconds(30);
     /// <summary>
     /// Maximum number of hops a message can take before being routed to the DLQ.
     /// Provides runtime protection against cyclic message loops. Must be greater than zero.

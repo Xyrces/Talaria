@@ -5,25 +5,18 @@ using Xunit;
 namespace Talaria.Transports.AzureServiceBus.Tests;
 
 /// <summary>
-/// Gates an Azure Service Bus integration test on the local emulator being
-/// available. The test only runs when the operator sets
-/// <c>TALARIA_RUN_ASB_EMULATOR=1</c> in the environment; otherwise the test
-/// is skipped with a message that explains the opt-in.
+/// Gates an Azure Service Bus integration test on the emulator being
+/// available. Required Docker mode starts the SQL-backed Testcontainers
+/// fixture; an environment opt-in can target an existing emulator.
 /// </summary>
 /// <remarks>
 /// <para>
-/// The Service Bus emulator (<c>microsoft/azure-service-bus-emulator</c>)
-/// runs on <c>localhost:5672</c> and accepts the special connection string
-/// <c>UseDevelopmentEnvironment=true</c>. We deliberately do NOT probe the
-/// port here: the integration tests instantiate a real
-/// <see cref="Azure.Messaging.ServiceBus.ServiceBusClient"/> against that
-/// endpoint, which is expensive enough that we want the operator to opt in
-/// explicitly rather than accidentally running it on every CI worker.
+/// The Service Bus emulator listens on <c>localhost:5672</c> and uses the
+/// documented <c>UseDevelopmentEmulator=true</c> connection-string option.
+/// The fixture starts SQL Server and the emulator with checked-in entities.
 /// </para>
 /// <para>
-/// Mirrors the convention used by the Kafka transport's
-/// <c>DockerFactAttribute</c> — opt-in via env var, skip with a helpful
-/// message otherwise.
+/// Missing Docker fails in required mode instead of silently skipping tests.
 /// </para>
 /// </remarks>
 /// <since>1.0.0</since>
@@ -41,7 +34,7 @@ public sealed class EmulatorFactAttribute : FactAttribute
     {
         if (!IsEmulatorOptIn())
         {
-            Skip = $"Set {EnvironmentVariable}=1 to run Azure Service Bus emulator integration tests.";
+            Skip = $"Set {EnvironmentVariable}=1 for an existing emulator or TALARIA_REQUIRE_DOCKER=1 to start the SQL-backed emulator testcontainers.";
         }
     }
 
@@ -51,6 +44,7 @@ public sealed class EmulatorFactAttribute : FactAttribute
     /// </summary>
     public static bool IsEmulatorOptIn()
     {
+        if (Environment.GetEnvironmentVariable("TALARIA_REQUIRE_DOCKER") == "1") return true;
         var raw = Environment.GetEnvironmentVariable(EnvironmentVariable);
         if (string.IsNullOrWhiteSpace(raw))
         {

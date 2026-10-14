@@ -96,6 +96,20 @@ public class RedisConcurrencyIntegrationTests : IAsyncLifetime
     }
 
     [DockerFact]
+    public async Task IdempotencyKeys_DoNotCollideWhenTuplePartsContainSeparators()
+    {
+        var store = _serviceProvider.GetRequiredService<IIdempotencyStore>();
+        var first = await store.TryAcquireLockAsync("message", "queue:part", TimeSpan.FromMinutes(1));
+        var second = await store.TryAcquireLockAsync("part:message", "queue", TimeSpan.FromMinutes(1));
+
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.NotEqual(first!.Token, second!.Token);
+        await store.ReleaseLockAsync(first);
+        await store.ReleaseLockAsync(second);
+    }
+
+    [DockerFact]
     public async Task DeferralStore_Roundtrip_LeasesCompleteAndAbandon()
     {
         var store = _serviceProvider.GetRequiredService<IDeferralStore>();
@@ -122,10 +136,18 @@ public class RedisConcurrencyIntegrationTests : IAsyncLifetime
             "order-partition-7");
 
         await store.EnqueueAsync(message);
+        // A retried enqueue for the same deterministic id must not overwrite
+        // the original payload or move its due time.
+        await store.EnqueueAsync(message with
+        {
+            PayloadJson = "\"overwritten\"",
+            DueAt = now.AddHours(1),
+        });
 
         // Due in the past: leased once, with all fields surviving the roundtrip.
         var due = await store.AcquireDueAsync(now, lease, 10);
         var acquired = Assert.Single(due);
+        Assert.False(acquired.IsReacquired);
         Assert.Equal(message.Id, acquired.Message.Id);
         Assert.Equal("orders-topic", acquired.Message.Topic);
         Assert.Equal("System.String", acquired.Message.MessageType);
@@ -148,6 +170,7 @@ public class RedisConcurrencyIntegrationTests : IAsyncLifetime
         // Once due again, it leases with its fields intact and a bumped fencing token.
         var dueAgain = await store.AcquireDueAsync(futureDue.AddMinutes(1), lease, 10);
         var reacquired = Assert.Single(dueAgain);
+        Assert.True(reacquired.IsReacquired);
         Assert.Equal(message.Id, reacquired.Message.Id);
         Assert.Equal("defer-1", reacquired.Message.Headers.MessageId);
         Assert.Equal("order-partition-7", reacquired.Message.PartitionKey);
@@ -160,5 +183,17 @@ public class RedisConcurrencyIntegrationTests : IAsyncLifetime
         Assert.False(await store.CompleteAsync(acquired.Lease));
         Assert.True(await store.CompleteAsync(reacquired.Lease));
         Assert.Empty(await store.AcquireDueAsync(futureDue.AddMinutes(2), lease, 10));
+
+        // Reusing a deterministic id after completion must not reset the fencing
+        // token and let the previous owner's token complete a new lease.
+        var reused = message with { DueAt = futureDue.AddMinutes(2) };
+        await store.EnqueueAsync(reused);
+        var fresh = Assert.Single(await store.AcquireDueAsync(reused.DueAt, lease, 10));
+        Assert.False(fresh.IsReacquired);
+        Assert.True(fresh.Lease.Token > reacquired.Lease.Token);
+        Assert.False(await store.CompleteAsync(reacquired.Lease));
+        Assert.True(await store.CompleteAsync(fresh.Lease));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.AcquireDueAsync(now, TimeSpan.Zero, 10));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.AcquireDueAsync(now, lease, 0));
     }
 }

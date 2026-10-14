@@ -10,6 +10,14 @@ namespace Talaria.Transports.InMemory;
 /// </summary>
 public static class InMemoryTransportExtensions
 {
+    /// <summary>Complete local transport, saga persistence, inbox, outbox, and retry storage.</summary>
+    public static TalariaBuilder UseInMemory(this TalariaBuilder builder)
+    {
+        EnsureNoConflictingPersistence(builder);
+        Microsoft.Extensions.DependencyInjection.Extensions.ServiceCollectionDescriptorExtensions.TryAddSingleton<
+            Talaria.Core.Abstractions.IFailedMessageStore, InMemoryFailedMessageStore>(builder.Services);
+        return builder.UseInMemoryStateStore().UseInMemoryTransport().UseInMemoryIdempotencyStore().UseInMemoryDeferralStore();
+    }
     /// <summary>
     /// Configures Talaria to use the in-memory transport.
     /// Also registers the in-memory saga state store.
@@ -31,7 +39,10 @@ public static class InMemoryTransportExtensions
     {
         var options = new InMemoryTransportOptions();
         configure(options);
-        builder.UseInMemoryStateStore();
+        if (!HasPersistenceRegistered(builder))
+        {
+            builder.UseInMemoryStateStore();
+        }
         builder.Services.AddSingleton<Talaria.Core.Abstractions.ITransport>(sp =>
             new InMemoryTransport(
                 options,
@@ -50,7 +61,10 @@ public static class InMemoryTransportExtensions
         this TalariaBuilder builder,
         InMemoryTransport transport)
     {
-        builder.UseInMemoryStateStore();
+        if (!HasPersistenceRegistered(builder))
+        {
+            builder.UseInMemoryStateStore();
+        }
         return builder.UseTransport(transport);
     }
 
@@ -61,6 +75,7 @@ public static class InMemoryTransportExtensions
     /// </summary>
     public static TalariaBuilder UseInMemoryStateStore(this TalariaBuilder builder)
     {
+        EnsureNoConflictingPersistence(builder);
         Microsoft.Extensions.DependencyInjection.Extensions.ServiceCollectionDescriptorExtensions.TryAddSingleton(
             builder.Services,
             typeof(InMemoryOutboxStore));
@@ -74,6 +89,24 @@ public static class InMemoryTransportExtensions
             typeof(Talaria.Core.Abstractions.IStateStore<>),
             typeof(InMemoryStateStore<>));
         return builder;
+    }
+
+    private static bool HasPersistenceRegistered(TalariaBuilder builder)
+        => builder.Services.Any(x =>
+            x.ServiceType == typeof(Talaria.Core.Abstractions.IStateStoreFactory)
+            || x.ServiceType == typeof(Talaria.Core.Abstractions.IStateStore<>)
+            || x.ServiceType == typeof(Talaria.Core.Abstractions.IOutboxStore));
+
+    private static void EnsureNoConflictingPersistence(TalariaBuilder builder)
+    {
+        var hasNonInMemoryOutbox = builder.Services.Any(x => x.ServiceType == typeof(Talaria.Core.Abstractions.IOutboxStore))
+            && !builder.Services.Any(x => x.ServiceType == typeof(InMemoryOutboxStore));
+        if (hasNonInMemoryOutbox
+            || builder.Services.Any(x => x.ServiceType == typeof(Talaria.Core.Abstractions.IStateStoreFactory)
+                || x.ServiceType == typeof(Talaria.Core.Abstractions.IStateStore<>) && x.ImplementationType != typeof(InMemoryStateStore<>)))
+        {
+            throw new InvalidOperationException("Select one persistence bundle. UseInMemory includes local persistence.");
+        }
     }
 
     /// <summary>

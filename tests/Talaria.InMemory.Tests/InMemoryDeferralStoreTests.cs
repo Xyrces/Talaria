@@ -187,4 +187,40 @@ public class InMemoryDeferralStoreTests
         Assert.Equal("root-1", acquired.Message.Headers.RetryRootMessageId);
         Assert.Equal("part-1", acquired.Message.PartitionKey);
     }
+
+    [Fact]
+    public async Task EnqueueAndAcquireCloneHeadersAndRejectDuplicateIds()
+    {
+        var store = new InMemoryDeferralStore();
+        var headers = new MessageHeaders { MessageId = "original" };
+        var message = new DeferredMessage(Guid.NewGuid(), "orders", "contract", "{}", headers,
+            "corr", 1, DateTimeOffset.UtcNow.AddSeconds(-1), null);
+
+        await store.EnqueueAsync(message);
+        await store.EnqueueAsync(message); // Retrying the enqueue after a lost response is idempotent.
+        headers.MessageId = "mutated-after-enqueue";
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.EnqueueAsync(message));
+        var acquired = Assert.Single(await store.AcquireDueAsync(DateTimeOffset.UtcNow, Lease, 1));
+        Assert.Equal("original", acquired.Message.Headers.MessageId);
+        acquired.Message.Headers.MessageId = "mutated-after-acquire";
+        Assert.Equal("original", Assert.Single(await store.AcquireDueAsync(DateTimeOffset.UtcNow.Add(Lease), Lease, 1)).Message.Headers.MessageId);
+    }
+
+    [Fact]
+    public async Task OldLeaseCannotCompleteReenqueuedSameId()
+    {
+        var store = new InMemoryDeferralStore();
+        var id = Guid.NewGuid();
+        DeferredMessage MessageWithId() => new(id, "orders", "contract", "{}", new MessageHeaders(),
+            "corr", 1, DateTimeOffset.UtcNow.AddSeconds(-1), null);
+
+        await store.EnqueueAsync(MessageWithId());
+        var stale = Assert.Single(await store.AcquireDueAsync(DateTimeOffset.UtcNow, Lease, 1));
+        Assert.True(await store.CompleteAsync(stale.Lease));
+
+        await store.EnqueueAsync(MessageWithId());
+        var current = Assert.Single(await store.AcquireDueAsync(DateTimeOffset.UtcNow, Lease, 1));
+        Assert.False(await store.CompleteAsync(stale.Lease));
+        Assert.True(await store.CompleteAsync(current.Lease));
+    }
 }

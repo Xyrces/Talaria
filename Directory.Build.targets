@@ -1,0 +1,12 @@
+<Project>
+  <ItemGroup Condition="'$(IsTestProject)' == 'true' and (
+      '$(MSBuildProjectName)' == 'Talaria.Persistence.SqlServer.Tests' or
+      '$(MSBuildProjectName)' == 'Talaria.StateStores.Redis.Tests' or
+      '$(MSBuildProjectName)' == 'Talaria.Tests.TransportContract' or
+      '$(MSBuildProjectName)' == 'Talaria.Transports.AzureServiceBus.Tests' or
+      '$(MSBuildProjectName)' == 'Talaria.Transports.Kafka.Tests' or
+      '$(MSBuildProjectName)' == 'Talaria.Transports.RabbitMq.Tests')">
+    <!-- Testcontainers.MsSql brings SSH.NET transitively; 2026.0.0 fixes both 2026 SSH.NET advisories. -->
+    <PackageReference Include="SSH.NET" Version="2026.0.0" />
+  </ItemGroup>
+</Project>

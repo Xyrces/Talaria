@@ -67,7 +67,7 @@ public sealed class MessageHeaders : IDictionary<string, string>
     /// <summary>Header key carrying the current deferral attempt count (engine-internal).</summary>
     public const string DeferralAttemptKey = "x-deferral-attempt";
 
-    /// <summary>Header key carrying the assembly-qualified CLR type name of the message payload (engine-internal).</summary>
+    /// <summary>Header key carrying the stable CLR contract name of the message payload (engine-internal).</summary>
     public const string MessageTypeKey = "talaria.message_type";
 
     private readonly Dictionary<string, string> _inner = new(StringComparer.OrdinalIgnoreCase);

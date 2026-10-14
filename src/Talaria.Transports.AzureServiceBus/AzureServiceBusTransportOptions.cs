@@ -17,6 +17,10 @@ namespace Talaria.Transports.AzureServiceBus;
 /// <since>1.0.0</since>
 public sealed class AzureServiceBusTransportOptions
 {
+    /// <summary>Credential used with FullyQualifiedNamespace.</summary>
+    public Azure.Core.TokenCredential? Credential { get; set; }
+    /// <summary>Maximum renewal duration while the application is still processing.</summary>
+    public TimeSpan MaxAutoLockRenewalDuration { get; set; } = TimeSpan.FromMinutes(30);
     /// <summary>
     /// Fully-qualified Service Bus namespace (e.g. <c>mysb.servicebus.windows.net</c>).
     /// Required when <see cref="ConnectionString"/> is not supplied.

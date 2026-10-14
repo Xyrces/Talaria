@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using Talaria.Core;
 using Talaria.Core.Hosting;
+using Talaria.Core.Abstractions;
 
 namespace Talaria.Core.Registration;
 
@@ -35,10 +36,18 @@ public static class TalariaServiceExtensions
             ServiceDescriptor.Singleton<IValidateOptions<TalariaOptions>, TalariaOptionsValidator>());
         services.TryAddSingleton(sp => sp.GetRequiredService<IOptions<TalariaOptions>>().Value);
         services.TryAddSingleton<TalariaListener>();
+        services.TryAddSingleton(sp => sp.GetRequiredService<TalariaListener>().Health);
+        services.TryAddSingleton<ProducerCache>();
+        services.TryAddScoped<IMessageBus, MessageBus>();
+        services.TryAddScoped<IFailedMessages, FailedMessages>();
         services.AddHostedService<TalariaHostedService>();
 
         return new TalariaBuilder(services);
     }
+
+    /// <summary>Configures a complete messaging stack using provider extensions.</summary>
+    public static TalariaBuilder AddTalaria(this IServiceCollection services, Func<TalariaBuilder, TalariaBuilder> configure)
+        => configure(services.AddTalaria());
 
     /// <summary>
     /// Adds Talaria messaging services with configuration.

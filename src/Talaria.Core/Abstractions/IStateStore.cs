@@ -2,6 +2,9 @@
 
 namespace Talaria.Core.Abstractions;
 
+public sealed record SagaSnapshot<T>(T? State, long Version, bool IsCompleted, bool MessageProcessed);
+public enum SagaCommitStatus { Committed, AlreadyProcessed, Conflict }
+
 /// <summary>
 /// Persists saga state keyed by a correlation ID.
 /// Implementations may use in-memory storage, Redis, Kafka compacted topics, etc.
@@ -11,12 +14,14 @@ namespace Talaria.Core.Abstractions;
 /// The state store is the source of truth for saga progression. The transactional outbox
 /// (<see cref="IOutboxStore"/>) is registered automatically alongside the Redis and InMemory
 /// state stores so that <see cref="TransitionAsync"/> can stage outbound messages atomically
-/// with the state write; without an outbox, saga dispatch falls back to direct transactional
-/// produce, which is not atomic with the state save.
+/// with the state write. Saga dispatch requires an outbox in the same persistence store.
 /// </remarks>
 /// <since>1.0.0</since>
 public interface IStateStore<TState> where TState : class, new()
 {
+    Task<SagaSnapshot<TState>> ReadSnapshotAsync(string correlationId, string messageId, CancellationToken ct = default);
+    Task<SagaCommitStatus> TryTransitionAsync(string correlationId, string messageId, long expectedVersion,
+        TState? newState, IReadOnlyList<OutboxMessage> outbox, CancellationToken ct = default);
     /// <summary>
     /// Retrieves the current state for the given correlation ID, or null if not found.
     /// </summary>

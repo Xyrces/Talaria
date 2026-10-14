@@ -20,15 +20,18 @@ internal sealed class MessageProcessingPipeline
     private readonly IIdempotencyStore? _idempotencyStore;
     private readonly TalariaOptions _options;
     private readonly ILogger _logger;
+    private readonly IFailedMessageStore? _failedMessages;
 
     public MessageProcessingPipeline(
         IIdempotencyStore? idempotencyStore,
         TalariaOptions options,
-        ILogger logger)
+        ILogger logger,
+        IFailedMessageStore? failedMessages = null)
     {
         _idempotencyStore = idempotencyStore;
         _options = options;
         _logger = logger;
+        _failedMessages = failedMessages;
     }
 
     /// <summary>
@@ -89,9 +92,22 @@ internal sealed class MessageProcessingPipeline
             return new IdempotencyGate(Enabled: false, Lock: null);
         }
 
-        var lck = await _idempotencyStore.TryAcquireLockAsync(msgId, consumerGroup, _options.IdempotencyLockTtl, ct);
-        return new IdempotencyGate(Enabled: true, Lock: lck);
+        while (true)
+        {
+            var result = await _idempotencyStore.AcquireAsync(msgId, consumerGroup, _options.IdempotencyLockTtl, ct);
+            if (result.Status == IdempotencyStatus.Completed)
+                return new IdempotencyGate(Enabled: true, Lock: null);
+            if (result.Status == IdempotencyStatus.Acquired)
+                return new IdempotencyGate(Enabled: true, Lock: result.Lock
+                    ?? throw new InvalidOperationException("The inbox granted ownership without a lease."));
+            // Never acknowledge busy work. The owning worker may have crashed. Wait
+            // for completion or lease expiry without advancing this consumer's offset.
+            await Task.Delay(TimeSpan.FromMilliseconds(100), ct);
+        }
     }
+
+    public ProcessingLease Renew(IdempotencyLock? lease, CancellationToken ct)
+        => new(_idempotencyStore, lease, _options.IdempotencyLockTtl, ct);
 
     /// <summary>
     /// Marks the message complete (when locked) and commits its offset.
@@ -153,12 +169,72 @@ internal sealed class MessageProcessingPipeline
 
         try
         {
+            if (_failedMessages is not null)
+            {
+                var identity = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new[]
+                {
+                    envelope.SourceTopic, lck?.ConsumerQueue ?? (envelope.Headers.TryGetValue("talaria.retry.endpoint", out var target) ? target : null), envelope.Headers.MessageId,
+                });
+                var id = envelope.Headers.MessageId is null ? Guid.NewGuid()
+                    : new Guid(System.Security.Cryptography.SHA256.HashData(identity).AsSpan(0, 16));
+                await _failedMessages.SaveAsync(new FailedMessage(id, envelope.SourceTopic ?? throw new InvalidOperationException("Failed delivery has no source topic."),
+                    envelope.Headers.TryGetValue(MessageHeaders.MessageTypeKey, out var type) ? type : typeof(T).FullName!,
+                    System.Text.Json.JsonSerializer.Serialize(envelope.Payload), new MessageHeaders(envelope.Headers),
+                    envelope.PartitionKey, envelope.Headers.DlqReason ?? "handler_failed", DateTimeOffset.UtcNow), ct);
+            }
             await consumer.NackAsync(envelope, ct);
         }
         catch (Exception nackEx)
         {
             _logger.LogError(nackEx, "Failed to route message to the DLQ; it remains uncommitted for redelivery.");
+            throw; // Restart rather than letting a later Kafka offset pass this failure.
         }
+    }
+}
+
+internal sealed class ProcessingLease : IAsyncDisposable
+{
+    private readonly CancellationTokenSource _stop = new();
+    private readonly CancellationTokenSource _handler;
+    private readonly Task _renewal;
+    private Exception? _failure;
+
+    public ProcessingLease(IIdempotencyStore? store, IdempotencyLock? lease, TimeSpan ttl, CancellationToken ct)
+    {
+        _handler = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _renewal = lease is null ? Task.CompletedTask : RunAsync(store!, lease, ttl);
+    }
+
+    public CancellationToken Token => _handler.Token;
+    public void ThrowIfLost()
+    {
+        if (_failure is { } failure) throw new InvalidOperationException("Processing lease renewal failed; delivery remains unsettled.", failure);
+    }
+
+    private async Task RunAsync(IIdempotencyStore store, IdempotencyLock lease, TimeSpan ttl)
+    {
+        try
+        {
+            while (true)
+            {
+                await Task.Delay(TimeSpan.FromTicks(Math.Max(1, ttl.Ticks / 3)), _stop.Token);
+                if (!await store.RenewAsync(lease, ttl, _stop.Token)) throw new IdempotencyLeaseLostException(lease.MessageId);
+            }
+        }
+        catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            _failure = ex;
+            await _handler.CancelAsync();
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await _stop.CancelAsync();
+        await _renewal;
+        _stop.Dispose();
+        _handler.Dispose();
     }
 }
 
@@ -173,7 +249,8 @@ internal static class ConsumerSupervision
         string name,
         Func<CancellationToken, Task> loop,
         ILogger logger,
-        CancellationToken ct)
+        CancellationToken ct,
+        Action<Exception>? onFailure = null)
     {
         var backoff = TimeSpan.FromSeconds(1);
         var maxBackoff = TimeSpan.FromSeconds(30);
@@ -191,6 +268,7 @@ internal static class ConsumerSupervision
             }
             catch (Exception ex)
             {
+                onFailure?.Invoke(ex);
                 logger.LogError(ex, "Consumer loop '{Name}' faulted; restarting in {Backoff}.", name, backoff);
 
                 try

@@ -2,8 +2,10 @@
 
 using System.Reflection;
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
 using Talaria.Core;
 using Talaria.Core.Abstractions;
+using Talaria.Core.Registration;
 
 namespace Talaria.StateStores.Redis.Tests;
 
@@ -106,4 +108,30 @@ public class RedisOutboxStoreSerializationTests
         Assert.NotNull(method);
         return (string)method!.Invoke(null, [message])!;
     }
+
+    [Fact]
+    public void Given_ExistingNonRedisStateStore_When_CallingUseRedisStateStore_Then_ThrowsInvalidOperationException()
+    {
+        var services = new ServiceCollection();
+        var builder = services.AddTalaria();
+        services.AddSingleton(typeof(IStateStore<>), typeof(NonRedisStateStore<>));
+
+        Assert.Throws<InvalidOperationException>(() =>
+            builder.UseRedisStateStore(options => options.Configuration = "localhost:6379"));
+    }
+
+    private sealed class NonRedisStateStore<TState> : IStateStore<TState> where TState : class, new()
+    {
+        public Task<SagaSnapshot<TState>> ReadSnapshotAsync(string correlationId, string messageId, CancellationToken ct = default)
+            => Task.FromResult(new SagaSnapshot<TState>(null, 0, false, false));
+        public Task<SagaCommitStatus> TryTransitionAsync(string correlationId, string messageId, long expectedVersion, TState? newState, IReadOnlyList<OutboxMessage> outbox, CancellationToken ct = default)
+            => Task.FromResult(SagaCommitStatus.Committed);
+        public Task TransitionAsync(string correlationId, TState? newState, IReadOnlyList<OutboxMessage> outbox, CancellationToken ct = default)
+            => Task.CompletedTask;
+        public Task<TState?> GetAsync(string correlationId, CancellationToken ct = default) => Task.FromResult<TState?>(null);
+        public Task SaveAsync(string correlationId, TState state, CancellationToken ct = default) => Task.CompletedTask;
+        public Task DeleteAsync(string correlationId, CancellationToken ct = default) => Task.CompletedTask;
+    }
 }
+
+

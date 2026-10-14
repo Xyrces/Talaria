@@ -29,10 +29,7 @@ var talaria = builder.Services.AddTalaria();
 if (messagingProvider.Equals("InMemory", StringComparison.OrdinalIgnoreCase))
 {
     talaria
-        .UseInMemoryTransport()
-        .UseInMemoryStateStore()
-        .UseInMemoryIdempotencyStore()
-        .UseInMemoryDeferralStore();
+        .UseInMemory();
 }
 else if (messagingProvider.Equals("ServiceBus", StringComparison.OrdinalIgnoreCase))
 {
@@ -49,17 +46,7 @@ else if (messagingProvider.Equals("ServiceBus", StringComparison.OrdinalIgnoreCa
         {
             opts.ConnectionString = serviceBusConnection;
         })
-        .UseRedisStateStore(opts =>
-        {
-            opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
-            opts.KeyPrefix = redisKeyPrefix;
-        })
-        .UseRedisIdempotencyStore(opts =>
-        {
-            opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
-            opts.KeyPrefix = redisKeyPrefix;
-        })
-        .UseRedisDeferralStore(opts =>
+        .UseRedisPersistence(opts =>
         {
             opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
             opts.KeyPrefix = redisKeyPrefix;
@@ -72,17 +59,7 @@ else
         {
             opts.BootstrapServers = builder.Configuration.GetConnectionString("kafka") ?? "localhost:9092";
         })
-        .UseRedisStateStore(opts =>
-        {
-            opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
-            opts.KeyPrefix = redisKeyPrefix;
-        })
-        .UseRedisIdempotencyStore(opts =>
-        {
-            opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
-            opts.KeyPrefix = redisKeyPrefix;
-        })
-        .UseRedisDeferralStore(opts =>
+        .UseRedisPersistence(opts =>
         {
             opts.Configuration = builder.Configuration.GetConnectionString("redis") ?? "localhost:6379";
             opts.KeyPrefix = redisKeyPrefix;
@@ -107,7 +84,7 @@ app.Services.MapTopic<SendVerificationEmailCommand>(emailCommandsTopic, async (m
 });
 
 // Diagnostics endpoint used by the AppHost integration tests to assert idempotent duplicate suppression of side effects.
-// Includes the replica id so multi-replica tests can sum counts across instances.
+// The Redis-backed tracker reports aggregate counts across replicas.
 app.MapGet("/api/diagnostics/count/{key}", (string key, [FromServices] Talaria.Client.Api.ProcessingTracker tracker) =>
     Results.Ok(new { Key = key, Count = tracker.Get(key), Instance = Environment.MachineName }));
 
@@ -117,7 +94,8 @@ app.MapDefaultEndpoints();
 app.MapPost("/api/accounts", async (
     [FromBody] CreateAccountRequest request,
     [FromQuery] string? accountId,
-    [FromServices] ITransport transport) =>
+    [FromServices] ITransport transport,
+    CancellationToken cancellationToken) =>
 {
     if (string.IsNullOrWhiteSpace(request.Email) || request.Email.Length > 254 || !request.Email.Contains('@'))
     {
@@ -129,12 +107,12 @@ app.MapPost("/api/accounts", async (
     // The server always generates the message id — clients must not control dedup keys.
 
     // Simulate sending the command that the saga listens for
-    var producer = await transport.CreateProducerAsync<CreateAccountCommand>(onboardingCommandsTopic, new ProducerOptions());
+    await using var producer = await transport.CreateProducerAsync<CreateAccountCommand>(onboardingCommandsTopic, new ProducerOptions(), cancellationToken);
     await producer.ProduceAsync(new CreateAccountCommand
     {
         AccountId = determinedId,
         Email = request.Email
-    });
+    }, null, null, cancellationToken);
 
     return Results.Accepted($"/api/accounts/{determinedId}", new { AccountId = determinedId });
 });
@@ -142,14 +120,15 @@ app.MapPost("/api/accounts", async (
 // Simple API to trigger verification event
 app.MapPost("/api/accounts/{accountId}/verify", async (
     string accountId,
-    [FromServices] ITransport transport) =>
+    [FromServices] ITransport transport,
+    CancellationToken cancellationToken) =>
 {
     // Simulate external system verifying the account
-    var producer = await transport.CreateProducerAsync<AccountVerifiedEvent>(accountEventsTopic, new ProducerOptions());
+    await using var producer = await transport.CreateProducerAsync<AccountVerifiedEvent>(accountEventsTopic, new ProducerOptions(), cancellationToken);
     await producer.ProduceAsync(new AccountVerifiedEvent
     {
         AccountId = accountId
-    });
+    }, null, null, cancellationToken);
 
     return Results.Ok(new { Verified = true });
 });

@@ -17,7 +17,8 @@ public sealed record EnvelopeMetadata(
     int? Partition,
     long Offset,
     DateTimeOffset Timestamp,
-    string? CorrelationId)
+    string? CorrelationId,
+    string? SourceTopic = null)
 {
     /// <summary>
     /// An empty metadata instance for tests and infrastructure code that need a placeholder.

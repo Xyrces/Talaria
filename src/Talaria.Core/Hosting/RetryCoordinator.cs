@@ -66,6 +66,8 @@ internal sealed class RetryCoordinator
         CancellationToken ct)
     {
         var policy = registration.RetryPolicy ?? _options.DefaultRetryPolicy;
+        envelope.Headers["talaria.retry.endpoint"] = registration.ConsumerGroup
+            ?? _options.ConsumerGroupOverride ?? $"{_options.ApplicationName}.{registration.TopicName}";
         return await TryCoordinateRetryAsync(
             policy,
             registration.TopicName,
@@ -139,9 +141,8 @@ internal sealed class RetryCoordinator
         }
 
         var attempt = ParseRetryAttempt(envelope.Headers);
-        var nextAttempt = attempt + 1;
 
-        if (nextAttempt > policy.MaxRetryAttempts)
+        if (attempt >= policy.MaxRetryAttempts)
         {
             _logger.LogWarning(
                 "Message {MessageId} on '{Topic}' exhausted all {Max} retry attempts. Routing to DLQ.",
@@ -156,6 +157,8 @@ internal sealed class RetryCoordinator
             await RouteToDlqAsync(pipeline, consumer, envelope, ex, @lock, "retries_exhausted", ct);
             return RetryOutcome.Exhausted;
         }
+
+        var nextAttempt = attempt + 1;
 
         if (_deferralStore is null)
         {
@@ -174,12 +177,17 @@ internal sealed class RetryCoordinator
         var headers = BuildRetryHeaders(envelope.Headers, nextAttempt);
         var rootMessageId = headers.RetryRootMessageId ?? headers.MessageId ?? Guid.NewGuid().ToString("N");
         headers.RetryRootMessageId = rootMessageId;
-        headers.MessageId = $"{rootMessageId}:retry:{nextAttempt}";
+        var targetEndpoint = headers.TryGetValue("talaria.retry.endpoint", out var target)
+            ? target
+            : @lock?.ConsumerQueue ?? $"{_options.ApplicationName}.{topicName}";
+        headers["talaria.retry.endpoint"] = targetEndpoint;
+        var retryIdentity = CreateDeferredIdentity(rootMessageId, targetEndpoint, nextAttempt, "retry");
+        headers.MessageId = retryIdentity.MessageId;
 
         var payloadJson = SerializePayload(envelope.Payload, messageType);
 
         var deferred = new DeferredMessage(
-            Guid.NewGuid(),
+            retryIdentity.EntryId,
             topicName,
             messageType.AssemblyQualifiedName ?? messageType.FullName!,
             payloadJson,
@@ -197,12 +205,11 @@ internal sealed class RetryCoordinator
         {
             _logger.LogCritical(
                 enqueueEx,
-                "Failed to enqueue delayed retry for message {MessageId} on '{Topic}'. Routing to DLQ with reason 'retry_unavailable'.",
+                "Failed to enqueue delayed retry for message {MessageId} on '{Topic}'; preserving the original delivery.",
                 envelope.Headers.MessageId, topicName);
 
-            envelope.Headers.DlqAttempts = attempt;
-            await RouteToDlqAsync(pipeline, consumer, envelope, ex, @lock, "retry_unavailable", ct);
-            return RetryOutcome.Unavailable;
+            await ReleaseLockBestEffortAsync(pipeline, @lock, ct);
+            throw; // Store outages must preserve the original delivery.
         }
 
         Diagnostics.TalariaDiagnostics.RetryScheduled.Add(1,
@@ -211,7 +218,7 @@ internal sealed class RetryCoordinator
             new KeyValuePair<string, object?>("messaging.destination.name", topicName));
 
         // Commit the original envelope BEFORE releasing the idempotency lock.
-        // The retry copy carries a deterministic MessageId ({root}:retry:{attempt}),
+        // The retry copy carries a deterministic endpoint-scoped MessageId,
         // so any duplicate copies produced by a redelivery are suppressed by the
         // idempotency gate. If commit fails, release the lock best-effort so the
         // original can redeliver promptly rather than waiting for the lock TTL to expire.
@@ -223,12 +230,24 @@ internal sealed class RetryCoordinator
         {
             _logger.LogError(commitEx, "Failed to commit original envelope after scheduling retry for {MessageId}; it remains uncommitted for redelivery.", envelope.Headers.MessageId);
             await ReleaseLockBestEffortAsync(pipeline, @lock, ct);
-            return RetryOutcome.Scheduled;
+            throw;
         }
 
         await ReleaseLockBestEffortAsync(pipeline, @lock, ct);
 
         return RetryOutcome.Scheduled;
+    }
+
+    internal static (Guid EntryId, string MessageId) CreateDeferredIdentity(
+        string rootMessageId, string targetEndpoint, int attempt, string purpose)
+    {
+        var identity = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new[]
+        {
+            purpose, rootMessageId, targetEndpoint, attempt.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        });
+        var digest = System.Security.Cryptography.SHA256.HashData(identity);
+        var id = digest.AsSpan(0, 16);
+        return (new Guid(id), purpose + "-" + Convert.ToHexString(id).ToLowerInvariant());
     }
 
     private async Task ReleaseLockBestEffortAsync(
@@ -283,7 +302,7 @@ internal sealed class RetryCoordinator
             return 0;
         }
 
-        if (int.TryParse(raw, out var attempt))
+        if (int.TryParse(raw, out var attempt) && attempt >= 0)
         {
             return attempt;
         }
@@ -312,6 +331,8 @@ internal sealed class RetryCoordinator
         {
             computed = policy.MaxRetryInterval.Value;
         }
+
+        if (policy.UseJitter) computed = TimeSpan.FromTicks((long)(computed.Ticks * (0.5 + Random.Shared.NextDouble() * 0.5)));
 
         if (computed < minDelay)
         {

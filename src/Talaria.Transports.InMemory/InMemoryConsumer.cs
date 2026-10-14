@@ -21,8 +21,9 @@ namespace Talaria.Transports.InMemory;
 /// redelivering uncommitted messages.
 /// </para>
 /// </summary>
-internal sealed class InMemoryConsumer<T> : IConsumer<T>
+internal sealed class InMemoryConsumer<T> : IConsumer<T>, IConsumerReadiness
 {
+    public Task Ready => Task.CompletedTask;
     private readonly Channel<InMemoryMessage> _groupChannel;
     private readonly InMemoryTransport.TopicBus _dlqBus;
     private readonly InMemoryTransport.TopicBus _appDlqBus;
@@ -119,16 +120,20 @@ internal sealed class InMemoryConsumer<T> : IConsumer<T>
                 : "Failed to deserialize the message payload. Enable IncludeExceptionDetailsInDlq for details.";
         }
 
-        var dlqMessage = new InMemoryMessage
+        await _dlqBus.PublishAsync(new InMemoryMessage
         {
             PayloadJson = raw.PayloadJson, // keep the raw payload — it failed deserialization
-            Headers = headers,
+            Headers = new MessageHeaders(headers),
             PartitionKey = raw.PartitionKey,
             Timestamp = raw.Timestamp,
-        };
-
-        await _dlqBus.PublishAsync(dlqMessage, ct);
-        await _appDlqBus.PublishAsync(dlqMessage, ct);
+        }, ct);
+        await _appDlqBus.PublishAsync(new InMemoryMessage
+        {
+            PayloadJson = raw.PayloadJson,
+            Headers = new MessageHeaders(headers),
+            PartitionKey = raw.PartitionKey,
+            Timestamp = raw.Timestamp,
+        }, ct);
     }
 
     public Task CommitAsync(MessageEnvelope<T> message, CancellationToken ct = default)
@@ -140,16 +145,21 @@ internal sealed class InMemoryConsumer<T> : IConsumer<T>
     public async Task NackAsync(MessageEnvelope<T> message, CancellationToken ct = default)
     {
         // Route to both topic-specific DLQ and app-wide DLQ
-        var dlqMessage = new InMemoryMessage
+        var payloadJson = JsonSerializer.Serialize(message.Payload);
+        await _dlqBus.PublishAsync(new InMemoryMessage
         {
-            PayloadJson = JsonSerializer.Serialize(message.Payload),
+            PayloadJson = payloadJson,
             Headers = new MessageHeaders(message.Headers),
             PartitionKey = message.PartitionKey,
             Timestamp = message.Timestamp,
-        };
-
-        await _dlqBus.PublishAsync(dlqMessage, ct);
-        await _appDlqBus.PublishAsync(dlqMessage, ct);
+        }, ct);
+        await _appDlqBus.PublishAsync(new InMemoryMessage
+        {
+            PayloadJson = payloadJson,
+            Headers = new MessageHeaders(message.Headers),
+            PartitionKey = message.PartitionKey,
+            Timestamp = message.Timestamp,
+        }, ct);
 
         _pending.TryRemove(message.Offset, out _);
     }

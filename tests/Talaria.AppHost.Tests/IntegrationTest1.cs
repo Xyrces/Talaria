@@ -2,11 +2,21 @@ using System.Net;
 using System.Net.Http.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+using Aspire.Hosting.ApplicationModel;
+using Talaria.Client.Api.Sagas;
+using Talaria.Core;
+using Talaria.Core.Abstractions;
+using Talaria.StateStores.Redis;
 using Xunit;
 using StackExchange.Redis;
 
 namespace Talaria.AppHost.Tests;
 
+[CollectionDefinition("AppHost integration", DisableParallelization = true)]
+public sealed class AppHostIntegrationCollection { }
+
+[Collection("AppHost integration")]
 public class IntegrationTest1
 {
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromMinutes(3);
@@ -16,7 +26,7 @@ public class IntegrationTest1
     {
         // Arrange
         var cancellationToken = new CancellationTokenSource(DefaultTimeout).Token;
-        var appHost = await DistributedApplicationTestingBuilder.CreateAsync<Projects.Talaria_AppHost>(cancellationToken);
+        var appHost = await DistributedApplicationTestingBuilder.CreateAsync<Projects.Talaria_AppHost>(["--Talaria:DisableTelemetry=true"], cancellationToken);
         appHost.Services.AddLogging(logging =>
         {
             logging.SetMinimumLevel(LogLevel.Debug);
@@ -30,13 +40,36 @@ public class IntegrationTest1
         // Act
         // Connect to the API
         var httpClient = app.CreateHttpClient("talaria-client");
+        httpClient.Timeout = DefaultTimeout;
         
         // Wait for the API to be ready
         await app.ResourceNotifications.WaitForResourceHealthyAsync("talaria-client", cancellationToken).WaitAsync(DefaultTimeout, cancellationToken);
         
         // Create an account to trigger the saga via our endpoint
         var request = new { Email = "test@example.com" };
-        var response = await httpClient.PostAsJsonAsync("/api/accounts", request, cancellationToken);
+        HttpResponseMessage response;
+        try
+        {
+            response = await httpClient.PostAsJsonAsync("/api/accounts", request, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            var logs = new List<string>();
+            var loggerService = app.Services.GetRequiredService<ResourceLoggerService>();
+            using var logTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            foreach (var resource in new[] { "talaria-client", "kafka" })
+            {
+                try
+                {
+                    await foreach (var line in loggerService.GetAllAsync(resource).WithCancellation(logTimeout.Token))
+                        logs.Add($"[{resource}] {line}");
+                }
+                catch (OperationCanceledException) { }
+            }
+
+            var kafkaConnection = await app.GetConnectionStringAsync("kafka", CancellationToken.None);
+            throw new Xunit.Sdk.XunitException($"POST /api/accounts failed. Kafka connection string: {kafkaConnection}{Environment.NewLine}{exception}{Environment.NewLine}{string.Join(Environment.NewLine, logs)}");
+        }
 
         // Assert
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
@@ -48,7 +81,7 @@ public class IntegrationTest1
         // Arrange
         // We use a high timeout as pulling 3x replicas and kafka takes a moment in testcontainers
         var cancellationToken = new CancellationTokenSource(TimeSpan.FromMinutes(3)).Token;
-        var appHost = await DistributedApplicationTestingBuilder.CreateAsync<Projects.Talaria_AppHost>(cancellationToken);
+        var appHost = await DistributedApplicationTestingBuilder.CreateAsync<Projects.Talaria_AppHost>(["--Talaria:DisableTelemetry=true"], cancellationToken);
 
         await using var app = await appHost.BuildAsync(cancellationToken).WaitAsync(TimeSpan.FromMinutes(3), cancellationToken);
         await app.StartAsync(cancellationToken).WaitAsync(TimeSpan.FromMinutes(3), cancellationToken);
@@ -79,29 +112,29 @@ public class IntegrationTest1
 
         // The saga starter handler must run EXACTLY ONCE for the account across all 3 replicas
         // (starter-replay guard: subsequent identical commands see existing state and skip).
-        // The tracker is per-replica in-memory, so poll the diagnostics endpoint repeatedly
-        // and sum counts per replica instance.
-        var countsByInstance = new Dictionary<string, int>();
+        // The tracker is backed by Redis and returns one shared count across replicas.
+        int? totalHandlerExecutions = null;
         var stateReached = false;
 
         var redisConnString = await app.GetConnectionStringAsync("redis", cancellationToken);
         Assert.NotNull(redisConnString);
-        var redis = StackExchange.Redis.ConnectionMultiplexer.Connect(redisConnString);
-        var db = redis.GetDatabase();
-        var stateKey = $"onboarding:onboardingstate:{targetAccountId}";
+        using var redis = StackExchange.Redis.ConnectionMultiplexer.Connect(redisConnString);
+        var stateStore = new RedisStateStore<OnboardingState>(redis,
+            Options.Create(new TalariaRedisOptions { Configuration = redisConnString, KeyPrefix = "onboarding:" }),
+            Options.Create(new TalariaOptions { ApplicationName = typeof(OnboardingState).Assembly.GetName().Name! }));
 
         for (int i = 0; i < 60; i++)
         {
             var diag = await httpClient.GetFromJsonAsync<DiagnosticsCount>($"/api/diagnostics/count/created:{targetAccountId}", cancellationToken);
             if (diag is not null)
             {
-                countsByInstance[diag.Instance] = diag.Count;
+                totalHandlerExecutions = diag.Count;
             }
 
-            var stateVal = await db.StringGetAsync(stateKey);
-            stateReached = stateVal.HasValue && stateVal.ToString().Contains("VerificationSent");
+            var state = await stateStore.GetAsync(targetAccountId, cancellationToken);
+            stateReached = state?.VerificationSent == true;
 
-            if (stateReached && countsByInstance.Values.Sum() >= 1)
+            if (stateReached && totalHandlerExecutions is >= 1)
             {
                 break;
             }
@@ -118,13 +151,12 @@ public class IntegrationTest1
             var diag = await httpClient.GetFromJsonAsync<DiagnosticsCount>($"/api/diagnostics/count/created:{targetAccountId}", cancellationToken);
             if (diag is not null)
             {
-                countsByInstance[diag.Instance] = diag.Count;
+                totalHandlerExecutions = diag.Count;
             }
 
             await Task.Delay(500, cancellationToken);
         }
 
-        var totalHandlerExecutions = countsByInstance.Values.Sum();
         Assert.Equal(1, totalHandlerExecutions);
     }
 

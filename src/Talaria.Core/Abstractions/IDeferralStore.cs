@@ -7,7 +7,7 @@ namespace Talaria.Core.Abstractions;
 /// </summary>
 /// <param name="Id">Unique identifier of this deferred entry.</param>
 /// <param name="Topic">The topic the message must be republished to.</param>
-/// <param name="MessageType">Assembly-qualified CLR type name of the payload, used to resolve the deserializer and producer.</param>
+/// <param name="MessageType">Stable contract name, or a legacy assembly-qualified name, preserved when forwarding stored JSON.</param>
 /// <param name="PayloadJson">The message payload serialized as JSON.</param>
 /// <param name="Headers">Headers to republish with the message (deferral attempt, minted message id, trace context).</param>
 /// <param name="CorrelationId">The saga correlation id, if one was resolved.</param>
@@ -32,7 +32,7 @@ public sealed record DeferredMessage(
 /// whose lease expired) cannot remove an entry another sweeper has since acquired.
 /// </summary>
 /// <param name="Id">Identifier of the leased <see cref="DeferredMessage"/>.</param>
-/// <param name="Token">Monotonic fencing token incremented on every acquisition.</param>
+/// <param name="Token">Opaque fencing token changed on every acquisition; never infer an attempt count from it.</param>
 /// <since>1.0.0</since>
 public sealed record DeferralLease(Guid Id, long Token);
 
@@ -41,7 +41,10 @@ public sealed record DeferralLease(Guid Id, long Token);
 /// until the lease expires.
 /// </summary>
 /// <since>1.0.0</since>
-public sealed record LeasedDeferral(DeferredMessage Message, DeferralLease Lease);
+public sealed record LeasedDeferral(DeferredMessage Message, DeferralLease Lease)
+{
+    public bool IsReacquired { get; init; }
+}
 
 /// <summary>
 /// Durable store for deferred saga messages (out-of-order arrivals and handler-initiated

@@ -10,8 +10,10 @@ namespace Talaria.Transports.AzureServiceBus.Tests;
 /// against the Azure Service Bus emulator. The guard must trip on a second enumeration
 /// while still allowing the legitimate single-enumeration path used by the hosted service.
 /// </summary>
-public class AzureServiceBusConsumerEnumerationGuardTests : IAsyncLifetime
+[Collection(AsbEmulatorCollection.Name)]
+public class AzureServiceBusConsumerEnumerationGuardTests(AsbEmulatorFixture fixture) : IAsyncLifetime
 {
+    private const string ConsumerGroup = "guard";
     private AzureServiceBusTransport? _transport;
 
     public Task InitializeAsync()
@@ -22,10 +24,7 @@ public class AzureServiceBusConsumerEnumerationGuardTests : IAsyncLifetime
         }
 
         var connectionString = Environment.GetEnvironmentVariable(EmulatorIntegrationTests.ConnectionStringEnvironmentVariable);
-        if (string.IsNullOrWhiteSpace(connectionString))
-        {
-            connectionString = EmulatorIntegrationTests.DefaultConnectionString;
-        }
+        if (string.IsNullOrWhiteSpace(connectionString)) connectionString = fixture.ConnectionString;
 
         var options = new AzureServiceBusTransportOptions
         {
@@ -34,7 +33,7 @@ public class AzureServiceBusConsumerEnumerationGuardTests : IAsyncLifetime
         };
 
         _transport = new AzureServiceBusTransport(options);
-        return _transport.EnsureEntityAsync("guard-enumeration", TopologyEntityKind.Queue);
+        return Task.CompletedTask;
     }
 
     public async Task DisposeAsync()
@@ -52,7 +51,7 @@ public class AzureServiceBusConsumerEnumerationGuardTests : IAsyncLifetime
         await using var producer = await _transport!.CreateProducerAsync<string>(topic, new ProducerOptions());
         await using var consumer = await _transport.CreateConsumerAsync<string>(
             topic,
-            new ConsumerOptions { ConsumerGroup = $"guard-{Guid.NewGuid():N}" });
+            new ConsumerOptions { ConsumerGroup = ConsumerGroup });
 
         await producer.ProduceAsync("guard-message", new MessageHeaders { MessageId = "g-1" });
 
@@ -83,10 +82,10 @@ public class AzureServiceBusConsumerEnumerationGuardTests : IAsyncLifetime
 
         await using var consumer = await _transport.CreateConsumerAsync<string>(
             topic,
-            new ConsumerOptions { ConsumerGroup = $"guard-pre-{Guid.NewGuid():N}" });
+            new ConsumerOptions { ConsumerGroup = ConsumerGroup });
 
         // Starting the first enumeration is allowed...
-        var first = consumer.ConsumeAsync().GetAsyncEnumerator();
+        await using var first = consumer.ConsumeAsync().GetAsyncEnumerator();
         Assert.NotNull(first);
 
         // ...but starting a second before the first is advanced is not.
@@ -94,6 +93,12 @@ public class AzureServiceBusConsumerEnumerationGuardTests : IAsyncLifetime
         Assert.Equal(
             "ConsumeAsync may only be enumerated once per consumer instance. Create a new consumer to restart consumption.",
             ex.Message);
+
+        // Finish and settle the first enumeration so this static subscription does
+        // not leave a message for the next serialized test.
+        Assert.True(await first.MoveNextAsync());
+        Assert.Equal("pre-message", first.Current.Payload);
+        await consumer.CommitAsync(first.Current);
     }
 
     [EmulatorFact]
@@ -103,7 +108,7 @@ public class AzureServiceBusConsumerEnumerationGuardTests : IAsyncLifetime
         await using var producer = await _transport!.CreateProducerAsync<string>(topic, new ProducerOptions());
         await using var consumer = await _transport.CreateConsumerAsync<string>(
             topic,
-            new ConsumerOptions { ConsumerGroup = $"guard-reenum-{Guid.NewGuid():N}" });
+            new ConsumerOptions { ConsumerGroup = ConsumerGroup });
 
         await producer.ProduceAsync("guard-message", new MessageHeaders { MessageId = "g-re-1" });
 

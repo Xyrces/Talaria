@@ -52,7 +52,7 @@ public sealed class RequestClientFactory : IAsyncDisposable
         _transport = transport;
         _options = options;
         _logger = loggerFactory.CreateLogger<RequestClientFactory>();
-        _provisioner = provisioner;
+        _provisioner = provisioner ?? transport as ITopologyProvisioner;
         _producerCache = new ProducerCache(transport);
 
         var suffix = Guid.NewGuid().ToString("N");
@@ -72,7 +72,8 @@ public sealed class RequestClientFactory : IAsyncDisposable
         return new RequestClient<TRequest>(this, topic);
     }
 
-    internal string InboxTopic => _inboxTopic;
+    /// <summary>Dedicated reply address; provision it externally when automatic topology is disabled.</summary>
+    public string InboxTopic => _inboxTopic;
 
     internal async Task<TResponse> RequestAsync<TRequest, TResponse>(
         string topic,
@@ -160,7 +161,7 @@ public sealed class RequestClientFactory : IAsyncDisposable
                 return;
             }
 
-            if (_provisioner is null)
+            if (_provisioner is null || !_options.AutoProvisionTopology)
             {
                 _initializationTask = Task.CompletedTask;
                 return;
@@ -227,7 +228,7 @@ public sealed class RequestClientFactory : IAsyncDisposable
     {
         var inboxConsumer = await _transport.CreateConsumerAsync<JsonElement>(
             _inboxTopic,
-            new ConsumerOptions { ConsumerGroup = _consumerGroup },
+            new ConsumerOptions { ConsumerGroup = _consumerGroup, EntityKind = TopologyEntityKind.Queue },
             ct).ConfigureAwait(false);
 
         try

@@ -13,6 +13,16 @@ namespace Talaria.Core.Abstractions;
 /// <since>1.0.0</since>
 public sealed record IdempotencyLock(string MessageId, string ConsumerQueue, string Token);
 
+/// <summary>The durable processing state of a delivery.</summary>
+public enum IdempotencyStatus { Acquired, Busy, Completed }
+
+/// <summary>Only Completed permits acknowledging a delivery without processing it.</summary>
+public sealed record IdempotencyAcquisition(IdempotencyStatus Status, IdempotencyLock? Lock = null);
+
+/// <summary>The processing lease expired or was acquired by another worker.</summary>
+public sealed class IdempotencyLeaseLostException(string messageId)
+    : InvalidOperationException($"Processing ownership was lost for message '{messageId}'.");
+
 /// <summary>
 /// Suppresses duplicate message processing across consumer restarts and replicas by tracking
 /// message IDs per consumer queue.
@@ -26,6 +36,12 @@ public sealed record IdempotencyLock(string MessageId, string ConsumerQueue, str
 /// <since>1.0.0</since>
 public interface IIdempotencyStore
 {
+    /// <summary>Atomically acquires a delivery or distinguishes busy work from completed work.</summary>
+    Task<IdempotencyAcquisition> AcquireAsync(string messageId, string consumerQueue, TimeSpan expiration, CancellationToken ct = default);
+
+    /// <summary>Renews only an unexpired processing lease owned by the supplied token.</summary>
+    Task<bool> RenewAsync(IdempotencyLock @lock, TimeSpan expiration, CancellationToken ct = default);
+
     /// <summary>
     /// Attempts to mark the message ID as processed exclusively.
     /// If it returns a lock, no other replica has claimed or processed this message;
@@ -37,8 +53,8 @@ public interface IIdempotencyStore
     /// <param name="ct">Cancellation token.</param>
     /// <returns>
     /// The acquired <see cref="IdempotencyLock"/>, or null when another worker already owns
-    /// (or has completed) this <paramref name="messageId"/>. A null return tells the caller
-    /// to skip processing — the message is a duplicate.
+    /// (or has completed) this <paramref name="messageId"/>. Use AcquireAsync to distinguish
+    /// these outcomes before acknowledging a delivery.
     /// </returns>
     Task<IdempotencyLock?> TryAcquireLockAsync(string messageId, string consumerQueue, TimeSpan expiration, CancellationToken ct = default);
 
@@ -49,9 +65,8 @@ public interface IIdempotencyStore
     /// <param name="lock">The lock returned by a prior successful <see cref="TryAcquireLockAsync"/>.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <remarks>
-    /// Failure to complete leaves the lock in transient state — it expires via TTL and the
-    /// message becomes reprocessable. Always call from a finally block after successful
-    /// handler execution.
+    /// Implementations must compare the unexpired ownership token atomically and throw
+    /// IdempotencyLeaseLostException on a mismatch. Call only after successful processing.
     /// </remarks>
     Task MarkCompleteAsync(IdempotencyLock @lock, CancellationToken ct = default);
 

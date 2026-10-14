@@ -1,4 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
+using Confluent.Kafka;
+using Confluent.Kafka.Admin;
 using Talaria.Core.Abstractions;
 using Talaria.Core.Registration;
 using Testcontainers.Kafka;
@@ -39,6 +41,35 @@ public class KafkaReliabilityIntegrationTests : IAsyncLifetime
         {
             await _kafkaContainer.DisposeAsync();
         }
+    }
+
+    [DockerFact]
+    public async Task Readiness_RequiresBrokerAssignment_ButNotAMessage()
+    {
+        var topic = $"test-empty-{Guid.NewGuid():N}";
+        using (var admin = new AdminClientBuilder(new AdminClientConfig
+        {
+            BootstrapServers = _kafkaContainer!.GetBootstrapAddress()
+        }).Build())
+        {
+            await admin.CreateTopicsAsync([new TopicSpecification
+            {
+                Name = topic,
+                NumPartitions = 1,
+                ReplicationFactor = 1
+            }]);
+        }
+
+        await using var consumer = await _serviceProvider.GetRequiredService<ITransport>()
+            .CreateConsumerAsync<string>(topic, new ConsumerOptions { ConsumerGroup = $"ready-{Guid.NewGuid():N}" });
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await using var enumerator = consumer.ConsumeAsync(cancellation.Token).GetAsyncEnumerator();
+        var next = enumerator.MoveNextAsync().AsTask();
+
+        await ((IConsumerReadiness)consumer).Ready.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.False(next.IsCompleted);
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => next);
     }
 
     [DockerFact]
@@ -137,10 +168,9 @@ public class KafkaReliabilityIntegrationTests : IAsyncLifetime
         await producer.ProduceAsync("first", new MessageHeaders { MessageId = "m-1" });
 
         var consumer1 = await transport.CreateConsumerAsync<string>(topic, new ConsumerOptions { ConsumerGroup = group });
-        var first = await TryNextAsync(consumer1, TimeSpan.FromSeconds(15));
+        var first = await TryNextAndCommitAsync(consumer1, TimeSpan.FromSeconds(15));
         Assert.NotNull(first);
         Assert.Equal("first", first!.Payload);
-        await consumer1.CommitAsync(first);
         // Commits are queued and drained by the poll thread (~100ms) — give it time before restart.
         await Task.Delay(TimeSpan.FromSeconds(1));
         await consumer1.DisposeAsync();
@@ -262,6 +292,24 @@ public class KafkaReliabilityIntegrationTests : IAsyncLifetime
         catch (OperationCanceledException)
         {
             // Timeout elapsed with no message — expected when asserting absence.
+        }
+        return null;
+    }
+
+    private static async Task<MessageEnvelope<T>?> TryNextAndCommitAsync<T>(IConsumer<T> consumer, TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        try
+        {
+            await foreach (var env in consumer.ConsumeAsync(cts.Token))
+            {
+                await consumer.CommitAsync(env, cts.Token);
+                return env;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Timeout elapsed with no settled message.
         }
         return null;
     }

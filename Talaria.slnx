@@ -8,6 +8,9 @@
     <Project Path="src/Talaria.Transports.InMemory/Talaria.Transports.InMemory.csproj" />
     <Project Path="src/Talaria.Transports.Kafka/Talaria.Transports.Kafka.csproj" />
     <Project Path="src/Talaria.Transports.AzureServiceBus/Talaria.Transports.AzureServiceBus.csproj" />
+    <Project Path="src/Talaria.Transports.RabbitMq/Talaria.Transports.RabbitMq.csproj" />
+    <Project Path="src/Talaria.Persistence.SqlServer/Talaria.Persistence.SqlServer.csproj" />
+    <Project Path="src/Talaria.Testing/Talaria.Testing.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Talaria.AppHost.Tests/Talaria.AppHost.Tests.csproj" />
@@ -18,5 +21,8 @@
     <Project Path="tests/Talaria.Transports.Kafka.Tests/Talaria.Transports.Kafka.Tests.csproj" />
     <Project Path="tests/Talaria.Transports.AzureServiceBus.Tests/Talaria.Transports.AzureServiceBus.Tests.csproj" />
     <Project Path="tests/Talaria.Tests.TransportContract/Talaria.Tests.TransportContract.csproj" />
+    <Project Path="tests/Talaria.Testing.Tests/Talaria.Testing.Tests.csproj" />
+    <Project Path="tests/Talaria.Persistence.SqlServer.Tests/Talaria.Persistence.SqlServer.Tests.csproj" />
+    <Project Path="tests/Talaria.Transports.RabbitMq.Tests/Talaria.Transports.RabbitMq.Tests.csproj" />
   </Folder>
 </Solution>

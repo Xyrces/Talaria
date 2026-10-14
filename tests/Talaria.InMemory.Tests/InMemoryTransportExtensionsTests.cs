@@ -48,4 +48,22 @@ public class InMemoryTransportExtensionsTests
         var transport = services.BuildServiceProvider().GetRequiredService<ITransport>();
         Assert.Same(myTransport, transport);
     }
+
+    private sealed class DummyStateStoreFactory : IStateStoreFactory
+    {
+        public IStateStore<TState> GetStore<TState>() where TState : class, new() => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public void Given_PreRegisteredStateStoreFactory_When_UseInMemoryTransportIsCalled_Then_InMemoryStateStoreIsNotRegisteredToAvoidSplitBrain()
+    {
+        var services = new ServiceCollection();
+        services.AddSingleton<IStateStoreFactory, DummyStateStoreFactory>();
+
+        services.AddTalaria().UseInMemoryTransport();
+
+        using var provider = services.BuildServiceProvider();
+        Assert.Null(provider.GetService<IStateStore<object>>());
+        Assert.IsType<DummyStateStoreFactory>(provider.GetRequiredService<IStateStoreFactory>());
+    }
 }

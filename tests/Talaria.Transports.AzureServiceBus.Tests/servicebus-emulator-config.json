@@ -1,0 +1,20 @@
+{
+  "UserConfig": {
+    "Logging": { "Type": "Console" },
+    "Namespaces": [
+      {
+        "Name": "sbemulatorns",
+        "Queues": [],
+        "Topics": [
+          { "Name": "it-roundtrip", "Subscriptions": [{ "Name": "rt-group" }] },
+          { "Name": "it-fanout", "Subscriptions": [{ "Name": "fanout-a" }, { "Name": "fanout-b" }] },
+          { "Name": "it-poison", "Subscriptions": [{ "Name": "poison-handler" }] },
+          { "Name": "it-poison.dlq", "Subscriptions": [{ "Name": "poison-dlq" }] },
+          { "Name": "it-nack", "Subscriptions": [{ "Name": "nack-handler" }] },
+          { "Name": "it-nack.dlq", "Subscriptions": [{ "Name": "nack-dlq" }] },
+          { "Name": "guard-enumeration", "Subscriptions": [{ "Name": "guard" }] }
+        ]
+      }
+    ]
+  }
+}

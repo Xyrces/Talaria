@@ -14,8 +14,12 @@ namespace Talaria.Core.Registration;
 /// overloads in <see cref="TopicRegistryExtensions"/> enforce this invariant.
 /// </remarks>
 /// <since>1.0.0</since>
-public sealed class TopicRegistration
+public sealed record TopicRegistration
 {
+    public TopologyEntityKind EntityKind { get; init; } = TopologyEntityKind.Topic;
+    public bool IsMinimalEndpoint { get; init; }
+    public bool Transactional { get; init; }
+    public Func<object, MessageHeaders, EnvelopeMetadata, IServiceProvider, CancellationToken, Task>? ScopedHandler { get; init; }
     /// <summary>The topic name to subscribe to.</summary>
     public required string TopicName { get; init; }
 
@@ -104,7 +108,41 @@ public sealed class TopicRegistry
     {
         lock (_lock)
         {
+            var incompatible = _registrations.GroupBy(r => r.TopicName).FirstOrDefault(g =>
+                g.Any(r => r.IsMinimalEndpoint) && (g.Select(r => r.EntityKind).Distinct().Count() > 1 ||
+                g.Any(r => r.EntityKind == TopologyEntityKind.Queue) && g.Count() > 1 ||
+                g.Count() > 1 && g.Any(r => r.RequestHandler is not null || r.RequestConsumerType is not null)));
+            if (incompatible is not null)
+                throw new InvalidOperationException($"Destination '{incompatible.Key}' has incompatible mappings. Commands require one handler; events can have distinct named subscribers.");
+            var duplicate = _registrations.GroupBy(r => (r.TopicName, r.ConsumerGroup)).FirstOrDefault(g => g.Count() > 1 && g.Any(r => r.IsMinimalEndpoint));
+            if (duplicate is not null) throw new InvalidOperationException($"Multiple mappings use endpoint '{duplicate.Key}'. Give independent event handlers explicit WithName values.");
             _sealed = true;
+        }
+    }
+
+    /// <summary>Exports the broker entities needed by mapped consumers.</summary>
+    public IReadOnlyList<TopologyDeclaration> GetTopology(TalariaOptions? options = null)
+    {
+        options ??= new TalariaOptions();
+        var declarations = new List<TopologyDeclaration>();
+        foreach (var endpoint in Registrations)
+        {
+            declarations.Add(new(endpoint.EntityKind, endpoint.TopicName));
+            if (endpoint.EntityKind == TopologyEntityKind.Topic)
+                declarations.Add(new(TopologyEntityKind.Subscription,
+                    endpoint.ConsumerGroup ?? options.ConsumerGroupOverride ?? $"{options.ApplicationName}.{endpoint.TopicName}", endpoint.TopicName));
+        }
+        return declarations.Distinct().ToArray();
+    }
+
+    internal void Replace(TopicRegistration previous, TopicRegistration next)
+    {
+        lock (_lock)
+        {
+            if (_sealed) throw new InvalidOperationException("Configure messaging endpoints before the host starts.");
+            var index = _registrations.IndexOf(previous);
+            if (index < 0) throw new InvalidOperationException("Endpoint registration is no longer available.");
+            _registrations[index] = next;
         }
     }
 

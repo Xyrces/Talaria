@@ -181,6 +181,133 @@ public class SagaEngineBehaviorTests
         await listener.StopAsync(cts.Token);
     }
 
+    // ---- Shared saga topics preserve message-type ownership across subscriptions ----
+
+    private class SharedRouteStateA { public string Id { get; set; } = ""; }
+    private class SharedRouteStateB { public string Id { get; set; } = ""; }
+    private class SharedRouteStartA { public string Id { get; set; } = ""; }
+    private class SharedRouteStartB { public string Id { get; set; } = ""; }
+    private class SharedRouteStepA1 { public string Id { get; set; } = ""; }
+    private class SharedRouteStepA2 { public string Id { get; set; } = ""; }
+    private class SharedRouteStepB { public string Id { get; set; } = ""; }
+    private class UnknownSagaMessage { public string Id { get; set; } = ""; }
+
+    [Fact]
+    public async Task SharedTopicsRouteByMessageType_SkipOtherSagaMessages_AndDlqUnknownTypes()
+    {
+        var transport = new InMemoryTransport();
+        var registry = new SagaRegistry();
+        var startARuns = 0;
+        var startBRuns = 0;
+        var stepA1Runs = 0;
+        var stepA2Runs = 0;
+        var stepBRuns = 0;
+
+        var sagaA = new SagaConfigurator<SharedRouteStateA>(registry);
+        sagaA.StartedBy<SharedRouteStartA>("shared-start",
+            (msg, ctx) =>
+            {
+                Interlocked.Increment(ref startARuns);
+                return Task.FromResult(ctx.Transition(new SharedRouteStateA { Id = msg.Id }));
+            }, m => m.Id);
+        sagaA.On<SharedRouteStepA1>("shared-steps",
+            (state, msg, ctx) =>
+            {
+                Interlocked.Increment(ref stepA1Runs);
+                return Task.FromResult(ctx.Transition(state));
+            }, m => m.Id);
+        sagaA.On<SharedRouteStepA2>("shared-steps",
+            (state, msg, ctx) =>
+            {
+                Interlocked.Increment(ref stepA2Runs);
+                return Task.FromResult(ctx.Transition(state));
+            }, m => m.Id);
+        sagaA.Complete();
+
+        var sagaB = new SagaConfigurator<SharedRouteStateB>(registry);
+        sagaB.StartedBy<SharedRouteStartB>("shared-start",
+            (msg, ctx) =>
+            {
+                Interlocked.Increment(ref startBRuns);
+                return Task.FromResult(ctx.Transition(new SharedRouteStateB { Id = msg.Id }));
+            }, m => m.Id);
+        sagaB.On<SharedRouteStepB>("shared-steps",
+            (state, msg, ctx) =>
+            {
+                Interlocked.Increment(ref stepBRuns);
+                return Task.FromResult(ctx.Transition(state));
+            }, m => m.Id);
+        sagaB.Complete();
+
+        var services = new ServiceCollection()
+            .AddSingleton<ITransport>(transport)
+            .AddSingleton(typeof(IStateStore<>), typeof(InMemoryStateStore<>))
+            .BuildServiceProvider();
+        var listener = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            new TalariaOptions { ApplicationName = "shared-saga-test" },
+            NullLogger<TalariaListener>.Instance,
+            services);
+
+        using var cts = new CancellationTokenSource();
+        await listener.StartAsync(cts.Token);
+
+        var startAProducer = await transport.CreateProducerAsync<SharedRouteStartA>("shared-start", new ProducerOptions());
+        var startBProducer = await transport.CreateProducerAsync<SharedRouteStartB>("shared-start", new ProducerOptions());
+        await startAProducer.ProduceAsync(new SharedRouteStartA { Id = "a" });
+        await startBProducer.ProduceAsync(new SharedRouteStartB { Id = "b" });
+
+        var started = await PollUntilAsync(
+            () => Task.FromResult(Volatile.Read(ref startARuns) == 1 && Volatile.Read(ref startBRuns) == 1),
+            TimeSpan.FromSeconds(5));
+        Assert.True(started, $"Starters ran with wrong counts (A={startARuns}, B={startBRuns}).");
+
+        var stepA1Producer = await transport.CreateProducerAsync<SharedRouteStepA1>("shared-steps", new ProducerOptions());
+        var stepA2Producer = await transport.CreateProducerAsync<SharedRouteStepA2>("shared-steps", new ProducerOptions());
+        var stepBProducer = await transport.CreateProducerAsync<SharedRouteStepB>("shared-steps", new ProducerOptions());
+        await stepA1Producer.ProduceAsync(new SharedRouteStepA1 { Id = "a" });
+        await stepA2Producer.ProduceAsync(new SharedRouteStepA2 { Id = "a" });
+        await stepBProducer.ProduceAsync(new SharedRouteStepB { Id = "b" });
+
+        var stepped = await PollUntilAsync(
+            () => Task.FromResult(Volatile.Read(ref stepA1Runs) == 1
+                && Volatile.Read(ref stepA2Runs) == 1
+                && Volatile.Read(ref stepBRuns) == 1),
+            TimeSpan.FromSeconds(5));
+        Assert.True(stepped, $"Steps ran with wrong counts (A1={stepA1Runs}, A2={stepA2Runs}, B={stepBRuns}).");
+
+        var unknownProducer = await transport.CreateProducerAsync<System.Text.Json.JsonElement>("shared-start", new ProducerOptions());
+        using var unknownDocument = System.Text.Json.JsonDocument.Parse("{\"Id\":\"unknown\"}");
+        await unknownProducer.ProduceAsync(
+            unknownDocument.RootElement,
+            new MessageHeaders { [MessageHeaders.MessageTypeKey] = "Missing.Saga.Contract" });
+        var unknownDlq = new List<MessageEnvelope<System.Text.Json.JsonElement>>();
+        var dlqDeadline = DateTime.UtcNow.AddSeconds(10);
+        while (unknownDlq.Count < 2 && DateTime.UtcNow < dlqDeadline)
+        {
+            unknownDlq.AddRange(await transport.ReadAllFromTopicAsync<System.Text.Json.JsonElement>("shared-start.dlq"));
+            if (unknownDlq.Count < 2)
+            {
+                await Task.Delay(50);
+            }
+        }
+
+        Assert.Equal(2, unknownDlq.Count);
+        Assert.All(unknownDlq, message =>
+        {
+            Assert.Equal("unknown", message.Payload.GetProperty("Id").GetString());
+            Assert.Equal("Missing.Saga.Contract", message.Headers[MessageHeaders.MessageTypeKey]);
+            Assert.Equal("unknown_message_type", message.Headers.DlqReason);
+        });
+        // Receiving the unknown-message DLQs proves both consumers have passed every
+        // earlier message on shared-start; no known starter was dead-lettered.
+        Assert.Empty(await transport.ReadAllFromTopicAsync<SharedRouteStepA1>("shared-steps.dlq"));
+
+        await listener.StopAsync(cts.Token);
+    }
+
     // ---- Test 3: starter replay skip ----
 
     private class ReplayState { public string Id { get; set; } = ""; }

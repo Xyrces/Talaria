@@ -83,11 +83,11 @@ public class DeferralStoreContractTests
         await WaitUntilAsync(() => Volatile.Read(ref stepHandlerCalls) == 1);
         await WaitUntilAsync(() => deferralStore.Count == 0);
 
-        // 4. The republished copy carries a freshly minted MessageId per deferral attempt
-        //    ("{original}:defer:{attempt}") so it is not suppressed as a duplicate.
+        // 4. The republished copy carries a deterministic endpoint-scoped MessageId per
+        //    deferral attempt so it is not suppressed as a duplicate.
         var stepTopicMessages = await ReadUntilAsync<StepMessage>(transport, "step-topic", 2);
         Assert.Contains(stepTopicMessages, m =>
-            m.Headers.MessageId is not null && m.Headers.MessageId.Contains(":defer:1"));
+            m.Headers.MessageId is not null && m.Headers.MessageId.StartsWith("defer-", StringComparison.Ordinal));
 
         // 5. Nothing was dead-lettered along the way.
         Assert.Empty(await transport.ReadAllFromTopicAsync<StarterMessage>("starter-topic.dlq"));
