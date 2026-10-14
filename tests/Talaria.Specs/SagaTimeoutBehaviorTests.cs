@@ -479,4 +479,260 @@ public sealed class SagaTimeoutBehaviorTests
             await listener.StopAsync(CancellationToken.None);
         }
     }
+
+    public sealed class SagaStateA
+    {
+        public string Id { get; set; } = string.Empty;
+        public string Status { get; set; } = string.Empty;
+    }
+
+    public sealed class SagaStateB
+    {
+        public string Id { get; set; } = string.Empty;
+        public string Status { get; set; } = string.Empty;
+    }
+
+    public sealed record SharedDeadline(string CorrelationId);
+    public sealed record EmptyDeadline();
+
+    [Fact]
+    public async Task Given_TwoSagasSharingTimeoutTypeAndCorrelationId_When_SagaATimeoutFires_Then_SagaBTimeoutHandlerIsNotInvoked()
+    {
+        var transport = new InMemoryTransport();
+        var outboxStore = new InMemoryOutboxStore();
+        var stateStoreA = new InMemoryStateStore<SagaStateA>(outboxStore);
+        var stateStoreB = new InMemoryStateStore<SagaStateB>(outboxStore);
+        var deferralStore = new InMemoryDeferralStore();
+        var registry = new SagaRegistry();
+
+        var sagaATimeoutRuns = 0;
+        var sagaBTimeoutRuns = 0;
+
+        var configA = new SagaConfigurator<SagaStateA>(registry);
+        configA.StartedBy<StartWorkflow>(
+            "shared-timeout.start",
+            (msg, ctx) =>
+            {
+                ctx.RequestTimeout(new SharedDeadline(msg.CorrelationId), TimeSpan.FromMilliseconds(70));
+                return Task.FromResult(ctx.Transition(new SagaStateA { Id = msg.CorrelationId, Status = "WaitingA" }));
+            },
+            m => m.CorrelationId);
+        configA.OnTimeout<SharedDeadline>(
+            (_, _, ctx) =>
+            {
+                Interlocked.Increment(ref sagaATimeoutRuns);
+                return Task.FromResult(ctx.Complete());
+            },
+            m => m.CorrelationId);
+        configA.Complete();
+
+        var configB = new SagaConfigurator<SagaStateB>(registry);
+        configB.StartedBy<StartWorkflow>(
+            "shared-timeout.start",
+            (msg, ctx) =>
+            {
+                ctx.RequestTimeout(new SharedDeadline(msg.CorrelationId), TimeSpan.FromHours(1));
+                return Task.FromResult(ctx.Transition(new SagaStateB { Id = msg.CorrelationId, Status = "WaitingB" }));
+            },
+            m => m.CorrelationId);
+        configB.OnTimeout<SharedDeadline>(
+            (_, _, ctx) =>
+            {
+                Interlocked.Increment(ref sagaBTimeoutRuns);
+                return Task.FromResult(ctx.Complete());
+            },
+            m => m.CorrelationId);
+        configB.Complete();
+
+        var services = new ServiceCollection()
+            .AddSingleton<ITransport>(transport)
+            .AddSingleton<IOutboxStore>(outboxStore)
+            .AddSingleton<IStateStore<SagaStateA>>(stateStoreA)
+            .AddSingleton<IStateStore<SagaStateB>>(stateStoreB)
+            .AddSingleton<IDeferralStore>(deferralStore)
+            .BuildServiceProvider();
+
+        var listener = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            new TalariaOptions
+            {
+                ApplicationName = "shared-timeout-isolation-app",
+                OutboxRelayInterval = TimeSpan.FromMilliseconds(15),
+                DeferralBackoff = TimeSpan.FromMilliseconds(20)
+            },
+            NullLogger<TalariaListener>.Instance,
+            services);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await listener.StartAsync(cts.Token);
+
+        try
+        {
+            await using var startProducer = await transport.CreateProducerAsync<StartWorkflow>("shared-timeout.start", new ProducerOptions());
+            await startProducer.ProduceAsync(new StartWorkflow("shared-corr-1"));
+
+            Assert.True(await TestAsyncHelpers.PollUntilAsync(
+                async () => (await stateStoreB.GetAsync("shared-corr-1"))?.Status == "WaitingB",
+                TimeSpan.FromSeconds(3)));
+
+            // Wait for Saga A's 70ms timeout to fire and complete Saga A
+            Assert.True(await TestAsyncHelpers.PollUntilAsync(
+                async () => Volatile.Read(ref sagaATimeoutRuns) == 1 && await stateStoreA.GetAsync("shared-corr-1") is null,
+                TimeSpan.FromSeconds(5)));
+
+            // Ensure Saga B's timeout handler was NOT invoked by Saga A's timeout and Saga B remains active
+            var sagaBStayedActive = await TestAsyncHelpers.PollStableAsync(
+                async () => Volatile.Read(ref sagaBTimeoutRuns) == 0 && (await stateStoreB.GetAsync("shared-corr-1"))?.Status == "WaitingB",
+                TimeSpan.FromMilliseconds(150));
+
+            Assert.True(sagaBStayedActive);
+        }
+        finally
+        {
+            await listener.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task Given_PropertylessTimeoutContract_When_TimeoutRequested_Then_PreservesSagaCorrelationIdInHeadersAndCompletesSaga()
+    {
+        var transport = new InMemoryTransport();
+        var outboxStore = new InMemoryOutboxStore();
+        var stateStore = new InMemoryStateStore<TimeoutSagaState>(outboxStore);
+        var deferralStore = new InMemoryDeferralStore();
+        var registry = new SagaRegistry();
+
+        var timeoutFired = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var timeoutTopic = MessageNames.Destination(MessageNames.Contract(typeof(EmptyDeadline)));
+
+        var config = new SagaConfigurator<TimeoutSagaState>(registry);
+        config.StartedBy<StartWorkflow>(
+            "empty-deadline.start",
+            (msg, ctx) =>
+            {
+                ctx.RequestTimeout(new EmptyDeadline(), TimeSpan.Zero);
+                return Task.FromResult(ctx.Transition(new TimeoutSagaState { Id = msg.CorrelationId, Phase = "Started" }));
+            },
+            m => m.CorrelationId);
+
+        config.OnTimeout<EmptyDeadline>((state, _, ctx) =>
+        {
+            timeoutFired.TrySetResult(state.Id);
+            return Task.FromResult(ctx.Complete());
+        });
+        config.Complete();
+
+        var services = new ServiceCollection()
+            .AddSingleton<ITransport>(transport)
+            .AddSingleton<IOutboxStore>(outboxStore)
+            .AddSingleton<IStateStore<TimeoutSagaState>>(stateStore)
+            .AddSingleton<IDeferralStore>(deferralStore)
+            .BuildServiceProvider();
+
+        var listener = new TalariaListener(
+            transport,
+            new TopicRegistry(),
+            registry,
+            new TalariaOptions
+            {
+                ApplicationName = "empty-deadline-app",
+                OutboxRelayInterval = TimeSpan.FromMilliseconds(15),
+                DeferralBackoff = TimeSpan.FromMilliseconds(20)
+            },
+            NullLogger<TalariaListener>.Instance,
+            services);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await listener.StartAsync(cts.Token);
+
+        try
+        {
+            await using var startProducer = await transport.CreateProducerAsync<StartWorkflow>("empty-deadline.start", new ProducerOptions());
+            await startProducer.ProduceAsync(new StartWorkflow("corr-empty-deadline-1"));
+
+            var firedSagaId = await timeoutFired.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal("corr-empty-deadline-1", firedSagaId);
+
+            Assert.True(await TestAsyncHelpers.PollUntilAsync(
+                async () => await stateStore.GetAsync("corr-empty-deadline-1") is null,
+                TimeSpan.FromSeconds(3)));
+
+            Assert.Empty(await transport.ReadAllFromTopicAsync<EmptyDeadline>(timeoutTopic + ".dlq"));
+        }
+        finally
+        {
+            await listener.StopAsync(CancellationToken.None);
+        }
+    }
+
+    private sealed class LegacySixArgStateStore<TState> : IStateStore<TState> where TState : class, new()
+    {
+        public int SixArgCalls { get; private set; }
+
+        public Task<SagaSnapshot<TState>> ReadSnapshotAsync(string correlationId, string messageId, CancellationToken ct = default)
+            => Task.FromResult(new SagaSnapshot<TState>(new TState(), 1, false, false));
+
+        public Task<SagaCommitStatus> TryTransitionAsync(
+            string correlationId,
+            string messageId,
+            long expectedVersion,
+            TState? newState,
+            IReadOnlyList<OutboxMessage> outbox,
+            CancellationToken ct = default)
+        {
+            SixArgCalls++;
+            return Task.FromResult(SagaCommitStatus.Committed);
+        }
+
+        public Task<TState?> GetAsync(string correlationId, CancellationToken ct = default) => Task.FromResult<TState?>(null);
+        public Task SaveAsync(string correlationId, TState state, CancellationToken ct = default) => Task.CompletedTask;
+        public Task DeleteAsync(string correlationId, CancellationToken ct = default) => Task.CompletedTask;
+        public Task TransitionAsync(string correlationId, TState? newState, IReadOnlyList<OutboxMessage> outbox, CancellationToken ct = default) => Task.CompletedTask;
+    }
+
+    [Fact]
+    public async Task Given_LegacyStateStoreWithoutAdditionalReceiptsOverride_When_TryTransitionCalledWithCancellationReceipts_Then_ThrowsNotSupportedException()
+    {
+        var legacyImpl = new LegacySixArgStateStore<TimeoutSagaState>();
+        IStateStore<TimeoutSagaState> store = legacyImpl;
+
+        // Empty additionalReceipts delegates cleanly to the 6-argument overload
+        var status = await store.TryTransitionAsync("c1", "m1", 0, new TimeoutSagaState(), [], []);
+        Assert.Equal(SagaCommitStatus.Committed, status);
+        Assert.Equal(1, legacyImpl.SixArgCalls);
+
+        // Non-empty additionalReceipts throws NotSupportedException instead of silently dropping cancellation receipts
+        await Assert.ThrowsAsync<NotSupportedException>(() =>
+            store.TryTransitionAsync("c1", "m2", 1, new TimeoutSagaState(), [], ["timeout-canceled:SomeTimeout:v1"]));
+        Assert.Equal(1, legacyImpl.SixArgCalls);
+    }
+
+    private sealed class LegacySagaContext<TState> : ISagaContext<TState>
+    {
+        public CancellationToken CancellationToken => CancellationToken.None;
+        public ISagaContext<TState> Dispatch<TMessage>(TMessage message) where TMessage : class => this;
+        public SagaResult<TState> Complete() => SagaResult<TState>.Complete([]);
+        public SagaResult<TState> Transition(TState newState) => SagaResult<TState>.Transition(newState, []);
+        public SagaResult<TState> Defer() => SagaResult<TState>.Defer();
+    }
+
+    [Fact]
+    public void Given_LegacyCustomISagaContextImplementation_When_CallingNewTimeoutAndDelayedDispatchMethods_Then_CompilesAndThrowsNotSupportedException()
+    {
+        ISagaContext<TimeoutSagaState> ctx = new LegacySagaContext<TimeoutSagaState>();
+
+        Assert.Throws<ArgumentNullException>(() => ctx.Dispatch<FollowUpCommand>(null!, TimeSpan.FromSeconds(1)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => ctx.Dispatch(new FollowUpCommand("1", "a"), TimeSpan.FromSeconds(-1)));
+        Assert.Throws<NotSupportedException>(() => ctx.Dispatch(new FollowUpCommand("1", "a"), TimeSpan.FromSeconds(5)));
+        Assert.Throws<NotSupportedException>(() => ctx.Dispatch(new FollowUpCommand("1", "a"), DateTimeOffset.UtcNow.AddSeconds(5)));
+
+        Assert.Throws<ArgumentNullException>(() => ctx.RequestTimeout<WorkflowTimeout>(null!, TimeSpan.FromSeconds(1)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => ctx.RequestTimeout(new WorkflowTimeout("1", 1), TimeSpan.FromSeconds(-1)));
+        Assert.Throws<NotSupportedException>(() => ctx.RequestTimeout(new WorkflowTimeout("1", 1), TimeSpan.FromSeconds(5)));
+        Assert.Throws<NotSupportedException>(() => ctx.RequestTimeout(new WorkflowTimeout("1", 1), DateTimeOffset.UtcNow.AddSeconds(5)));
+        Assert.Throws<NotSupportedException>(() => ctx.CancelTimeout<WorkflowTimeout>());
+    }
 }
+

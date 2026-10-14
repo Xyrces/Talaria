@@ -43,7 +43,17 @@ public interface IStateStore<TState> where TState : class, new()
         IReadOnlyList<OutboxMessage> outbox,
         IReadOnlyList<string> additionalReceipts,
         CancellationToken ct = default)
-        => TryTransitionAsync(correlationId, messageId, expectedVersion, newState, outbox, ct);
+    {
+        ArgumentNullException.ThrowIfNull(additionalReceipts);
+        if (additionalReceipts.Any(static r => !string.IsNullOrWhiteSpace(r)))
+        {
+            throw new NotSupportedException(
+                $"State store '{GetType().Name}' does not support atomic persistence of additional receipts required for saga timeout cancellation.");
+        }
+
+        return TryTransitionAsync(correlationId, messageId, expectedVersion, newState, outbox, ct);
+    }
+
 
     /// <summary>
     /// Retrieves the current state for the given correlation ID, or null if not found.

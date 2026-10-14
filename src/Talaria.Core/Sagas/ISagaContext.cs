@@ -40,7 +40,16 @@ public interface ISagaContext<TState>
     /// <returns>The same context, for fluent chaining.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="message"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">Thrown when <paramref name="delay"/> is negative.</exception>
-    ISagaContext<TState> Dispatch<TMessage>(TMessage message, TimeSpan delay) where TMessage : class;
+    ISagaContext<TState> Dispatch<TMessage>(TMessage message, TimeSpan delay) where TMessage : class
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        if (delay < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(delay), delay, "Delay must be non-negative.");
+        }
+
+        return Dispatch(message, DateTimeOffset.UtcNow.Add(delay));
+    }
 
     /// <summary>
     /// Stages a message for delivery at or after <paramref name="dueAt"/> once the saga state transition is committed.
@@ -50,7 +59,8 @@ public interface ISagaContext<TState>
     /// <param name="dueAt">The earliest UTC timestamp at which the message becomes eligible for relay.</param>
     /// <returns>The same context, for fluent chaining.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="message"/> is null.</exception>
-    ISagaContext<TState> Dispatch<TMessage>(TMessage message, DateTimeOffset dueAt) where TMessage : class;
+    ISagaContext<TState> Dispatch<TMessage>(TMessage message, DateTimeOffset dueAt) where TMessage : class
+        => throw new NotSupportedException($"Saga context '{GetType().Name}' does not support scheduled dispatch.");
 
     /// <summary>
     /// Requests a scheduled saga timeout to be delivered after <paramref name="delay"/> if the saga is still active and has not canceled or superseded the timeout.
@@ -61,7 +71,16 @@ public interface ISagaContext<TState>
     /// <returns>The same context, for fluent chaining.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="timeout"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">Thrown when <paramref name="delay"/> is negative.</exception>
-    ISagaContext<TState> RequestTimeout<TTimeout>(TTimeout timeout, TimeSpan delay) where TTimeout : class;
+    ISagaContext<TState> RequestTimeout<TTimeout>(TTimeout timeout, TimeSpan delay) where TTimeout : class
+    {
+        ArgumentNullException.ThrowIfNull(timeout);
+        if (delay < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(delay), delay, "Delay must be non-negative.");
+        }
+
+        return RequestTimeout(timeout, DateTimeOffset.UtcNow.Add(delay));
+    }
 
     /// <summary>
     /// Requests a scheduled saga timeout to be delivered at or after <paramref name="dueAt"/> if the saga is still active and has not canceled or superseded the timeout.
@@ -71,14 +90,16 @@ public interface ISagaContext<TState>
     /// <param name="dueAt">The earliest UTC timestamp at which the timeout fires.</param>
     /// <returns>The same context, for fluent chaining.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="timeout"/> is null.</exception>
-    ISagaContext<TState> RequestTimeout<TTimeout>(TTimeout timeout, DateTimeOffset dueAt) where TTimeout : class;
+    ISagaContext<TState> RequestTimeout<TTimeout>(TTimeout timeout, DateTimeOffset dueAt) where TTimeout : class
+        => throw new NotSupportedException($"Saga context '{GetType().Name}' does not support timeouts.");
 
     /// <summary>
     /// Cancels any pending or previously requested timeout of type <typeparamref name="TTimeout"/> for this saga instance.
     /// </summary>
     /// <typeparam name="TTimeout">The CLR timeout message type to cancel.</typeparam>
     /// <returns>The same context, for fluent chaining.</returns>
-    ISagaContext<TState> CancelTimeout<TTimeout>() where TTimeout : class;
+    ISagaContext<TState> CancelTimeout<TTimeout>() where TTimeout : class
+        => throw new NotSupportedException($"Saga context '{GetType().Name}' does not support timeout cancellation.");
 
     /// <summary>
     /// Marks the saga as completed. The state will be purged from the state store.

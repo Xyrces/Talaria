@@ -235,6 +235,17 @@ internal sealed class SagaConsumerEngine
 
         try
         {
+            if ((env.Headers.TryGetValue("talaria.saga.timeout_saga", out var timeoutOwnerSaga)
+                    && !string.IsNullOrWhiteSpace(timeoutOwnerSaga)
+                    && !string.Equals(timeoutOwnerSaga, MessageNames.Contract(stateType), StringComparison.Ordinal))
+                || (env.Headers.TryGetValue("talaria.saga.timeout_application", out var timeoutOwnerApp)
+                    && !string.IsNullOrWhiteSpace(timeoutOwnerApp)
+                    && !string.Equals(timeoutOwnerApp, _options.ApplicationName, StringComparison.Ordinal)))
+            {
+                await consumer.CommitAsync(env, ct);
+                return;
+            }
+
             await using var scope = _serviceProvider.CreateAsyncScope();
 
             object payload;
@@ -256,6 +267,11 @@ internal sealed class SagaConsumerEngine
             var correlationId = step.CorrelationResolver != null
                 ? step.CorrelationResolver(payload)
                 : Core.Sagas.CorrelationResolver.Resolve(payload, env.Headers);
+            if (string.IsNullOrWhiteSpace(correlationId))
+            {
+                correlationId = env.Headers.CorrelationId;
+            }
+
 
             if (_pipeline.IsHopCountExceeded(env, step.TopicName))
             {
@@ -489,7 +505,15 @@ internal sealed class SagaConsumerEngine
                     {
                         headers["talaria.saga.timeout"] = "true";
                         headers["talaria.saga.timeout_version"] = (snapshot.Version + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                        headers["talaria.saga.timeout_application"] = _options.ApplicationName;
+                        headers["talaria.saga.timeout_saga"] = MessageNames.Contract(stateType);
+                        headers["talaria.retry.endpoint"] = EndpointName(route.Registration, outboundTopic);
+                        if (string.IsNullOrWhiteSpace(headers.CorrelationId))
+                        {
+                            headers.CorrelationId = correlationId;
+                        }
                     }
+
 
                     if (dispatch.ScheduledAt.HasValue)
                     {

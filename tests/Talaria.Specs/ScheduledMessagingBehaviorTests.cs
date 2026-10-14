@@ -296,4 +296,56 @@ public sealed class ScheduledMessagingBehaviorTests
     {
         public string Id { get; set; } = "";
     }
+
+    private sealed class LegacyFourMethodMessageBus : IMessageBus
+    {
+        public Task SendAsync<T>(T message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task PublishAsync<T>(T message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task SendAsync<T>(string destination, T message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task PublishAsync<T>(string destination, T message, CancellationToken ct = default) => Task.CompletedTask;
+    }
+
+    private sealed class MinimalDestinationScheduledMessageBus : IMessageBus
+    {
+        public List<(string Kind, string Destination, object Message, DateTimeOffset DueAt)> Calls { get; } = [];
+
+        public Task SendAsync<T>(T message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task PublishAsync<T>(T message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task SendAsync<T>(string destination, T message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task PublishAsync<T>(string destination, T message, CancellationToken ct = default) => Task.CompletedTask;
+
+        public Task ScheduleSendAsync<T>(string destination, T message, DateTimeOffset dueAt, CancellationToken ct = default)
+        {
+            Calls.Add(("send", destination, message!, dueAt));
+            return Task.CompletedTask;
+        }
+
+        public Task SchedulePublishAsync<T>(string destination, T message, DateTimeOffset dueAt, CancellationToken ct = default)
+        {
+            Calls.Add(("publish", destination, message!, dueAt));
+            return Task.CompletedTask;
+        }
+    }
+
+    [Fact]
+    public async Task Given_LegacyAndMinimalCustomIMessageBusImplementations_When_CallingScheduleMethods_Then_DefaultInterfaceMethodsProvideCompatibilityAndValidation()
+    {
+        IMessageBus legacyBus = new LegacyFourMethodMessageBus();
+        await Assert.ThrowsAsync<ArgumentNullException>(() => legacyBus.ScheduleSendAsync<ScheduledCommand>(null!, TimeSpan.FromSeconds(1)));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => legacyBus.ScheduleSendAsync(new ScheduledCommand("1"), TimeSpan.FromSeconds(-1)));
+        await Assert.ThrowsAsync<NotSupportedException>(() => legacyBus.ScheduleSendAsync(new ScheduledCommand("1"), TimeSpan.FromSeconds(5)));
+        await Assert.ThrowsAsync<NotSupportedException>(() => legacyBus.SchedulePublishAsync(new ScheduledEvent("1"), TimeSpan.FromSeconds(5)));
+
+        var customImpl = new MinimalDestinationScheduledMessageBus();
+        IMessageBus customBus = customImpl;
+        await customBus.ScheduleSendAsync(new ScheduledCommand("c1"), TimeSpan.FromSeconds(10));
+        await customBus.SchedulePublishAsync(new ScheduledEvent("e1"), TimeSpan.FromSeconds(20));
+
+        Assert.Equal(2, customImpl.Calls.Count);
+        Assert.Equal("send", customImpl.Calls[0].Kind);
+        Assert.Equal(MessageNames.Destination(MessageNames.Contract(typeof(ScheduledCommand))), customImpl.Calls[0].Destination);
+        Assert.Equal("publish", customImpl.Calls[1].Kind);
+        Assert.Equal(MessageNames.Destination(MessageNames.Contract(typeof(ScheduledEvent))), customImpl.Calls[1].Destination);
+    }
 }
+
