@@ -23,4 +23,24 @@ public static class MessageNames
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(contract)))[..12].ToLowerInvariant();
         return name.ToString()[..Math.Min(name.Length, 36)] + "-" + hash;
     }
+
+    internal static string StripAssemblyQualification(string messageType)
+    {
+        var depth = 0;
+        for (var i = 0; i < messageType.Length; i++)
+        {
+            switch (messageType[i])
+            {
+                case '[':
+                    depth++;
+                    break;
+                case ']':
+                    if (depth > 0) depth--;
+                    break;
+                case ',' when depth == 0:
+                    return messageType[..i].Trim();
+            }
+        }
+        return messageType.Trim();
+    }
 }

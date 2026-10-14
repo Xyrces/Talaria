@@ -89,7 +89,9 @@ internal sealed class DeferralSweeperEngine : IAsyncDisposable
             var payload = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(message.PayloadJson);
             var headers = new MessageHeaders(message.Headers);
             if (!headers.ContainsKey(MessageHeaders.MessageTypeKey))
-                headers[MessageHeaders.MessageTypeKey] = message.MessageType.Split(',')[0];
+                headers[MessageHeaders.MessageTypeKey] = Registration.MessageNames.StripAssemblyQualification(message.MessageType);
+            if (headers.ContainsKey(MessageHeaders.DeferralAttemptKey) && headers.ContainsKey(MessageHeaders.HopCountKey))
+                headers.HopCount = Math.Max(0, headers.HopCount - 1);
             var invoker = await _producerCache.GetOrCreateAsync(message.Topic, typeof(System.Text.Json.JsonElement), ct);
             await invoker.Produce(payload, headers, message.PartitionKey, ct);
             await _deferralStore.CompleteAsync(leased.Lease, ct);
@@ -98,13 +100,22 @@ internal sealed class DeferralSweeperEngine : IAsyncDisposable
             Diagnostics.TalariaDiagnostics.DeferralLag.Record(
                 Math.Max(0, (DateTimeOffset.UtcNow - message.DueAt).TotalMilliseconds), topicTag);
         }
-        catch (System.Text.Json.JsonException) when (_failures is not null)
+        catch (System.Text.Json.JsonException ex)
         {
-            // Retain the complete payload before removing an entry that cannot be published.
-            await _failures.SaveAsync(new FailedMessage(message.Id, message.Topic, message.MessageType,
-                message.PayloadJson, new MessageHeaders(message.Headers), message.PartitionKey,
-                "invalid_stored_json", DateTimeOffset.UtcNow), ct);
-            await _deferralStore.CompleteAsync(leased.Lease, ct);
+            if (_failures is not null)
+            {
+                // Retain the complete payload before removing an entry that cannot be published.
+                await _failures.SaveAsync(new FailedMessage(message.Id, message.Topic, message.MessageType,
+                    message.PayloadJson, new MessageHeaders(message.Headers), message.PartitionKey,
+                    "invalid_stored_json", DateTimeOffset.UtcNow), ct);
+                await _deferralStore.CompleteAsync(leased.Lease, ct);
+            }
+            else
+            {
+                _logger.LogCritical(ex, "Deferred message {Id} on topic '{Topic}' contains invalid JSON and no IFailedMessageStore is registered; quarantining entry in deferral store.", message.Id, message.Topic);
+                Diagnostics.TalariaDiagnostics.DeferralRepublishFailed.Add(1, topicTag);
+                await _deferralStore.AbandonAsync(leased.Lease, DateTimeOffset.MaxValue, ct);
+            }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

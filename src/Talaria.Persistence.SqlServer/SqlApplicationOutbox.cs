@@ -15,6 +15,13 @@ internal sealed class SqlApplicationOutbox<TDb>(TDb db, TalariaOptions options) 
         return Task.CompletedTask;
     }
 
+    public async Task FlushAsync(CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (db.ChangeTracker.Entries<TalariaMessageRow>().Any(e => e.State == EntityState.Added))
+            await db.SaveChangesAsync(ct);
+    }
+
     public async Task ExecuteAsync(string endpoint, string messageId, Func<CancellationToken, Task> handler, CancellationToken ct)
     {
         if (db.Database.CurrentTransaction is not null) throw new InvalidOperationException("The messaging endpoint owns its receive transaction.");

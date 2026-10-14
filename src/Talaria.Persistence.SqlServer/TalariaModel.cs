@@ -60,7 +60,7 @@ public static class TalariaModelExtensions
         model.HasSequence<long>("TalariaMessageLeaseSequence", "dbo").StartsAt(1).IncrementsBy(1);
         model.Entity<TalariaMessageRow>(b =>
         {
-            b.ToTable("TalariaMessages", "dbo"); b.HasKey(x => x.Id);
+            b.ToTable("TalariaMessages", "dbo"); b.HasKey(x => new { x.Application, x.Id });
             b.Property(x => x.Application).HasMaxLength(200);
             b.Property(x => x.Data).IsRequired();
             b.Property(x => x.LeaseToken).IsConcurrencyToken();

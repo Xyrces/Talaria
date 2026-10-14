@@ -269,6 +269,48 @@ public class AzureServiceBusConsumerErrorTests
         try { await consumer.DisposeAsync(); } catch { /* best effort */ }
     }
 
+    [Fact]
+    public async Task Given_RedeliveredMessageWithSameSequenceNumber_When_PreviousCallbackUnwindsAfterCancellation_Then_DoesNotRemoveNewPendingEntry()
+    {
+        var consumer = CreateConsumer();
+        var channel = System.Threading.Channels.Channel.CreateUnbounded<MessageEnvelope<string>>();
+        SetActiveChannel(consumer, channel);
+        var activeCtsField = typeof(AzureServiceBusConsumer<string>).GetField("_activeReaderCts", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        using var activeCts = new CancellationTokenSource();
+        activeCtsField.SetValue(consumer, activeCts);
+
+        var onMessageMethod = typeof(AzureServiceBusConsumer<string>).GetMethod("OnProcessorMessageAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var completingReceiver = new CountingCompletingReceiver();
+
+        var firstMessage = ServiceBusModelFactory.ServiceBusReceivedMessage(
+            body: new BinaryData("\"hello\""u8.ToArray()),
+            messageId: "m-77",
+            sequenceNumber: 77);
+        var firstArgs = CreateProcessMessageEventArgs(firstMessage, completingReceiver);
+
+        var firstCallbackTask = (Task)onMessageMethod.Invoke(consumer, [firstArgs])!;
+        var firstEnvelope = await channel.Reader.ReadAsync();
+        Assert.Equal(77, firstEnvelope.Offset);
+        Assert.False(firstCallbackTask.IsCompleted);
+
+        var secondMessage = ServiceBusModelFactory.ServiceBusReceivedMessage(
+            body: new BinaryData("\"hello\""u8.ToArray()),
+            messageId: "m-77",
+            sequenceNumber: 77);
+        var secondArgs = CreateProcessMessageEventArgs(secondMessage, completingReceiver);
+
+        var secondCallbackTask = (Task)onMessageMethod.Invoke(consumer, [secondArgs])!;
+        var secondEnvelope = await channel.Reader.ReadAsync();
+        await firstCallbackTask.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.True(GetPending(consumer).Contains(77L));
+        await consumer.CommitAsync(secondEnvelope);
+        await secondCallbackTask.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(1, completingReceiver.CompletedCount);
+
+        try { await consumer.DisposeAsync(); } catch { /* best effort */ }
+    }
+
     private static void AddPendingEntry(
         AzureServiceBusConsumer<string> consumer,
         ServiceBusReceivedMessage message,
@@ -331,4 +373,15 @@ public class AzureServiceBusConsumerErrorTests
         public override Task CompleteMessageAsync(ServiceBusReceivedMessage message, CancellationToken cancellationToken = default)
             => Task.CompletedTask;
     }
+
+    private sealed class CountingCompletingReceiver : ServiceBusReceiver
+    {
+        public int CompletedCount;
+        public override Task CompleteMessageAsync(ServiceBusReceivedMessage message, CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref CompletedCount);
+            return Task.CompletedTask;
+        }
+    }
 }
+

@@ -100,4 +100,48 @@ public sealed class RedisFailedMessageIntegrationTests : IAsyncLifetime
         Assert.True(open >= 0 && close > open, $"Redis key has no hash tag: {key}");
         return key[(open + 1)..close];
     }
+
+    [DockerFact]
+    public async Task Given_MissingSagaAndZeroDefaultStateTtl_When_DeletingSavingAndCompletingIdempotency_Then_DoesNotTombstoneMissingSagaAndPersistsWithoutExpiry()
+    {
+        var collection = new ServiceCollection();
+        var appName = $"zero-ttl-{Guid.NewGuid():N}";
+        var keyPrefix = $"zero-ttl-tests-{Guid.NewGuid():N}:";
+        collection.AddTalaria(options => options.ApplicationName = appName)
+            .UseRedisPersistence(options =>
+            {
+                options.Configuration = _container!.GetConnectionString();
+                options.KeyPrefix = keyPrefix;
+                options.DefaultStateTtl = TimeSpan.Zero;
+            });
+
+        await using var provider = collection.BuildServiceProvider();
+        var saga = provider.GetRequiredService<IStateStore<SagaState>>();
+
+        await saga.DeleteAsync("missing-correlation");
+        var missingSnapshot = await saga.ReadSnapshotAsync("missing-correlation", "msg-1");
+        Assert.Null(missingSnapshot.State);
+        Assert.Equal(0, missingSnapshot.Version);
+        Assert.False(missingSnapshot.IsCompleted);
+
+        await saga.SaveAsync("persisted-correlation", new SagaState { Step = 7 });
+        var idempotency = provider.GetRequiredService<IIdempotencyStore>();
+        var acquired = await idempotency.AcquireAsync("msg-zero-ttl", "orders-queue", TimeSpan.FromMinutes(1));
+        Assert.Equal(IdempotencyStatus.Acquired, acquired.Status);
+        await idempotency.MarkCompleteAsync(acquired.Lock!);
+
+        var reacquired = await idempotency.AcquireAsync("msg-zero-ttl", "orders-queue", TimeSpan.FromMinutes(1));
+        Assert.Equal(IdempotencyStatus.Completed, reacquired.Status);
+
+        var mux = provider.GetRequiredService<IConnectionMultiplexer>();
+        var db = mux.GetDatabase();
+        var server = mux.GetServer(mux.GetEndPoints().First());
+        var keys = server.Keys(pattern: $"{keyPrefix}v2:*").ToArray();
+        Assert.NotEmpty(keys);
+        foreach (var key in keys)
+        {
+            Assert.Null(await db.KeyTimeToLiveAsync(key));
+        }
+    }
 }
+

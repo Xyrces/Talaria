@@ -20,7 +20,11 @@ public sealed class RedisIdempotencyStore : IIdempotencyStore
         """;
     private const string CompleteScript = """
         if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
-        redis.call('SET', KEYS[1], 'COMPLETED', 'PX', ARGV[2])
+        if tonumber(ARGV[2]) > 0 then
+            redis.call('SET', KEYS[1], 'COMPLETED', 'PX', ARGV[2])
+        else
+            redis.call('SET', KEYS[1], 'COMPLETED')
+        end
         return 1
         """;
     private const string RenewScript = """
@@ -88,8 +92,11 @@ public sealed class RedisIdempotencyStore : IIdempotencyStore
         var key = KeyFor(@lock.MessageId, @lock.ConsumerQueue);
 
         ct.ThrowIfCancellationRequested();
+        var ttlMs = _options.DefaultStateTtl <= TimeSpan.Zero
+            ? 0L
+            : Math.Max(1L, (long)Math.Ceiling(_options.DefaultStateTtl.TotalMilliseconds));
         var completed = (int)await _db.ScriptEvaluateAsync(CompleteScript,
-            new RedisKey[] { key }, new RedisValue[] { @lock.Token, Math.Max(1, (long)_options.DefaultStateTtl.TotalMilliseconds) });
+            new RedisKey[] { key }, new RedisValue[] { @lock.Token, ttlMs });
         if (completed != 1) throw new IdempotencyLeaseLostException(@lock.MessageId);
     }
 

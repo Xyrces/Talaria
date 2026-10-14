@@ -117,15 +117,18 @@ public sealed class KafkaTransport : ITransport, IAsyncDisposable
         };
 
         var readiness = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        KafkaConsumer<T>? wrapper = null;
         var confluentConsumer = new ConsumerBuilder<string, byte[]>(config)
             .SetPartitionsAssignedHandler((_, _) => readiness.TrySetResult())
+            .SetPartitionsRevokedHandler((_, partitions) => wrapper?.OnPartitionsRevoked(partitions))
+            .SetPartitionsLostHandler((_, partitions) => wrapper?.OnPartitionsRevoked(partitions))
             .Build();
         var dlqProducer = GetOrCreateSharedProducer(enableIdempotence: true);
 
         // Track the group's metadata so transactions can commit this group's offsets.
         _groupMetadata[config.GroupId] = confluentConsumer.ConsumerGroupMetadata;
 
-        var wrapper = new KafkaConsumer<T>(
+        wrapper = new KafkaConsumer<T>(
             confluentConsumer, dlqProducer, topic, _kafkaOptions.DlqSuffix,
             _loggerFactory?.CreateLogger<KafkaConsumer<T>>(),
             bufferCapacity: options.BufferCapacity > 0 ? options.BufferCapacity : 100,

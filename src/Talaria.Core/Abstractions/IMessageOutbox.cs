@@ -5,6 +5,7 @@ namespace Talaria.Core.Abstractions;
 public interface IMessageOutbox
 {
     Task StageAsync(OutboxMessage message, CancellationToken ct = default);
+    Task FlushAsync(CancellationToken ct = default) => Task.CompletedTask;
 }
 
 /// <summary>Runs a handler and records completion in the same application database transaction.</summary>

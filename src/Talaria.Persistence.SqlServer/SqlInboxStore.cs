@@ -8,10 +8,11 @@ namespace Talaria.Persistence.SqlServer;
 internal sealed class SqlInboxStore<TDb>(DatabaseWork<TDb> database, TalariaOptions options) : IIdempotencyStore where TDb : DbContext
 {
     private string Key(string id, string endpoint) => DatabaseWork<TDb>.Key("inbox", options.ApplicationName, endpoint, id);
-    public Task<IdempotencyAcquisition> AcquireAsync(string messageId, string consumerQueue, TimeSpan expiration, CancellationToken ct = default)
+    public async Task<IdempotencyAcquisition> AcquireAsync(string messageId, string consumerQueue, TimeSpan expiration, CancellationToken ct = default)
     {
         if (expiration <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(expiration));
-        return database.Run(async (db, token) =>
+        await database.PruneExpiredIfDueAsync(DateTimeOffset.UtcNow, ct);
+        return await database.Run(async (db, token) =>
         {
             var id = Key(messageId, consumerQueue);
             var query = db.Database.IsSqlServer()

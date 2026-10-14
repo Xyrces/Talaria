@@ -230,7 +230,15 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>, IConsumerReadiness
                             ct.ThrowIfCancellationRequested();
                             DrainCommits();
                             // Keep group membership alive while the application applies backpressure.
-                            var unexpected = _consumer.Consume(TimeSpan.FromMilliseconds(10));
+                            ConsumeResult<string, byte[]>? unexpected = null;
+                            try
+                            {
+                                unexpected = _consumer.Consume(TimeSpan.FromMilliseconds(10));
+                            }
+                            catch (ConsumeException ex) when (!IsFatal(ex.Error))
+                            {
+                                _logger?.LogWarning(ex, "Transient Kafka consume error during backpressure on topic {Topic}.", _topic);
+                            }
                             if (unexpected is not null && !unexpected.IsPartitionEOF)
                                 throw new InvalidOperationException("Kafka assignment changed while buffered; restarting from settled offsets.");
                             await Task.Delay(10, ct);
@@ -269,6 +277,20 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>, IConsumerReadiness
                or ErrorCode.GroupAuthorizationFailed
                or ErrorCode.ClusterAuthorizationFailed;
 
+    internal void OnPartitionsRevoked(IEnumerable<TopicPartitionOffset> partitions)
+    {
+        try { DrainCommits(); }
+        catch (Exception ex) { _logger?.LogWarning(ex, "Best-effort Kafka commit before partition revocation failed on topic {Topic}.", _topic); }
+
+        var revokedSet = partitions.Select(p => p.TopicPartition).ToHashSet();
+        _settlements.Revoke(revokedSet);
+        foreach (var waiting in _waitingCommits.Where(x => revokedSet.Contains(x.Position.TopicPartition)).ToArray())
+        {
+            waiting.Completion.TrySetResult();
+            _waitingCommits.Remove(waiting);
+        }
+    }
+
     /// <summary>
     /// Drains queued commit requests on the poll thread. Failures are logged and dropped —
     /// an uncommitted message is redelivered, which the idempotency stores cover.
@@ -277,8 +299,15 @@ internal sealed class KafkaConsumer<T> : IConsumer<T>, IConsumerReadiness
     {
         while (_commitRequests.Reader.TryRead(out var request))
         {
-            _waitingCommits.Add(request);
             _settlements.Settle(request.Position);
+            if (_settlements.IsPending(request.Position))
+            {
+                _waitingCommits.Add(request);
+            }
+            else
+            {
+                request.Completion.TrySetResult();
+            }
         }
         var batch = _settlements.Ready();
         if (batch.Count == 0) return;

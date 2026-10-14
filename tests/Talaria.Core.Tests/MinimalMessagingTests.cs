@@ -116,4 +116,62 @@ public class MinimalMessagingTests
         Assert.Throws<InvalidOperationException>(() => endpoint.WithName("late"));
         await host.StopAsync();
     }
+
+    private sealed class RecordingOutbox(List<OutboxMessage> flushed) : IMessageOutbox, IMessageTransaction
+    {
+        private readonly List<OutboxMessage> _staged = [];
+
+        public Task StageAsync(OutboxMessage message, CancellationToken ct = default)
+        {
+            _staged.Add(message);
+            return Task.CompletedTask;
+        }
+
+        public Task FlushAsync(CancellationToken ct = default)
+        {
+            lock (flushed) flushed.AddRange(_staged);
+            _staged.Clear();
+            return Task.CompletedTask;
+        }
+
+        public async Task ExecuteAsync(string endpoint, string messageId, Func<CancellationToken, Task> handler, CancellationToken ct)
+        {
+            await handler(ct);
+            await FlushAsync(ct);
+        }
+    }
+
+    [Fact]
+    public async Task Given_NonTransactionalEndpointWithMessageOutbox_When_HandlerPublishes_Then_OutboxFlushesOnlyOnSuccess()
+    {
+        var flushedList = new List<OutboxMessage>();
+        var builder = Host.CreateApplicationBuilder();
+        builder.Logging.ClearProviders();
+        builder.Services.AddTalaria(t => t.UseInMemory());
+        builder.Services.AddScoped<RecordingOutbox>(_ => new RecordingOutbox(flushedList));
+        builder.Services.AddScoped<IMessageOutbox>(sp => sp.GetRequiredService<RecordingOutbox>());
+        builder.Services.AddScoped<IMessageTransaction>(sp => sp.GetRequiredService<RecordingOutbox>());
+        using var host = builder.Build();
+
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.MapCommand<Order>(async (Order order, IMessageBus bus) =>
+        {
+            await bus.PublishAsync(new Order(order.Id + "-evt"));
+            if (order.Id == "fail") throw new InvalidOperationException("boom");
+            done.TrySetResult();
+        });
+
+        await host.StartAsync();
+        var transport = host.Services.GetRequiredService<ITransport>();
+        var cmdTopic = MessageNames.Destination(MessageNames.Contract(typeof(Order)));
+        await using var producer = await transport.CreateProducerAsync<Order>(cmdTopic, new ProducerOptions());
+        await producer.ProduceAsync(new Order("fail"), new MessageHeaders { MessageId = "m-fail" });
+        await producer.ProduceAsync(new Order("ok"), new MessageHeaders { MessageId = "m-ok" });
+
+        await done.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await host.StopAsync();
+
+        var flushed = Assert.Single(flushedList);
+        Assert.Contains("ok-evt", flushed.PayloadJson);
+    }
 }

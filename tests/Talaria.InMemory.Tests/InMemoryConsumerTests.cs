@@ -147,6 +147,27 @@ public class InMemoryConsumerTests
     }
 
     [Fact]
+    public async Task Given_PriorAppDlqMessages_When_NackAsync_RoutesToDlqAndAppDlq_Then_TopicDlqAndAppDlqOffsetsAreIndependent()
+    {
+        var (_, dlqBus, appDlqBus, consumer) = CreateSut();
+        // Pre-advance appDlqBus offset so its next offset is 1 while dlqBus next offset is 0
+        await appDlqBus.PublishAsync(new InMemoryMessage { PayloadJson = "\"prior\"", Headers = new MessageHeaders() }, default);
+
+        var dlqReader = dlqBus.GetOrCreateGroupChannel("test").Reader;
+        var appDlqReader = appDlqBus.GetOrCreateGroupChannel("test").Reader;
+        _ = await appDlqReader.ReadAsync(); // drain prior
+
+        var env = new MessageEnvelope<string> { Payload = "failed", Headers = new MessageHeaders() };
+        await consumer.NackAsync(env);
+
+        var dlqMsg = await dlqReader.ReadAsync();
+        var appDlqMsg = await appDlqReader.ReadAsync();
+
+        Assert.Equal(1, dlqMsg.Offset);
+        Assert.Equal(2, appDlqMsg.Offset);
+    }
+
+    [Fact]
     public async Task DisposeAsync_WithFullChannel_LogsWarningForEachDroppedRequeue()
     {
         // Arrange: a bounded channel with capacity 1, pre-filled so pending requeues have nowhere to go.

@@ -80,10 +80,13 @@ public sealed class RedisStateStore<TState> : IStateStore<TState>
     {
         ct.ThrowIfCancellationRequested();
         var key = _prefix + RedisKeySpace.Component(correlationId);
+        var ttlSeconds = _options.DefaultStateTtl <= TimeSpan.Zero
+            ? 0L
+            : Math.Max(1L, (long)Math.Ceiling(_options.DefaultStateTtl.TotalSeconds));
         var args = new List<RedisValue>
         {
             newState is null ? RedisValue.EmptyString : JsonSerializer.Serialize(newState),
-            Math.Max(1, (long)_options.DefaultStateTtl.TotalSeconds), outbox.Count,
+            ttlSeconds, outbox.Count,
         };
         foreach (var message in outbox)
         {
@@ -127,8 +130,18 @@ public sealed class RedisStateStore<TState> : IStateStore<TState>
     public Task SaveAsync(string correlationId, TState state, CancellationToken ct = default)
         => TransitionAsync(correlationId, state, [], ct);
 
-    public Task DeleteAsync(string correlationId, CancellationToken ct = default)
-        => TransitionAsync(correlationId, null, [], ct);
+    public async Task DeleteAsync(string correlationId, CancellationToken ct = default)
+    {
+        var messageId = Guid.NewGuid().ToString("N");
+        while (true)
+        {
+            var snapshot = await ReadSnapshotAsync(correlationId, messageId, ct);
+            if (snapshot.Version == 0 && snapshot.State is null && !snapshot.IsCompleted)
+                return;
+            if (await TryTransitionAsync(correlationId, messageId, snapshot.Version, null, [], ct)
+                != SagaCommitStatus.Conflict) return;
+        }
+    }
 
     public async Task TransitionAsync(string correlationId, TState? newState,
         IReadOnlyList<OutboxMessage> outbox, CancellationToken ct = default)
@@ -142,3 +155,4 @@ public sealed class RedisStateStore<TState> : IStateStore<TState>
         }
     }
 }
+

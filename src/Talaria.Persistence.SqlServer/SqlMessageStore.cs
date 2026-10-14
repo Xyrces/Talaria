@@ -18,7 +18,10 @@ internal sealed class SqlMessageStore<TDb>(DatabaseWork<TDb> database, TalariaOp
     {
         await database.Run(async (db, token) =>
         {
-            if (!await db.Set<TalariaMessageRow>().AnyAsync(x => x.Id == message.Id, token))
+            var query = db.Database.IsSqlServer()
+                ? db.Set<TalariaMessageRow>().FromSqlInterpolated($"SELECT * FROM dbo.TalariaMessages WITH (UPDLOCK, HOLDLOCK) WHERE Application = {options.ApplicationName} AND Id = {message.Id}")
+                : db.Set<TalariaMessageRow>().Where(x => x.Application == options.ApplicationName && x.Id == message.Id);
+            if (await query.SingleOrDefaultAsync(token) is null)
                 db.Add(new TalariaMessageRow { Id = message.Id, Application = options.ApplicationName, Kind = 1,
                     Data = JsonSerializer.Serialize(message), VisibleAt = message.DueAt });
             return true;

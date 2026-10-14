@@ -260,6 +260,7 @@ public sealed class AzureServiceBusTransport : ITransport, ITopologyProvisioner,
         }
         else throw new ArgumentException("Subscriptions require a parent topic; use ProvisionAsync.", nameof(kind));
         _entityKinds[entityName] = kind;
+        _entityKinds[entityName + _options.DlqSuffix] = TopologyEntityKind.Queue;
     }
 
     private IServiceBusAdministration CreateAdministrationClient()

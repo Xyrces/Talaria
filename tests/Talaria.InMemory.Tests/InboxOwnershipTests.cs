@@ -115,5 +115,38 @@ public class InboxOwnershipTests
         Assert.Equal(1, store.TrackedCorrelationCount);
         Assert.Null(await store.GetAsync("cold"));
         Assert.Equal(2, (await store.GetAsync("new"))!.Count);
+        Assert.Equal(1, store.TrackedCorrelationCount);
+    }
+
+    [Fact]
+    public async Task Given_MissingCorrelation_When_ReadSnapshotGetOrDeleteAreCalled_Then_HistoryIsNotAllocatedAndSagaIsNotTombstoned()
+    {
+        var store = new InMemoryStateStore<State>();
+
+        Assert.Null(await store.GetAsync("never-seen-1"));
+        var snapshot = await store.ReadSnapshotAsync("never-seen-2", "msg-1");
+        Assert.False(snapshot.IsCompleted);
+        Assert.Equal(0, snapshot.Version);
+        Assert.Equal(0, store.TrackedCorrelationCount);
+
+        await store.DeleteAsync("never-seen-3");
+        var afterDelete = await store.ReadSnapshotAsync("never-seen-3", "msg-1");
+        Assert.False(afterDelete.IsCompleted);
+        Assert.Equal(0, afterDelete.Version);
+        Assert.Equal(0, store.TrackedCorrelationCount);
+    }
+
+    [Fact]
+    public async Task Given_MultipleFailedMessages_When_ListAsyncIsCalled_Then_NewestFailuresAreReturnedFirst()
+    {
+        var store = new InMemoryFailedMessageStore();
+        var older = new FailedMessage(Guid.NewGuid(), "orders", "Order", "{}", new MessageHeaders(), null, "err", DateTimeOffset.UtcNow.AddMinutes(-5));
+        var newer = new FailedMessage(Guid.NewGuid(), "orders", "Order", "{}", new MessageHeaders(), null, "err", DateTimeOffset.UtcNow);
+
+        await store.SaveAsync(older);
+        await store.SaveAsync(newer);
+
+        var single = Assert.Single(await store.ListAsync(1));
+        Assert.Equal(newer.Id, single.Id);
     }
 }

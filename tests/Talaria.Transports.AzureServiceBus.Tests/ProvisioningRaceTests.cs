@@ -116,6 +116,24 @@ public sealed class ProvisioningRaceTests
         Assert.Contains("queue.dlq", admin.Queues);
     }
 
+    [Fact]
+    public async Task Given_TopicProvisioned_When_InspectingTrackedEntityKinds_Then_DlqEntityIsTrackedAsQueue()
+    {
+        var admin = new FakeAdministration();
+        await using var transport = new AzureServiceBusTransport(
+            new AzureServiceBusTransportOptions { ConnectionString = ConnectionString }, admin);
+
+        await transport.EnsureEntityAsync("orders-events", TopologyEntityKind.Topic);
+
+        var field = typeof(AzureServiceBusTransport).GetField(
+            "_entityKinds",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var entityKinds = (ConcurrentDictionary<string, TopologyEntityKind>)field.GetValue(transport)!;
+
+        Assert.Equal(TopologyEntityKind.Topic, entityKinds["orders-events"]);
+        Assert.Equal(TopologyEntityKind.Queue, entityKinds["orders-events.dlq"]);
+    }
+
     private sealed class FakeAdministration : IServiceBusAdministration
     {
         private readonly ConcurrentDictionary<string, EntityBarrier> _queueBarriers = new(StringComparer.Ordinal);

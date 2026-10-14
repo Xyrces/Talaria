@@ -478,6 +478,146 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.AcquirePendingAsync(DateTimeOffset.UtcNow, TimeSpan.FromSeconds(1), 0));
     }
 
+    [Fact]
+    public void Given_ExistingOpenGenericStateStore_When_CallingUseSqlServerPersistence_Then_ThrowsInvalidOperationException()
+    {
+        var services = new ServiceCollection();
+        var builder = services.AddTalaria();
+        services.AddSingleton(typeof(IStateStore<>), typeof(InMemoryStateStore<>));
+
+        Assert.Throws<InvalidOperationException>(() => builder.UseSqlServerPersistence<TestDbContext>());
+    }
+
+    [Fact]
+    public async Task Given_NonTransactionalCommandHandlerPublishingViaMessageBus_When_MessageIsConsumedWithSqlServerPersistence_Then_StagedOutboxMessageIsFlushedAndRelayed()
+    {
+        await fixture.ResetAsync();
+        var transport = new InMemoryTransport();
+        var host = Host.CreateDefaultBuilder()
+            .ConfigureLogging(logging => logging.ClearProviders())
+            .ConfigureServices(services =>
+            {
+                services.AddDbContext<TestDbContext>(options => options.UseSqlServer(fixture.ConnectionString, sql =>
+                    sql.EnableRetryOnFailure(3, TimeSpan.FromSeconds(2), null)));
+                services.AddTalaria(options =>
+                {
+                    options.ApplicationName = "sql-non-transactional-outbox-tests";
+                    options.OutboxRelayInterval = TimeSpan.FromMilliseconds(20);
+                    options.OutboxLeaseTimeout = TimeSpan.FromSeconds(10);
+                })
+                    .UseTransport(transport)
+                    .UseSqlServerPersistence<TestDbContext>();
+            }).Build();
+
+        try
+        {
+            host.MapCommand<PlaceOrderCommand>(async (PlaceOrderCommand message, IMessageBus bus) =>
+            {
+                await bus.PublishAsync(new OrderPlaced(message.Id));
+            });
+
+            await host.StartAsync();
+            var commandTopic = MessageNames.Destination(MessageNames.Contract(typeof(PlaceOrderCommand)));
+            var eventTopic = MessageNames.Destination(MessageNames.Contract(typeof(OrderPlaced)));
+            await using var producer = await transport.CreateProducerAsync<PlaceOrderCommand>(commandTopic, new ProducerOptions());
+            await producer.ProduceAsync(new PlaceOrderCommand(77, false), new MessageHeaders { MessageId = "non-tx-77" });
+
+            await EventuallyAsync(async () => (await transport.ReadAllFromTopicAsync<OrderPlaced>(eventTopic))
+                .Any(message => message.Payload.Id == 77), TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            await host.StopAsync();
+            host.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task Given_MultipleFailedMessagesAtDifferentTimestamps_When_ListingFromSqlFailedMessageStore_Then_ReturnsNewestFirst()
+    {
+        await fixture.ResetAsync();
+        var failed = fixture.Services.GetRequiredService<IFailedMessageStore>();
+        var now = DateTimeOffset.UtcNow;
+        var older = new FailedMessage(Guid.NewGuid(), "orders", typeof(string).AssemblyQualifiedName!, "\"older\"",
+            new MessageHeaders(), null, "first failure", now.AddMinutes(-5));
+        var newer = new FailedMessage(Guid.NewGuid(), "orders", typeof(string).AssemblyQualifiedName!, "\"newer\"",
+            new MessageHeaders(), null, "second failure", now);
+
+        await failed.SaveAsync(older);
+        await failed.SaveAsync(newer);
+
+        var listedAll = await failed.ListAsync(10);
+        Assert.Equal(new[] { newer.Id, older.Id }, listedAll.Select(x => x.Id).ToArray());
+
+        var topOne = Assert.Single(await failed.ListAsync(1));
+        Assert.Equal(newer.Id, topOne.Id);
+    }
+
+    [Fact]
+    public async Task Given_CrossAppDeferralsMissingSagaAndExpiredRows_When_EnqueuingDeletingAndPruning_Then_IsolatesAppsDoesNotTombstoneAndPrunesExpiredRows()
+    {
+        await fixture.ResetAsync();
+        var otherServices = new ServiceCollection();
+        otherServices.AddLogging();
+        otherServices.AddDbContext<TestDbContext>(options => options.UseSqlServer(fixture.ConnectionString, sql =>
+            sql.EnableRetryOnFailure(3, TimeSpan.FromSeconds(2), null)));
+        otherServices.AddTalaria(options => options.ApplicationName = "sql-persistence-other-app")
+            .UseSqlServerPersistence<TestDbContext>();
+        await using var otherProvider = otherServices.BuildServiceProvider();
+
+        var deferralA = fixture.Services.GetRequiredService<IDeferralStore>();
+        var deferralB = otherProvider.GetRequiredService<IDeferralStore>();
+        var sharedDeferralId = Guid.NewGuid();
+        var deferredMessage = new DeferredMessage(sharedDeferralId, "orders", typeof(string).AssemblyQualifiedName!, "\"payload\"",
+            new MessageHeaders(), "order-1", 1, DateTimeOffset.UtcNow.AddSeconds(-1));
+
+        await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => deferralA.EnqueueAsync(deferredMessage)));
+        await deferralB.EnqueueAsync(deferredMessage);
+
+        var leasedA = Assert.Single(await deferralA.AcquireDueAsync(DateTimeOffset.UtcNow, TimeSpan.FromSeconds(5), 10));
+        var leasedB = Assert.Single(await deferralB.AcquireDueAsync(DateTimeOffset.UtcNow, TimeSpan.FromSeconds(5), 10));
+        Assert.Equal(sharedDeferralId, leasedA.Message.Id);
+        Assert.Equal(sharedDeferralId, leasedB.Message.Id);
+        Assert.True(await deferralA.CompleteAsync(leasedA.Lease));
+        Assert.True(await deferralB.CompleteAsync(leasedB.Lease));
+
+        var sagaStore = fixture.Services.GetRequiredService<IStateStoreFactory>().GetStore<SagaState>();
+        await sagaStore.DeleteAsync("never-existed");
+        var missingSnapshot = await sagaStore.ReadSnapshotAsync("never-existed", "starter-1");
+        Assert.Null(missingSnapshot.State);
+        Assert.Equal(0, missingSnapshot.Version);
+        Assert.False(missingSnapshot.IsCompleted);
+
+        var now = DateTimeOffset.UtcNow;
+        await using (var scope = fixture.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TestDbContext>();
+            db.Set<TalariaInboxRow>().Add(new TalariaInboxRow { Id = "expired-inbox", Token = "t", Completed = true, ExpiresAt = now.AddMinutes(-5) });
+            db.Set<TalariaInboxRow>().Add(new TalariaInboxRow { Id = "active-inbox", Token = "t", Completed = true, ExpiresAt = now.AddMinutes(5) });
+            db.Set<TalariaReceiptRow>().Add(new TalariaReceiptRow { Id = "expired-receipt", ExpiresAt = now.AddMinutes(-5) });
+            db.Set<TalariaReceiptRow>().Add(new TalariaReceiptRow { Id = "active-receipt", ExpiresAt = now.AddMinutes(5) });
+            db.Set<TalariaSagaRow>().Add(new TalariaSagaRow { Id = "expired-saga", Version = 1, Completed = true, ExpiresAt = now.AddMinutes(-5) });
+            db.Set<TalariaSagaRow>().Add(new TalariaSagaRow { Id = "active-saga", Version = 1, Completed = false, ExpiresAt = now.AddMinutes(5) });
+            await db.SaveChangesAsync();
+        }
+
+        // Trigger inbox acquisition after resetting the pruning throttle via PruneExpiredAsync
+        var inboxStore = fixture.Services.GetRequiredService<IIdempotencyStore>();
+        var acq = await inboxStore.AcquireAsync("trigger-prune", "orders", TimeSpan.FromMinutes(5));
+        Assert.Equal(IdempotencyStatus.Acquired, acq.Status);
+
+        await using (var scope = fixture.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TestDbContext>();
+            Assert.False(await db.Set<TalariaInboxRow>().AnyAsync(x => x.Id == "expired-inbox"));
+            Assert.True(await db.Set<TalariaInboxRow>().AnyAsync(x => x.Id == "active-inbox"));
+            Assert.False(await db.Set<TalariaReceiptRow>().AnyAsync(x => x.Id == "expired-receipt"));
+            Assert.True(await db.Set<TalariaReceiptRow>().AnyAsync(x => x.Id == "active-receipt"));
+            Assert.False(await db.Set<TalariaSagaRow>().AnyAsync(x => x.Id == "expired-saga"));
+            Assert.True(await db.Set<TalariaSagaRow>().AnyAsync(x => x.Id == "active-saga"));
+        }
+    }
+
     private static OutboxMessage NewOutbox(Guid id) => new(id, "orders", typeof(string).AssemblyQualifiedName!,
         "\"payload\"", new MessageHeaders(), DateTimeOffset.UtcNow);
 

@@ -63,7 +63,7 @@ public sealed class RabbitMqTransport(RabbitMqOptions options) : ITransport, ITo
     }
 
     public async Task<IProducer<T>> CreateProducerAsync<T>(string topic, ProducerOptions producerOptions, CancellationToken ct = default)
-        => new Producer<T>(await ChannelAsync(true, ct), topic);
+        => new Producer<T>(await ChannelAsync(true, ct), token => ChannelAsync(true, token), topic);
 
     public async Task<IConsumer<T>> CreateConsumerAsync<T>(string topic, ConsumerOptions consumerOptions, CancellationToken ct = default)
     {
@@ -71,7 +71,17 @@ public sealed class RabbitMqTransport(RabbitMqOptions options) : ITransport, ITo
             ? topic
             : SubscriptionQueueName(topic, consumerOptions.ConsumerGroup
                 ?? throw new ArgumentException("An event subscription requires a consumer group.", nameof(consumerOptions)));
-        return new Consumer<T>(await ChannelAsync(false, ct), await ChannelAsync(true, ct), topic, queue, options);
+        var consumerChannel = await ChannelAsync(false, ct);
+        try
+        {
+            var publisherChannel = await ChannelAsync(true, ct);
+            return new Consumer<T>(consumerChannel, publisherChannel, topic, queue, options);
+        }
+        catch
+        {
+            try { await consumerChannel.DisposeAsync(); } catch { }
+            throw;
+        }
     }
 
     private static string SubscriptionQueueName(string topic, string group)
@@ -95,9 +105,10 @@ public sealed class RabbitMqTransport(RabbitMqOptions options) : ITransport, ITo
         finally { _connectionGate.Release(); }
     }
 
-    private sealed class Producer<T>(IChannel channel, string destination) : IProducer<T>
+    private sealed class Producer<T>(IChannel initialChannel, Func<CancellationToken, Task<IChannel>> channelFactory, string destination) : IProducer<T>
     {
         private readonly SemaphoreSlim _gate = new(1, 1);
+        private IChannel _channel = initialChannel;
         public async Task ProduceAsync(T message, MessageHeaders? headers = null, string? partitionKey = null, CancellationToken ct = default)
         {
             var copy = headers is null ? new MessageHeaders() : new MessageHeaders(headers);
@@ -114,7 +125,12 @@ public sealed class RabbitMqTransport(RabbitMqOptions options) : ITransport, ITo
             await _gate.WaitAsync(ct);
             try
             {
-                await channel.BasicPublishAsync(destination, "", mandatory: !copy.TryGetValue("talaria.intent", out var intent) || intent != "event",
+                if (!_channel.IsOpen)
+                {
+                    try { await _channel.DisposeAsync(); } catch { }
+                    _channel = await channelFactory(ct);
+                }
+                await _channel.BasicPublishAsync(destination, "", mandatory: copy.TryGetValue("talaria.intent", out var intent) && intent == "command",
                     basicProperties: new BasicProperties
                     {
                         Persistent = true, ContentType = "application/json", MessageId = copy.MessageId,
@@ -123,7 +139,12 @@ public sealed class RabbitMqTransport(RabbitMqOptions options) : ITransport, ITo
             }
             finally { _gate.Release(); }
         }
-        public ValueTask DisposeAsync() => channel.DisposeAsync();
+        public async ValueTask DisposeAsync()
+        {
+            await _gate.WaitAsync();
+            try { await _channel.DisposeAsync(); }
+            finally { _gate.Release(); }
+        }
     }
 
     private sealed class Consumer<T>(IChannel channel, IChannel publisher, string topic, string queue, RabbitMqOptions options) : IConsumer<T>, IConsumerReadiness
@@ -159,14 +180,14 @@ public sealed class RabbitMqTransport(RabbitMqOptions options) : ITransport, ITo
                     headers.MessageId = args.BasicProperties.MessageId ?? headers.MessageId;
                     T? payload;
                     try { payload = JsonSerializer.Deserialize<T>(args.Body.Span); }
-                    catch (JsonException)
+                    catch (Exception)
                     {
-                        await DeadLetterRaw(args.Body.ToArray(), headers, args.DeliveryTag, linked.Token);
+                        await DeadLetterRaw(args.Body.ToArray(), headers, args.DeliveryTag, _stop.Token);
                         return;
                     }
                     if (payload is null)
                     {
-                        await DeadLetterRaw(args.Body.ToArray(), headers, args.DeliveryTag, linked.Token);
+                        await DeadLetterRaw(args.Body.ToArray(), headers, args.DeliveryTag, _stop.Token);
                         return;
                     }
                     await _messages.Writer.WriteAsync(new MessageEnvelope<T>
@@ -175,8 +196,9 @@ public sealed class RabbitMqTransport(RabbitMqOptions options) : ITransport, ITo
                         PartitionKey = headers.TryGetValue("talaria.partition_key", out var partition) ? partition : null,
                         CorrelationId = headers.TryGetValue(MessageHeaders.CorrelationIdKey, out var correlation) ? correlation : null,
                         Timestamp = DateTimeOffset.UtcNow,
-                    }, linked.Token);
+                    }, _stop.Token);
                 }
+                catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
                 catch (Exception ex) { _messages.Writer.TryComplete(ex); }
             };
             consumer.ShutdownAsync += (_, args) =>
@@ -187,9 +209,10 @@ public sealed class RabbitMqTransport(RabbitMqOptions options) : ITransport, ITo
                 return Task.CompletedTask;
             };
             await channel.BasicQosAsync(0, options.PrefetchCount, false, linked.Token);
+            string? consumerTag = null;
             try
             {
-                await channel.BasicConsumeAsync(queue, false, consumer, linked.Token);
+                consumerTag = await channel.BasicConsumeAsync(queue, false, consumer, linked.Token);
                 _ready.TrySetResult();
             }
             catch (Exception ex)
@@ -197,7 +220,20 @@ public sealed class RabbitMqTransport(RabbitMqOptions options) : ITransport, ITo
                 _ready.TrySetException(ex);
                 throw;
             }
-            await foreach (var envelope in _messages.Reader.ReadAllAsync(linked.Token)) yield return envelope;
+            try
+            {
+                await foreach (var envelope in _messages.Reader.ReadAllAsync(linked.Token)) yield return envelope;
+            }
+            finally
+            {
+                if (consumerTag is not null && channel.IsOpen)
+                {
+                    await _settlement.WaitAsync(CancellationToken.None);
+                    try { await channel.BasicCancelAsync(consumerTag, noWait: false, CancellationToken.None); }
+                    catch { }
+                    finally { _settlement.Release(); }
+                }
+            }
         }
 
         private async Task DeadLetterRaw(byte[] body, MessageHeaders headers, ulong tag, CancellationToken ct)
@@ -238,9 +274,19 @@ public sealed class RabbitMqTransport(RabbitMqOptions options) : ITransport, ITo
         public async ValueTask DisposeAsync()
         {
             await _stop.CancelAsync();
-            await channel.DisposeAsync();
-            await publisher.DisposeAsync();
+            await _settlement.WaitAsync();
+            try
+            {
+                await channel.DisposeAsync();
+                await publisher.DisposeAsync();
+            }
+            finally
+            {
+                _settlement.Release();
+            }
             _messages.Writer.TryComplete();
+            _stop.Dispose();
         }
     }
 }
+

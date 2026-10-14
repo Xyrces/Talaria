@@ -39,7 +39,7 @@ internal sealed class SqlFailedMessageStore<TDb>(DatabaseWork<TDb> database, Tal
         if (limit is < 1 or > 1000) throw new ArgumentOutOfRangeException(nameof(limit));
         return database.Run<IReadOnlyList<FailedMessage>>(async (db, token) =>
             (await db.Set<TalariaFailedMessageRow>().Where(x => x.Application == options.ApplicationName)
-                .OrderBy(x => x.FailedAt).ThenBy(x => x.Id).Take(limit).ToListAsync(token))
+                .OrderByDescending(x => x.FailedAt).ThenBy(x => x.Id).Take(limit).ToListAsync(token))
             .Select(row => ToMessage(row)!).ToArray(), ct);
     }
 

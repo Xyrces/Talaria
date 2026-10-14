@@ -55,7 +55,17 @@ internal sealed class SqlSagaStore<TDb, TState>(DatabaseWork<TDb> database, Tala
     public async Task<TState?> GetAsync(string correlationId, CancellationToken ct = default)
         => (await ReadSnapshotAsync(correlationId, "", ct)).State;
     public Task SaveAsync(string correlationId, TState state, CancellationToken ct = default) => TransitionAsync(correlationId, state, [], ct);
-    public Task DeleteAsync(string correlationId, CancellationToken ct = default) => TransitionAsync(correlationId, null, [], ct);
+    public async Task DeleteAsync(string correlationId, CancellationToken ct = default)
+    {
+        var id = Guid.NewGuid().ToString("N");
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            var snapshot = await ReadSnapshotAsync(correlationId, id, ct);
+            if (snapshot.Version == 0 && snapshot.State is null && !snapshot.IsCompleted) return;
+            if (await TryTransitionAsync(correlationId, id, snapshot.Version, null, [], ct) != SagaCommitStatus.Conflict) return;
+        }
+    }
     public async Task TransitionAsync(string correlationId, TState? newState, IReadOnlyList<OutboxMessage> outbox, CancellationToken ct = default)
     {
         var id = Guid.NewGuid().ToString("N");
@@ -67,3 +77,4 @@ internal sealed class SqlSagaStore<TDb, TState>(DatabaseWork<TDb> database, Tala
         }
     }
 }
+

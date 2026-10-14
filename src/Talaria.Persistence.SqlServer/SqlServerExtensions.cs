@@ -12,7 +12,7 @@ public static class SqlServerExtensions
     /// <summary>Uses the application's registered DbContext. Include ModelBuilder.AddTalaria in its model and migrate normally.</summary>
     public static TalariaBuilder UseSqlServerPersistence<TDb>(this TalariaBuilder builder) where TDb : DbContext
     {
-        if (builder.Services.Any(x => x.ServiceType == typeof(IStateStoreFactory) || x.ServiceType == typeof(IOutboxStore)))
+        if (builder.Services.Any(x => x.ServiceType == typeof(IStateStoreFactory) || x.ServiceType == typeof(IStateStore<>) || x.ServiceType == typeof(IOutboxStore)))
             throw new InvalidOperationException("Select one persistence bundle before configuring SQL Server.");
         builder.Services.AddSingleton<DatabaseWork<TDb>>();
         builder.Services.AddSingleton<SqlMessageStore<TDb>>();

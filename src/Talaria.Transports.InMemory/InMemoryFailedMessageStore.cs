@@ -23,7 +23,7 @@ public sealed class InMemoryFailedMessageStore : IFailedMessageStore
     {
         ct.ThrowIfCancellationRequested();
         if (limit is < 1 or > 1000) throw new ArgumentOutOfRangeException(nameof(limit));
-        return Task.FromResult<IReadOnlyList<FailedMessage>>(_messages.Values.OrderBy(x => x.FailedAt).ThenBy(x => x.Id).Take(limit).Select(Copy).ToArray());
+        return Task.FromResult<IReadOnlyList<FailedMessage>>(_messages.Values.OrderByDescending(x => x.FailedAt).ThenBy(x => x.Id).Take(limit).Select(Copy).ToArray());
     }
     public Task<bool> DeleteAsync(Guid id, CancellationToken ct = default)
     {

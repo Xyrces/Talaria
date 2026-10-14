@@ -37,6 +37,7 @@ public static class RedisStateStoreExtensions
         this TalariaBuilder builder,
         Action<TalariaRedisOptions>? configure = null)
     {
+        EnsureNoMixedPersistence(builder);
         builder.ConfigureRedis(configure);
 
         builder.Services.TryAddSingleton(typeof(IStateStore<>), typeof(RedisStateStore<>));
@@ -90,10 +91,13 @@ public static class RedisStateStoreExtensions
         var conflictingOutbox = builder.Services.Any(descriptor =>
             descriptor.ServiceType == typeof(IOutboxStore)
             && descriptor.ImplementationType != typeof(RedisOutboxStore));
-        if (conflictingOutbox || builder.Services.Any(descriptor => descriptor.ServiceType == typeof(IStateStoreFactory)))
+        var conflictingStateStore = builder.Services.Any(descriptor =>
+            descriptor.ServiceType == typeof(IStateStore<>)
+            && descriptor.ImplementationType != typeof(RedisStateStore<>));
+        if (conflictingOutbox || conflictingStateStore || builder.Services.Any(descriptor => descriptor.ServiceType == typeof(IStateStoreFactory)))
         {
             throw new InvalidOperationException(
-                "Redis state and outbox persistence must be registered as one bundle. Remove the existing non-Redis IOutboxStore or IStateStoreFactory registration before calling UseRedisStateStore/UseRedisPersistence.");
+                "Redis state and outbox persistence must be registered as one bundle. Remove the existing non-Redis IOutboxStore, IStateStore<>, or IStateStoreFactory registration before calling UseRedisStateStore/UseRedisPersistence.");
         }
     }
 

@@ -155,6 +155,53 @@ public sealed class RabbitMqReliabilityTests : IAsyncLifetime
         await dlq.DisposeAsync();
     }
 
+    [DockerFact]
+    public async Task Given_EndedEnumerationBeforeDispose_When_NewMessageIsPublished_Then_CancelledConsumerDoesNotStealMessageFromNextConsumer()
+    {
+        var queue = Name("cancel-on-exit");
+        await _transport.ProvisionAsync([new(TopologyEntityKind.Queue, queue)]);
+        var producer = await _transport.CreateProducerAsync<string>(queue, new ProducerOptions());
+        await producer.ProduceAsync("first-message");
+
+        var firstConsumer = await _transport.CreateConsumerAsync<string>(queue,
+            new ConsumerOptions { EntityKind = TopologyEntityKind.Queue });
+        var first = await TryNextAsync(firstConsumer, TimeSpan.FromSeconds(5));
+        Assert.NotNull(first);
+        Assert.Equal("first-message", first!.Payload);
+        await firstConsumer.CommitAsync(first);
+
+        // First consumer's enumeration has ended, but firstConsumer itself is not disposed yet.
+        // Publish a second message and verify a second consumer receives it without firstConsumer stealing it.
+        await producer.ProduceAsync("second-message");
+        await using var secondConsumer = await _transport.CreateConsumerAsync<string>(queue,
+            new ConsumerOptions { EntityKind = TopologyEntityKind.Queue });
+        var second = await TryNextAsync(secondConsumer, TimeSpan.FromSeconds(3));
+        Assert.NotNull(second);
+        Assert.Equal("second-message", second!.Payload);
+        await secondConsumer.CommitAsync(second);
+
+        await firstConsumer.DisposeAsync();
+
+        // Simulate the producer's underlying channel being closed while the shared connection remains the same instance.
+        var connectionField = typeof(RabbitMqTransport).GetField("_connection", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var initialConnection = connectionField.GetValue(_transport);
+        var channelField = producer.GetType().GetField("_channel", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? producer.GetType().GetFields(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                .First(f => typeof(RabbitMQ.Client.IChannel).IsAssignableFrom(f.FieldType));
+        var initialChannel = (RabbitMQ.Client.IChannel)channelField.GetValue(producer)!;
+        await initialChannel.DisposeAsync();
+        Assert.False(initialChannel.IsOpen);
+
+        await producer.ProduceAsync("third-message-after-channel-close");
+        Assert.Same(initialConnection, connectionField.GetValue(_transport));
+        await using var thirdConsumer = await _transport.CreateConsumerAsync<string>(queue,
+            new ConsumerOptions { EntityKind = TopologyEntityKind.Queue });
+        var third = await TryNextAsync(thirdConsumer, TimeSpan.FromSeconds(3));
+        Assert.NotNull(third);
+        Assert.Equal("third-message-after-channel-close", third!.Payload);
+        await thirdConsumer.CommitAsync(third);
+    }
+
     private static string Name(string suffix) => $"talaria-{suffix}-{Guid.NewGuid():N}";
 
     private static async Task<MessageEnvelope<T>?> TryNextAsync<T>(IConsumer<T> consumer, TimeSpan timeout)
@@ -168,3 +215,4 @@ public sealed class RabbitMqReliabilityTests : IAsyncLifetime
         return null;
     }
 }
+

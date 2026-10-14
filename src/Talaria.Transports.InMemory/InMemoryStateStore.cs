@@ -37,7 +37,8 @@ public sealed class InMemoryStateStore<TState> : IStateStore<TState>
         ct.ThrowIfCancellationRequested();
         lock (Gate)
         {
-            var history = GetHistory(correlationId);
+            var history = TryGetHistory(correlationId);
+            if (history is null) return Task.FromResult(new SagaSnapshot<TState>(null, 0, false, false));
             _store.TryGetValue(correlationId, out var state);
             return Task.FromResult(new SagaSnapshot<TState>(Clone(state), history.Version, history.Completed, history.Messages.Contains(messageId)));
         }
@@ -53,7 +54,7 @@ public sealed class InMemoryStateStore<TState> : IStateStore<TState>
         var staged = _outbox is null ? Array.Empty<OutboxMessage>() : InMemoryOutboxStore.Prepare(outbox);
         lock (Gate)
         {
-            var history = GetHistory(correlationId);
+            var history = GetOrCreateHistory(correlationId);
             if (history.Messages.Contains(messageId)) return Task.FromResult(SagaCommitStatus.AlreadyProcessed);
             if (history.Version != expectedVersion) return Task.FromResult(SagaCommitStatus.Conflict);
             _outbox?.EnsureCanStage(staged);
@@ -67,17 +68,24 @@ public sealed class InMemoryStateStore<TState> : IStateStore<TState>
         }
     }
 
-    private History GetHistory(string id)
+    private History? TryGetHistory(string id)
     {
         var now = _time.GetUtcNow();
         if (_history.TryGetValue(id, out var existing) && existing.Expires <= now)
         {
             _history.Remove(id);
             _store.TryRemove(id, out _);
+            existing = null;
         }
         PruneExpired(now);
-        if (!_history.TryGetValue(id, out var history))
-            _history[id] = history = new History { Expires = now.AddDays(30) };
+        return existing;
+    }
+
+    private History GetOrCreateHistory(string id)
+    {
+        var history = TryGetHistory(id);
+        if (history is null)
+            _history[id] = history = new History { Expires = _time.GetUtcNow().AddDays(30) };
         return history;
     }
 
@@ -106,7 +114,8 @@ public sealed class InMemoryStateStore<TState> : IStateStore<TState>
         ct.ThrowIfCancellationRequested();
         lock (Gate)
         {
-            _ = GetHistory(correlationId);
+            if (TryGetHistory(correlationId) is null && !_store.ContainsKey(correlationId))
+                return Task.FromResult<TState?>(null);
             _store.TryGetValue(correlationId, out var state);
             return Task.FromResult(Clone(state));
         }
@@ -116,7 +125,7 @@ public sealed class InMemoryStateStore<TState> : IStateStore<TState>
     {
         lock (Gate)
         {
-            var history = GetHistory(correlationId);
+            var history = GetOrCreateHistory(correlationId);
             _store[correlationId] = Clone(state)!;
             history.Version++;
             history.Completed = false;
@@ -130,8 +139,10 @@ public sealed class InMemoryStateStore<TState> : IStateStore<TState>
         ct.ThrowIfCancellationRequested();
         lock (Gate)
         {
-            _store.TryRemove(correlationId, out _);
-            var history = GetHistory(correlationId);
+            var history = TryGetHistory(correlationId);
+            var removed = _store.TryRemove(correlationId, out _);
+            if (history is null && !removed) return Task.CompletedTask;
+            history ??= GetOrCreateHistory(correlationId);
             history.Version++;
             history.Completed = true;
             history.Expires = _time.GetUtcNow().AddDays(30);
@@ -159,7 +170,7 @@ public sealed class InMemoryStateStore<TState> : IStateStore<TState>
         var staged = _outbox is null ? Array.Empty<OutboxMessage>() : InMemoryOutboxStore.Prepare(outbox);
         lock (Gate)
         {
-            var history = GetHistory(correlationId);
+            var history = GetOrCreateHistory(correlationId);
             _outbox?.EnsureCanStage(staged);
             Apply(correlationId, snapshot);
             _outbox?.StagePrepared(staged);

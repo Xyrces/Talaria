@@ -21,8 +21,9 @@ internal sealed class FailedMessages(IFailedMessageStore store, ProducerCache pr
         };
         headers.Remove(MessageHeaders.DlqAttemptsKey);
         headers.Remove(MessageHeaders.DlqSourceTopicKey);
+        headers.Remove(MessageHeaders.DeferralAttemptKey);
         headers.HopCount = 0;
-        headers[MessageHeaders.MessageTypeKey] = failed.MessageType.Split(',')[0];
+        headers[MessageHeaders.MessageTypeKey] = Registration.MessageNames.StripAssemblyQualification(failed.MessageType);
         headers["talaria.replay.failure"] = id.ToString("N");
         var producer = await producers.GetOrCreateAsync(failed.Topic, typeof(JsonElement), ct);
         await producer.Produce(payload, headers, failed.PartitionKey, ct);

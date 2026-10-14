@@ -257,6 +257,15 @@ internal sealed class SagaConsumerEngine
                 ? step.CorrelationResolver(payload)
                 : Core.Sagas.CorrelationResolver.Resolve(payload, env.Headers);
 
+            if (_pipeline.IsHopCountExceeded(env, step.TopicName))
+            {
+                activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, "Exceeded Max Hops");
+                Diagnostics.TalariaDiagnostics.MessagesFailed.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
+                Diagnostics.TalariaDiagnostics.DlqRouted.Add(1, new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
+                await consumer.NackAsync(env, ct);
+                return;
+            }
+
             if (string.IsNullOrWhiteSpace(correlationId))
             {
                 _logger.LogWarning("No correlation ID found for saga message {Type} on topic {Topic}", step.MessageType.Name, env.SourceTopic);

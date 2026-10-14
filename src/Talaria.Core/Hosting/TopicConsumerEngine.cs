@@ -174,24 +174,37 @@ internal sealed class TopicConsumerEngine : IAsyncDisposable
                         var scope = _serviceProvider!.CreateAsyncScope();
                         try
                         {
-                            var context = new ConsumeContext<T>
+                            Task Invoke(CancellationToken token)
                             {
-                                Envelope = envelope,
-                                CancellationToken = ownership.Token,
-                                Services = scope.ServiceProvider,
-                            };
-                            if (registration.ScopedHandler is not null)
+                                if (registration.ScopedHandler is not null)
+                                {
+                                    return registration.ScopedHandler(envelope.Payload!, envelope.Headers,
+                                        new EnvelopeMetadata(envelope.PartitionKey, envelope.Partition, envelope.Offset,
+                                            envelope.Timestamp, envelope.CorrelationId, envelope.SourceTopic), scope.ServiceProvider, token);
+                                }
+
+                                var context = new ConsumeContext<T>
+                                {
+                                    Envelope = envelope,
+                                    CancellationToken = token,
+                                    Services = scope.ServiceProvider,
+                                };
+                                return ((ITopicConsumer<T>)scope.ServiceProvider.GetRequiredService(registration.ConsumerType!)).ConsumeAsync(context);
+                            }
+
+                            if (registration.Transactional)
                             {
-                                Task Invoke(CancellationToken token) => registration.ScopedHandler(envelope.Payload!, envelope.Headers,
-                                    new EnvelopeMetadata(envelope.PartitionKey, envelope.Partition, envelope.Offset,
-                                        envelope.Timestamp, envelope.CorrelationId, envelope.SourceTopic), scope.ServiceProvider, token);
-                                if (registration.Transactional)
-                                    await scope.ServiceProvider.GetRequiredService<IMessageTransaction>().ExecuteAsync(consumerGroup,
-                                        envelope.Headers.RetryRootMessageId ?? envelope.Headers.MessageId ?? throw new InvalidOperationException("Transactions require MessageId."), Invoke, ownership.Token);
-                                else await Invoke(ownership.Token);
+                                await scope.ServiceProvider.GetRequiredService<IMessageTransaction>().ExecuteAsync(consumerGroup,
+                                    envelope.Headers.RetryRootMessageId ?? envelope.Headers.MessageId ?? throw new InvalidOperationException("Transactions require MessageId."), Invoke, ownership.Token);
                             }
                             else
-                                await ((ITopicConsumer<T>)scope.ServiceProvider.GetRequiredService(registration.ConsumerType!)).ConsumeAsync(context);
+                            {
+                                await Invoke(ownership.Token);
+                                if (scope.ServiceProvider.GetService<IMessageOutbox>() is { } outbox)
+                                {
+                                    await outbox.FlushAsync(ownership.Token);
+                                }
+                            }
                         }
                         catch (Exception ex)
                         {

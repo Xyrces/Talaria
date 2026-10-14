@@ -262,26 +262,36 @@ internal sealed class AzureServiceBusConsumer<T> : IConsumer<T>, IConsumerReadin
         };
 
         var pending = new PendingEntry(sbMessage, args, envelope);
-        _pending.AddOrUpdate(envelope.Offset, pending, (_, previous) =>
+        while (true)
         {
-            // A lock can expire and ASB can redeliver the same sequence number while
-            // the old callback is still waiting for settlement. Release that waiter.
-            previous.Settled.TrySetCanceled();
-            return pending;
-        });
+            if (_pending.TryGetValue(envelope.Offset, out var previous))
+            {
+                if (_pending.TryUpdate(envelope.Offset, pending, previous))
+                {
+                    // A lock can expire and ASB can redeliver the same sequence number while
+                    // the old callback is still waiting for settlement. Release that waiter.
+                    previous.Settled.TrySetCanceled();
+                    break;
+                }
+            }
+            else if (_pending.TryAdd(envelope.Offset, pending))
+            {
+                break;
+            }
+        }
 
         try
         {
             await channel.Writer.WriteAsync(envelope, args.CancellationToken).ConfigureAwait(false);
             // Keep the SDK callback alive: automatic lock renewal ends when it returns.
-            await pending.Settled.Task.WaitAsync(_activeReaderCts!.Token).ConfigureAwait(false);
+            await pending.Settled.Task.WaitAsync(args.CancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is OperationCanceledException or System.Threading.Channels.ChannelClosedException)
         {
             // Channel was closed mid-write (consumer went away, host shutdown).
-            // Abandon by clearing the pending entry; the broker's peek-lock
-            // will expire and trigger ASB's native redelivery.
-            _pending.TryRemove(envelope.Offset, out _);
+            // Abandon by clearing only this callback's pending entry; the broker's
+            // peek-lock will expire and trigger ASB's native redelivery.
+            _pending.TryRemove(KeyValuePair.Create(envelope.Offset, pending));
         }
     }
 
