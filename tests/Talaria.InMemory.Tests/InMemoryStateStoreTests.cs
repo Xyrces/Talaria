@@ -125,4 +125,35 @@ public class InMemoryStateStoreTests
 
         Assert.Equal("v1", (await store.GetAsync("c1"))!.Value);
     }
+
+    [Fact]
+    public async Task TryTransitionAsync_WithAdditionalReceipts_MarksCancellationReceiptsAsProcessed()
+    {
+        var outbox = new InMemoryOutboxStore();
+        var store = new InMemoryStateStore<TestState>(outbox);
+
+        var status1 = await store.TryTransitionAsync(
+            "c-cancel",
+            "starter-msg",
+            expectedVersion: 0,
+            new TestState { Value = "started" },
+            []);
+        Assert.Equal(Core.Abstractions.SagaCommitStatus.Committed, status1);
+
+        const string cancelReceiptKey = "timeout-canceled:MyApp.OrderTimeout:v1";
+        var status2 = await store.TryTransitionAsync(
+            "c-cancel",
+            "cancel-step-msg",
+            expectedVersion: 1,
+            new TestState { Value = "authorized" },
+            [],
+            [cancelReceiptKey]);
+        Assert.Equal(Core.Abstractions.SagaCommitStatus.Committed, status2);
+
+        var cancelSnapshot = await store.ReadSnapshotAsync("c-cancel", cancelReceiptKey);
+        Assert.True(cancelSnapshot.MessageProcessed);
+        Assert.Equal(2, cancelSnapshot.Version);
+        Assert.Equal("authorized", cancelSnapshot.State?.Value);
+    }
 }
+

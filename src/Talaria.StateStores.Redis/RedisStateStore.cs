@@ -58,6 +58,9 @@ public sealed class RedisStateStore<TState> : IStateStore<TState>
         local version = redis.call('HGET', KEYS[4], 'version') or '0'
         if version ~= ARGV[#ARGV - 1] then return 2 end
         """ + "\n" + TransitionScript.Replace("return 1", """
+        for r = idx, #ARGV - 2 do
+            redis.call('HSET', KEYS[4], 'message:' .. ARGV[r], '1')
+        end
         redis.call('HSET', KEYS[4], 'version', tonumber(version) + 1,
             'completed', ARGV[1] == '' and '1' or '0', 'message:' .. ARGV[#ARGV], '1')
         if tonumber(ARGV[2]) > 0 then redis.call('EXPIRE', KEYS[4], ARGV[2]) end
@@ -75,10 +78,17 @@ public sealed class RedisStateStore<TState> : IStateStore<TState>
             (long)result[1], (string?)result[2] == "1", (string?)result[3] == "1");
     }
 
-    public async Task<SagaCommitStatus> TryTransitionAsync(string correlationId, string messageId, long expectedVersion,
+    public Task<SagaCommitStatus> TryTransitionAsync(string correlationId, string messageId, long expectedVersion,
         TState? newState, IReadOnlyList<OutboxMessage> outbox, CancellationToken ct = default)
+        => TryTransitionAsync(correlationId, messageId, expectedVersion, newState, outbox, Array.Empty<string>(), ct);
+
+    /// <inheritdoc />
+    public async Task<SagaCommitStatus> TryTransitionAsync(string correlationId, string messageId, long expectedVersion,
+        TState? newState, IReadOnlyList<OutboxMessage> outbox, IReadOnlyList<string> additionalReceipts, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(outbox);
+        ArgumentNullException.ThrowIfNull(additionalReceipts);
         var key = _prefix + RedisKeySpace.Component(correlationId);
         var ttlSeconds = _options.DefaultStateTtl <= TimeSpan.Zero
             ? 0L
@@ -92,13 +102,21 @@ public sealed class RedisStateStore<TState> : IStateStore<TState>
         {
             args.Add(message.Id.ToString());
             args.Add(RedisOutboxStore.Serialize(message));
-            args.Add(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            args.Add((message.ScheduledAt ?? DateTimeOffset.UtcNow).ToUnixTimeMilliseconds());
+        }
+        foreach (var extra in additionalReceipts)
+        {
+            if (!string.IsNullOrWhiteSpace(extra))
+            {
+                args.Add(extra);
+            }
         }
         args.Add(expectedVersion.ToString(System.Globalization.CultureInfo.InvariantCulture));
         args.Add(messageId);
         return (SagaCommitStatus)(int)await _db.ScriptEvaluateAsync(VersionedTransitionScript,
             new RedisKey[] { key, _outboxKey, _outboxEntriesKey, key + ":history" }, args.ToArray());
     }
+
 
     /// <summary>
     /// Creates the store. Options are shared across all UseRedis* registrations.

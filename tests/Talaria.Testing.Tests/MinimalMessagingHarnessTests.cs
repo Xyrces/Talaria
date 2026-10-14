@@ -109,5 +109,62 @@ public sealed class MinimalMessagingHarnessTests
         Assert.Equal(1, Volatile.Read(ref handlerCount));
         Assert.Empty(await dlq.ListAsync(10));
     }
-}
 
+    private sealed record OrderSubmitted(Guid OrderId);
+
+    [Fact]
+    public async Task Given_ScheduledCommandByDelay_When_DelayElapses_Then_HostReceivesAndRecordsCommand()
+    {
+        await using var host = TalariaTestHost.Create()
+            .MapCommand<PlaceOrder>();
+        await host.StartAsync();
+
+        var command = new PlaceOrder(Guid.NewGuid());
+        await host.ScheduleSendAsync(command, TimeSpan.FromMilliseconds(80));
+
+        var received = await host.AssertReceivedAsync<PlaceOrder>(x => x.OrderId == command.OrderId, TimeSpan.FromSeconds(3));
+        Assert.Equal(command, received);
+    }
+
+    [Fact]
+    public async Task Given_ScheduledCommandByDueAt_When_DueTimeArrives_Then_HostReceivesAndRecordsCommand()
+    {
+        await using var host = TalariaTestHost.Create()
+            .MapCommand<PlaceOrder>();
+        await host.StartAsync();
+
+        var command = new PlaceOrder(Guid.NewGuid());
+        await host.ScheduleSendAsync(command, DateTimeOffset.UtcNow.AddMilliseconds(80));
+
+        var received = await host.ReceiveAsync<PlaceOrder>(TimeSpan.FromSeconds(3));
+        Assert.Equal(command, received);
+    }
+
+    [Fact]
+    public async Task Given_ScheduledEventByDelay_When_DelayElapses_Then_HostReceivesAndRecordsEvent()
+    {
+        await using var host = TalariaTestHost.Create()
+            .MapEvent<OrderSubmitted>();
+        await host.StartAsync();
+
+        var evt = new OrderSubmitted(Guid.NewGuid());
+        await host.SchedulePublishAsync(evt, TimeSpan.FromMilliseconds(80));
+
+        var received = await host.AssertReceivedAsync<OrderSubmitted>(x => x.OrderId == evt.OrderId, TimeSpan.FromSeconds(3));
+        Assert.Equal(evt, received);
+    }
+
+    [Fact]
+    public async Task Given_ScheduledEventByDueAt_When_DueTimeArrives_Then_HostReceivesAndRecordsEvent()
+    {
+        await using var host = TalariaTestHost.Create()
+            .MapEvent<OrderSubmitted>();
+        await host.StartAsync();
+
+        var evt = new OrderSubmitted(Guid.NewGuid());
+        await host.SchedulePublishAsync(evt, DateTimeOffset.UtcNow.AddMilliseconds(80));
+
+        var received = await host.ReceiveAsync<OrderSubmitted>(TimeSpan.FromSeconds(3));
+        Assert.Equal(evt, received);
+    }
+}

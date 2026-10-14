@@ -15,6 +15,7 @@ namespace Talaria.Core.Abstractions;
 /// <param name="Headers">Headers to publish with the message (minted message id, trace context).</param>
 /// <param name="CreatedAt">When the entry was staged.</param>
 /// <param name="PartitionKey">Optional partition key used to preserve routing affinity when the message is republished.</param>
+/// <param name="ScheduledAt">Optional earliest timestamp at which the entry becomes eligible for publication. When null, the entry is eligible immediately.</param>
 /// <since>1.0.0</since>
 public sealed record OutboxMessage(
     Guid Id,
@@ -23,7 +24,8 @@ public sealed record OutboxMessage(
     string PayloadJson,
     MessageHeaders Headers,
     DateTimeOffset CreatedAt,
-    string? PartitionKey = null);
+    string? PartitionKey = null,
+    DateTimeOffset? ScheduledAt = null);
 
 /// <summary>
 /// A lease on an outbox entry. Carries a fencing token so that only the current

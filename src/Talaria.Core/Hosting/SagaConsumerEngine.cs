@@ -235,6 +235,17 @@ internal sealed class SagaConsumerEngine
 
         try
         {
+            if ((env.Headers.TryGetValue("talaria.saga.timeout_saga", out var timeoutOwnerSaga)
+                    && !string.IsNullOrWhiteSpace(timeoutOwnerSaga)
+                    && !string.Equals(timeoutOwnerSaga, MessageNames.Contract(stateType), StringComparison.Ordinal))
+                || (env.Headers.TryGetValue("talaria.saga.timeout_application", out var timeoutOwnerApp)
+                    && !string.IsNullOrWhiteSpace(timeoutOwnerApp)
+                    && !string.Equals(timeoutOwnerApp, _options.ApplicationName, StringComparison.Ordinal)))
+            {
+                await consumer.CommitAsync(env, ct);
+                return;
+            }
+
             await using var scope = _serviceProvider.CreateAsyncScope();
 
             object payload;
@@ -256,6 +267,11 @@ internal sealed class SagaConsumerEngine
             var correlationId = step.CorrelationResolver != null
                 ? step.CorrelationResolver(payload)
                 : Core.Sagas.CorrelationResolver.Resolve(payload, env.Headers);
+            if (string.IsNullOrWhiteSpace(correlationId))
+            {
+                correlationId = env.Headers.CorrelationId;
+            }
+
 
             if (_pipeline.IsHopCountExceeded(env, step.TopicName))
             {
@@ -298,10 +314,34 @@ internal sealed class SagaConsumerEngine
                 await _pipeline.CompleteAsync(gate.Lock, consumer, env, ct);
                 return;
             }
+
+            if (env.Headers.TryGetValue("talaria.saga.timeout_version", out var timeoutVersion) && !string.IsNullOrWhiteSpace(timeoutVersion))
+            {
+                var cancelReceiptKey = $"timeout-canceled:{MessageNames.Contract(step.MessageType)}:v{timeoutVersion}";
+                var cancelCheck = await stateStore.ReadSnapshotAsync(scope.ServiceProvider, correlationId, cancelReceiptKey, ct);
+                if (cancelCheck.MessageProcessed)
+                {
+                    _logger.LogDebug(
+                        "Saga {SagaType} timeout {MessageType} (v{TimeoutVersion}) for correlation {CorrelationId} was canceled or superseded; skipping.",
+                        stateType.Name, step.MessageType.Name, timeoutVersion, correlationId);
+                    await _pipeline.CompleteAsync(gate.Lock, consumer, env, ct);
+                    return;
+                }
+            }
+
             var state = snapshot.State;
 
             if (state == null && !step.IsStarter)
             {
+                if (step.IsTimeout || (env.Headers.TryGetValue("talaria.saga.timeout", out var isTimeout) && string.Equals(isTimeout, "true", StringComparison.OrdinalIgnoreCase)))
+                {
+                    _logger.LogDebug(
+                        "Received timeout message {MessageType} for Saga {SagaType} with correlation {Id}, but no active saga state exists. Completing as stale timeout.",
+                        step.MessageType.Name, stateType.Name, correlationId);
+                    await _pipeline.CompleteAsync(gate.Lock, consumer, env, ct);
+                    return;
+                }
+
                 _logger.LogInformation("Received non-starter message for Saga {SagaType} but state {Id} not found. Deferring...", stateType.Name, correlationId);
                 try
                 {
@@ -347,7 +387,8 @@ internal sealed class SagaConsumerEngine
                 return;
             }
 
-            var context = new Core.Sagas.SagaContext<object> { CancellationToken = ownership.Token };
+            var timeProvider = scope.ServiceProvider.GetService<TimeProvider>();
+            var context = new Core.Sagas.SagaContext<object>(timeProvider) { CancellationToken = ownership.Token };
             Core.Sagas.SagaResult<object> result;
             try
             {
@@ -423,8 +464,9 @@ internal sealed class SagaConsumerEngine
                 return;
             }
 
-            foreach (var outbound in result.OutboundMessages)
+            foreach (var dispatch in result.Dispatches)
             {
+                var outbound = dispatch.Message;
                 if (!route.Registration.DispatchTopics.ContainsKey(outbound.GetType()))
                 {
                     var outboundType = outbound.GetType();
@@ -442,11 +484,13 @@ internal sealed class SagaConsumerEngine
                 }
             }
 
-            if (_outboxStore is not null || result.OutboundMessages.Count == 0)
+            if (_outboxStore is not null || result.Dispatches.Count == 0)
             {
-                var staged = new List<OutboxMessage>(result.OutboundMessages.Count);
-                foreach (var outbound in result.OutboundMessages)
+                var now = (timeProvider ?? TimeProvider.System).GetUtcNow();
+                var staged = new List<OutboxMessage>(result.Dispatches.Count);
+                foreach (var dispatch in result.Dispatches)
                 {
+                    var outbound = dispatch.Message;
                     var outboundType = outbound.GetType();
                     var outboundTopic = route.Registration.DispatchTopics[outboundType];
 
@@ -457,14 +501,53 @@ internal sealed class SagaConsumerEngine
                         headers.TraceState = System.Diagnostics.Activity.Current.TraceStateString;
                     }
 
+                    if (dispatch.IsTimeout)
+                    {
+                        headers["talaria.saga.timeout"] = "true";
+                        headers["talaria.saga.timeout_version"] = (snapshot.Version + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                        headers["talaria.saga.timeout_application"] = _options.ApplicationName;
+                        headers["talaria.saga.timeout_saga"] = MessageNames.Contract(stateType);
+                        headers["talaria.retry.endpoint"] = EndpointName(route.Registration, outboundTopic);
+                        if (string.IsNullOrWhiteSpace(headers.CorrelationId))
+                        {
+                            headers.CorrelationId = correlationId;
+                        }
+                    }
+
+
+                    if (dispatch.ScheduledAt.HasValue)
+                    {
+                        headers["talaria.scheduled_due_at"] = dispatch.ScheduledAt.Value.ToString("O");
+                        Diagnostics.TalariaDiagnostics.MessagesScheduled.Add(
+                            1,
+                            new KeyValuePair<string, object?>("messaging.destination.name", outboundTopic));
+                    }
+
                     staged.Add(new OutboxMessage(
                         Guid.NewGuid(),
                         outboundTopic,
                         outboundType.AssemblyQualifiedName ?? outboundType.FullName!,
                         JsonSerializer.Serialize(outbound, outboundType),
                         headers,
-                        DateTimeOffset.UtcNow,
-                        env.PartitionKey));
+                        now,
+                        env.PartitionKey,
+                        dispatch.ScheduledAt));
+                }
+
+                var additionalReceipts = Array.Empty<string>();
+                if (result.CanceledTimeouts.Count > 0 && snapshot.Version > 0)
+                {
+                    var receipts = new List<string>();
+                    foreach (var canceledType in result.CanceledTimeouts.Distinct())
+                    {
+                        var contract = MessageNames.Contract(canceledType);
+                        for (long v = 1; v <= snapshot.Version; v++)
+                        {
+                            receipts.Add($"timeout-canceled:{contract}:v{v}");
+                        }
+                    }
+
+                    additionalReceipts = receipts.ToArray();
                 }
 
                 ownership.ThrowIfLost();
@@ -475,6 +558,7 @@ internal sealed class SagaConsumerEngine
                     snapshot.Version,
                     result.IsCompleted ? null : result.State!,
                     staged,
+                    additionalReceipts,
                     ct);
                 if (committed == SagaCommitStatus.Conflict)
                 {
@@ -482,6 +566,7 @@ internal sealed class SagaConsumerEngine
                     throw new InvalidOperationException("Saga version changed during processing; replay from fresh state.");
                 }
                 activity?.SetTag("saga.status", result.IsCompleted ? "completed" : "transitioned");
+
 
                 try
                 {

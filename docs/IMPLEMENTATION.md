@@ -12,10 +12,11 @@ This tracks the accepted roadmap. Checked items are implemented and verified; un
 - [x] Azure Service Bus topology, lifecycle, authentication, and settlement fixes.
 - [x] Readiness, failure inspection/replay, graceful shutdown, and public test harness.
 - [x] Mandatory provider integration matrix, migration guide, and executable quickstarts.
+- [x] Public scheduled-send API and declarative saga timeouts with atomic cancellation.
 
 Request/reply remains supported through the existing typed request clients. The new minimal command/event API is additive.
 
-Subsequent releases: a public scheduled-send API and saga timeouts, compensation, and Native AOT generation. Persistence in this release supports delayed retries and saga deferrals; it does not expose a general scheduling API.
+Subsequent releases: compensation workflows and Native AOT generation. Public scheduled-send (`ScheduleSendAsync`/`SchedulePublishAsync`), delayed saga dispatches (`OutboxMessage.ScheduledAt`), and declarative saga timeouts (`OnTimeout<TTimeout>`, `RequestTimeout`, `CancelTimeout`) with atomic cancellation receipts are now implemented across all persistence providers.
 
 ## Reproducing validation
 

@@ -45,6 +45,12 @@ public static class TalariaDiagnostics
         unit: "{message}",
         description: "Number of messages deferred for later processing.");
 
+    /// <summary>Counter of messages scheduled for future delivery.</summary>
+    public static readonly Counter<long> MessagesScheduled = Meter.CreateCounter<long>(
+        "talaria.messaging.scheduled",
+        unit: "{message}",
+        description: "Number of messages scheduled for future delivery.");
+
     /// <summary>Counter of messages routed to the dead-letter queue.</summary>
     public static readonly Counter<long> DlqRouted = Meter.CreateCounter<long>(
         "talaria.messaging.dlq",

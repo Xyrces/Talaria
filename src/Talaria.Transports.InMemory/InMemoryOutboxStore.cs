@@ -56,9 +56,26 @@ public sealed class InMemoryOutboxStore : IOutboxStore
         var now = DateTimeOffset.UtcNow;
         foreach (var message in messages)
         {
-            _entries.Add(new Entry(message, LeaseToken: 0, now));
+            _entries.Add(new Entry(message, LeaseToken: 0, message.ScheduledAt ?? now));
             _ids.Add(message.Id);
         }
+    }
+
+    /// <summary>Stages a single outbox message directly into the store.</summary>
+    /// <param name="message">The outbox message to stage.</param>
+    /// <param name="ct">Cancellation token.</param>
+    public Task StageAsync(OutboxMessage message, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ct.ThrowIfCancellationRequested();
+        var prepared = Prepare([message]);
+        lock (Gate)
+        {
+            EnsureCanStage(prepared);
+            StagePrepared(prepared);
+        }
+
+        return Task.CompletedTask;
     }
 
     public Task<IReadOnlyList<LeasedOutboxMessage>> AcquirePendingAsync(

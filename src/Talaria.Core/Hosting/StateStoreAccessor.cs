@@ -11,6 +11,8 @@ internal interface IStateStoreAccessor
     Task<SagaSnapshot<object>> ReadSnapshotAsync(IServiceProvider scope, string correlationId, string messageId, CancellationToken ct);
     Task<SagaCommitStatus> TryTransitionAsync(IServiceProvider scope, string correlationId, string messageId, long expectedVersion,
         object? state, IReadOnlyList<OutboxMessage> outbox, CancellationToken ct);
+    Task<SagaCommitStatus> TryTransitionAsync(IServiceProvider scope, string correlationId, string messageId, long expectedVersion,
+        object? state, IReadOnlyList<OutboxMessage> outbox, IReadOnlyList<string> additionalReceipts, CancellationToken ct);
     Task<object?> GetAsync(IServiceProvider scope, string correlationId, CancellationToken ct);
     Task SaveAsync(IServiceProvider scope, string correlationId, object state, CancellationToken ct);
     Task DeleteAsync(IServiceProvider scope, string correlationId, CancellationToken ct);
@@ -28,6 +30,10 @@ internal sealed class StateStoreAccessor<TState> : IStateStoreAccessor where TSt
     public Task<SagaCommitStatus> TryTransitionAsync(IServiceProvider scope, string id, string messageId, long expectedVersion,
         object? state, IReadOnlyList<OutboxMessage> outbox, CancellationToken ct)
         => (scope.GetService<IStateStore<TState>>() ?? scope.GetRequiredService<IStateStoreFactory>().GetStore<TState>()).TryTransitionAsync(id, messageId, expectedVersion, (TState?)state, outbox, ct);
+    public Task<SagaCommitStatus> TryTransitionAsync(IServiceProvider scope, string id, string messageId, long expectedVersion,
+        object? state, IReadOnlyList<OutboxMessage> outbox, IReadOnlyList<string> additionalReceipts, CancellationToken ct)
+        => (scope.GetService<IStateStore<TState>>() ?? scope.GetRequiredService<IStateStoreFactory>().GetStore<TState>()).TryTransitionAsync(id, messageId, expectedVersion, (TState?)state, outbox, additionalReceipts, ct);
+
     public async Task<object?> GetAsync(IServiceProvider scope, string correlationId, CancellationToken ct)
         => await (scope.GetService<IStateStore<TState>>() ?? scope.GetRequiredService<IStateStoreFactory>().GetStore<TState>()).GetAsync(correlationId, ct);
 

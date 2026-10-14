@@ -192,5 +192,32 @@ public class InMemoryOutboxStoreTests
         Assert.True(await outbox.CompleteAsync(current.Lease));
     }
 
+    [Fact]
+    public async Task AcquirePendingAsync_HidesScheduledOutboxMessage_UntilScheduledAt()
+    {
+        var store = new InMemoryOutboxStore();
+        var stateStore = new InMemoryStateStore<State>(store);
+        var now = DateTimeOffset.UtcNow;
+        var scheduledAt = now.AddMinutes(10);
+        var scheduledMessage = new OutboxMessage(
+            Guid.NewGuid(),
+            "orders-out",
+            typeof(object).AssemblyQualifiedName!,
+            "{}",
+            new MessageHeaders { MessageId = Guid.NewGuid().ToString("N") },
+            now,
+            PartitionKey: "p1",
+            ScheduledAt: scheduledAt);
+
+        await stateStore.TransitionAsync("c-scheduled", new State(), [scheduledMessage]);
+
+        Assert.Empty(await store.AcquirePendingAsync(now, Lease, maxBatch: 10));
+        Assert.Empty(await store.AcquirePendingAsync(scheduledAt.AddMilliseconds(-1), Lease, maxBatch: 10));
+
+        var due = Assert.Single(await store.AcquirePendingAsync(scheduledAt, Lease, maxBatch: 10));
+        Assert.Equal(scheduledMessage.Id, due.Message.Id);
+        Assert.Equal(scheduledAt, due.Message.ScheduledAt);
+    }
+
     private class State { public string Id { get; set; } = ""; }
 }

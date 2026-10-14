@@ -28,9 +28,13 @@ Retries are off by default. `WithRetries(attempts)` or `WithRetryPolicy(...)` pe
 
 `WithTransaction()` wraps handler execution in the registered `IMessageTransaction`. With SQL Server persistence, the endpoint transaction writes the application changes, inbox receipt, and staged outbound messages together. The SQL integration requires the application's `DbContext` to include `modelBuilder.AddTalaria()` and migrations to be applied normally. In non-transactional Talaria endpoint handlers (`MapCommand`/`MapEvent`/`ITopicConsumer<T>` without `WithTransaction()`), Talaria automatically flushes the scoped outbox (`IMessageOutbox.FlushAsync`) after the handler completes. When application code sends messages through an injected `IMessageBus` outside a Talaria endpoint handler (for example, in an HTTP endpoint or background service), that bus stages messages on the scoped outbox; call `SaveChangesAsync` on the application `DbContext` to commit those staged sends. Outside a handler, a message is not dispatched merely because `SendAsync` returned.
 
+## Scheduled messaging
+
+`IMessageBus.ScheduleSendAsync` and `IMessageBus.SchedulePublishAsync` schedule commands and events for delivery after a `TimeSpan` delay or at a `DateTimeOffset` due time (with optional explicit destination overloads). Inside a transactional handler (`WithTransaction()`) or when a scoped `IMessageOutbox` is active, scheduled messages are staged on the outbox with `ScheduledAt` and flushed atomically with the transaction; otherwise they are persisted directly in the registered `IDeferralStore` and published by the background deferral sweeper when due. In tests, `TalariaTestHost.ScheduleSendAsync` and `TalariaTestHost.SchedulePublishAsync` expose the same overloads directly on the test host.
+
 ## Roadmap boundaries
 
-Scheduled delivery and timeout APIs, richer compensation workflows, and generated Native AOT bindings remain future work. Request/reply is already available through `IRequestClient<TRequest>` and `MapRequest<TRequest,TResponse>`; it is not a planned feature gap.
+Richer compensation workflows and generated Native AOT bindings remain future work. Scheduled delivery (`ScheduleSendAsync`/`SchedulePublishAsync`), declarative saga timeouts (`OnTimeout<TTimeout>`, `RequestTimeout`, `CancelTimeout`), and request/reply (`IRequestClient<TRequest>` and `MapRequest<TRequest,TResponse>`) are available today.
 
 ## Runtime readiness and failed-message operations
 

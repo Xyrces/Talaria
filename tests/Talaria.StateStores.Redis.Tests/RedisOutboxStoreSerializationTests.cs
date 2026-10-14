@@ -80,7 +80,54 @@ public class RedisOutboxStoreSerializationTests
         Assert.Equal(message.PayloadJson, roundTripped.PayloadJson);
         Assert.Equal(message.CreatedAt, roundTripped.CreatedAt);
         Assert.Equal("order-partition-7", roundTripped.PartitionKey);
+        Assert.Null(roundTripped.ScheduledAt);
         Assert.Equal("outbox-1", roundTripped.Headers.MessageId);
+    }
+
+    [Fact]
+    public void Serialize_ThenDeserialize_RoundTripsScheduledAt()
+    {
+        var createdAt = new DateTimeOffset(2026, 10, 14, 10, 0, 0, TimeSpan.Zero);
+        var scheduledAt = createdAt.AddMinutes(30);
+        var message = new OutboxMessage(
+            Guid.NewGuid(),
+            "orders-topic",
+            "System.String",
+            "\"scheduled-outbox\"",
+            new MessageHeaders { [MessageHeaders.MessageIdKey] = "outbox-sched-1" },
+            createdAt,
+            "order-partition-7",
+            ScheduledAt: scheduledAt);
+
+        var json = InvokeSerialize(message);
+        var roundTripped = InvokeDeserialize(json);
+
+        Assert.Equal(message.Id, roundTripped.Id);
+        Assert.Equal(createdAt, roundTripped.CreatedAt);
+        Assert.Equal(scheduledAt, roundTripped.ScheduledAt);
+        Assert.Equal("order-partition-7", roundTripped.PartitionKey);
+    }
+
+    [Fact]
+    public void Deserialize_OldEntryWithoutScheduledAt_DeserializesWithNullScheduledAt()
+    {
+        var id = Guid.NewGuid();
+        var dto = new
+        {
+            id,
+            topic = "orders-topic",
+            messageType = "System.String",
+            payloadJson = "\"hello-outbox\"",
+            partitionKey = "p1",
+            headers = new Dictionary<string, string> { [MessageHeaders.MessageIdKey] = "outbox-1" },
+            createdAt = DateTimeOffset.UtcNow.AddSeconds(-5),
+        };
+
+        var json = JsonSerializer.Serialize(dto);
+        var message = InvokeDeserialize(json);
+
+        Assert.Equal(id, message.Id);
+        Assert.Null(message.ScheduledAt);
     }
 
     private static OutboxMessage InvokeDeserialize(string json)

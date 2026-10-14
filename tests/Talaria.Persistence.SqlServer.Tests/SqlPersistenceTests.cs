@@ -21,7 +21,7 @@ public sealed class SqlServerCollection : ICollectionFixture<SqlServerFixture>
 
 public sealed class SqlServerFixture : IAsyncLifetime
 {
-    private readonly MsSqlContainer _container = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-latest").Build();
+    private MsSqlContainer? _container;
     private ServiceProvider? _provider;
 
     public IServiceProvider Services => _provider ?? throw new InvalidOperationException("Fixture is not initialized.");
@@ -29,6 +29,14 @@ public sealed class SqlServerFixture : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
+        if (!DockerFactAttribute.IsDockerRunning())
+        {
+            if (Environment.GetEnvironmentVariable("TALARIA_REQUIRE_DOCKER") == "1")
+                throw new InvalidOperationException("TALARIA_REQUIRE_DOCKER=1 but Docker is unavailable.");
+            return;
+        }
+
+        _container = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-latest").Build();
         await _container.StartAsync();
         var services = new ServiceCollection();
         services.AddLogging();
@@ -64,14 +72,14 @@ public sealed class SqlServerFixture : IAsyncLifetime
     public async Task DisposeAsync()
     {
         if (_provider is not null) await _provider.DisposeAsync();
-        await _container.DisposeAsync();
+        if (_container is not null) await _container.DisposeAsync();
     }
 }
 
 [Collection(SqlServerCollection.Name)]
 public sealed class SqlPersistenceTests(SqlServerFixture fixture)
 {
-    [Fact]
+    [DockerFact]
     public async Task Application_outbox_and_business_changes_commit_or_rollback_together_and_receipt_skips_duplicate()
     {
         await fixture.ResetAsync();
@@ -127,7 +135,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         }
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Transaction_receipt_uses_retry_root_across_new_attempt_message_ids()
     {
         await fixture.ResetAsync();
@@ -197,7 +205,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         }
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Saga_transitions_enforce_versions_and_replay_completed_message_receipts()
     {
         await fixture.ResetAsync();
@@ -218,7 +226,39 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         Assert.True(snapshot.MessageProcessed);
     }
 
-    [Fact]
+    [DockerFact]
+    public async Task Saga_transition_with_additional_receipts_persists_timeout_cancellation_receipts()
+    {
+        await fixture.ResetAsync();
+        var store = fixture.Services.GetRequiredService<IStateStoreFactory>().GetStore<SagaState>();
+
+        Assert.Equal(SagaCommitStatus.Committed, await store.TryTransitionAsync(
+            "order-timeout-1",
+            "starter-msg",
+            expectedVersion: 0,
+            new SagaState { Step = 1 },
+            [],
+            default));
+
+        const string cancelReceiptKey = "timeout-canceled:Talaria.Specs.OrderTimeout:v1";
+        Assert.Equal(SagaCommitStatus.Committed, await store.TryTransitionAsync(
+            "order-timeout-1",
+            "cancel-msg",
+            expectedVersion: 1,
+            new SagaState { Step = 2 },
+            [],
+            [cancelReceiptKey],
+            default));
+
+        var cancelCheck = await store.ReadSnapshotAsync("order-timeout-1", cancelReceiptKey, default);
+        Assert.True(cancelCheck.MessageProcessed);
+        Assert.Equal(2, cancelCheck.Version);
+        Assert.NotNull(cancelCheck.State);
+        Assert.Equal(2, cancelCheck.State!.Step);
+    }
+
+
+    [DockerFact]
     public async Task Outbox_lease_token_fences_stale_completion_and_abandonment()
     {
         await fixture.ResetAsync();
@@ -258,7 +298,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         Assert.True(await store.CompleteAsync(third.Lease));
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Inbox_lease_expiration_fences_stale_release_renew_and_completion()
     {
         await fixture.ResetAsync();
@@ -278,7 +318,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         Assert.Equal(IdempotencyStatus.Completed, (await store.AcquireAsync("message-1", "orders", TimeSpan.FromSeconds(5))).Status);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Inbox_keys_and_lease_operations_are_scoped_to_application()
     {
         await fixture.ResetAsync();
@@ -338,7 +378,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         await storeB.MarkCompleteAsync(Assert.IsType<IdempotencyLock>(firstInB.Lock));
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Failed_messages_are_application_scoped_and_can_be_listed_and_deleted()
     {
         await fixture.ResetAsync();
@@ -360,7 +400,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         Assert.False(await failed.DeleteAsync(message.Id));
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Talaria_objects_use_dbo_when_application_context_has_a_default_schema()
     {
         await fixture.ResetAsync();
@@ -380,7 +420,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
             entity => Assert.Equal("dbo", entity.GetSchema()));
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Due_deferrals_are_acquired_under_read_committed_snapshot()
     {
         await fixture.ResetAsync();
@@ -396,7 +436,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         Assert.True(await store.CompleteAsync(leased.Lease));
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Transactional_command_shares_scoped_db_context_and_publishes_only_committed_messages()
     {
         await fixture.ResetAsync();
@@ -469,7 +509,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         }
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Outbox_rejects_invalid_lease_parameters()
     {
         await fixture.ResetAsync();
@@ -488,7 +528,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         Assert.Throws<InvalidOperationException>(() => builder.UseSqlServerPersistence<TestDbContext>());
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Given_NonTransactionalCommandHandlerPublishingViaMessageBus_When_MessageIsConsumedWithSqlServerPersistence_Then_StagedOutboxMessageIsFlushedAndRelayed()
     {
         await fixture.ResetAsync();
@@ -532,7 +572,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         }
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Given_MultipleFailedMessagesAtDifferentTimestamps_When_ListingFromSqlFailedMessageStore_Then_ReturnsNewestFirst()
     {
         await fixture.ResetAsync();
@@ -553,7 +593,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         Assert.Equal(newer.Id, topOne.Id);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Given_CrossAppDeferralsMissingSagaAndExpiredRows_When_EnqueuingDeletingAndPruning_Then_IsolatesAppsDoesNotTombstoneAndPrunesExpiredRows()
     {
         await fixture.ResetAsync();
@@ -615,6 +655,85 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
             Assert.True(await db.Set<TalariaReceiptRow>().AnyAsync(x => x.Id == "active-receipt"));
             Assert.False(await db.Set<TalariaSagaRow>().AnyAsync(x => x.Id == "expired-saga"));
             Assert.True(await db.Set<TalariaSagaRow>().AnyAsync(x => x.Id == "active-saga"));
+        }
+    }
+
+    [DockerFact]
+    public async Task Given_TransactionalHandlerCallingScheduleSendAsync_When_CommittedOrRolledBack_Then_StagesWithScheduledVisibilityAndRollsBackOnFailure()
+    {
+        await fixture.ResetAsync();
+        var transport = new InMemoryTransport();
+        var dueAt = DateTimeOffset.UtcNow.AddMinutes(10);
+        var host = Host.CreateDefaultBuilder()
+            .ConfigureLogging(logging => logging.ClearProviders())
+            .ConfigureServices(services =>
+            {
+                services.AddDbContext<TestDbContext>(options => options.UseSqlServer(fixture.ConnectionString, sql =>
+                    sql.EnableRetryOnFailure(3, TimeSpan.FromSeconds(2), null)));
+                services.AddTalaria(options =>
+                {
+                    options.ApplicationName = "sql-scheduled-tx-tests";
+                    options.OutboxRelayInterval = TimeSpan.FromHours(1); // Manual AcquirePendingAsync verification
+                    options.OutboxLeaseTimeout = TimeSpan.FromSeconds(30);
+                })
+                .UseTransport(transport)
+                .UseSqlServerPersistence<TestDbContext>();
+            }).Build();
+
+        try
+        {
+            host.MapCommand<PlaceOrderCommand>(async (PlaceOrderCommand message, TestDbContext db, IMessageBus bus) =>
+            {
+                db.BusinessRows.Add(new BusinessRow { Id = message.Id, Value = message.Fail ? "failed" : "scheduled-ok" });
+                await bus.ScheduleSendAsync(new OrderPlaced(message.Id), dueAt);
+                if (message.Fail)
+                {
+                    throw new InvalidOperationException("rollback scheduled message");
+                }
+            }).WithTransaction();
+
+            await host.StartAsync();
+            var commandTopic = MessageNames.Destination(MessageNames.Contract(typeof(PlaceOrderCommand)));
+            await using var producer = await transport.CreateProducerAsync<PlaceOrderCommand>(commandTopic, new ProducerOptions());
+
+            // 1. Committed command stages scheduled outbox message atomically with DbContext row
+            await producer.ProduceAsync(new PlaceOrderCommand(501, false), new MessageHeaders { MessageId = "sched-tx-501" });
+            await EventuallyAsync(async () =>
+            {
+                await using var scope = host.Services.CreateAsyncScope();
+                var db = scope.ServiceProvider.GetRequiredService<TestDbContext>();
+                return await db.BusinessRows.AnyAsync(r => r.Id == 501);
+            }, TimeSpan.FromSeconds(10));
+
+            // 2. Failing command rolls back both DbContext row and scheduled outbox message
+            await producer.ProduceAsync(new PlaceOrderCommand(502, true), new MessageHeaders { MessageId = "sched-tx-502" });
+            await EventuallyAsync(async () =>
+                (await transport.ReadAllFromTopicAsync<PlaceOrderCommand>(commandTopic + ".dlq")).Any(m => m.Payload.Id == 502),
+                TimeSpan.FromSeconds(10));
+
+            var outboxStore = host.Services.GetRequiredService<IOutboxStore>();
+
+            // Hidden before dueAt
+            Assert.Empty(await outboxStore.AcquirePendingAsync(dueAt.AddMinutes(-1), TimeSpan.FromSeconds(30), 10));
+
+            // Visible at dueAt, and only the committed message (501) exists
+            var acquired = Assert.Single(await outboxStore.AcquirePendingAsync(dueAt, TimeSpan.FromSeconds(30), 10));
+            Assert.Contains("501", acquired.Message.PayloadJson);
+            Assert.Equal(dueAt, acquired.Message.ScheduledAt);
+            Assert.True(await outboxStore.CompleteAsync(acquired.Lease));
+
+            await using (var verifyScope = host.Services.CreateAsyncScope())
+            {
+                var db = verifyScope.ServiceProvider.GetRequiredService<TestDbContext>();
+                var row = await db.BusinessRows.SingleAsync();
+                Assert.Equal(501, row.Id);
+                Assert.Equal("scheduled-ok", row.Value);
+            }
+        }
+        finally
+        {
+            await host.StopAsync();
+            host.Dispose();
         }
     }
 
@@ -680,4 +799,41 @@ public sealed class BusinessRow
 {
     public int Id { get; set; }
     public string Value { get; set; } = "";
+}
+
+public sealed class SqlScheduledOutboxUnitTests
+{
+    private sealed record ScheduledOrderCommand(int Id);
+
+    [Fact]
+    public async Task Given_SqlServerPersistence_When_ScheduleSendAsyncCalled_Then_StagesTalariaMessageRowWithVisibleAtEqualToDueAt()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddDbContext<TestDbContext>(options =>
+            options.UseSqlServer("Server=localhost;Database=TalariaUnitTest;TrustServerCertificate=True"));
+        services.AddTalaria(options => options.ApplicationName = "sql-unit-scheduled")
+            .UseTransport(new InMemoryTransport())
+            .UseSqlServerPersistence<TestDbContext>();
+
+        await using var provider = services.BuildServiceProvider();
+        await using var scope = provider.CreateAsyncScope();
+        var bus = scope.ServiceProvider.GetRequiredService<IMessageBus>();
+        var db = scope.ServiceProvider.GetRequiredService<TestDbContext>();
+
+        var dueAt = new DateTimeOffset(2026, 10, 14, 18, 0, 0, TimeSpan.Zero);
+        await bus.ScheduleSendAsync(new ScheduledOrderCommand(99), dueAt);
+
+        var entry = Assert.Single(db.ChangeTracker.Entries<TalariaMessageRow>());
+        Assert.Equal(EntityState.Added, entry.State);
+        Assert.Equal(0, entry.Entity.Kind);
+        Assert.Equal("sql-unit-scheduled", entry.Entity.Application);
+        Assert.Equal(dueAt, entry.Entity.VisibleAt);
+
+        var deserialized = System.Text.Json.JsonSerializer.Deserialize<OutboxMessage>(entry.Entity.Data);
+        Assert.NotNull(deserialized);
+        Assert.Equal(dueAt, deserialized!.ScheduledAt);
+        Assert.Equal("command", deserialized.Headers["talaria.intent"]);
+        Assert.Equal(dueAt.ToString("O"), deserialized.Headers["talaria.scheduled_due_at"]);
+    }
 }

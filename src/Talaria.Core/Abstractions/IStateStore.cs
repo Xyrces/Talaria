@@ -22,6 +22,39 @@ public interface IStateStore<TState> where TState : class, new()
     Task<SagaSnapshot<TState>> ReadSnapshotAsync(string correlationId, string messageId, CancellationToken ct = default);
     Task<SagaCommitStatus> TryTransitionAsync(string correlationId, string messageId, long expectedVersion,
         TState? newState, IReadOnlyList<OutboxMessage> outbox, CancellationToken ct = default);
+
+    /// <summary>
+    /// Atomically transitions the saga state from <paramref name="expectedVersion"/>, stages outbound messages,
+    /// and records additional processed-message receipts (such as timeout cancellation tokens).
+    /// </summary>
+    /// <param name="correlationId">The saga instance key.</param>
+    /// <param name="messageId">The idempotency receipt key for the current message.</param>
+    /// <param name="expectedVersion">The expected saga state version prior to the transition.</param>
+    /// <param name="newState">The next state, or null when the saga completes.</param>
+    /// <param name="outbox">Outbound messages to stage atomically with the transition.</param>
+    /// <param name="additionalReceipts">Additional receipt keys to mark as processed atomically with the transition.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>The commit status of the transition attempt.</returns>
+    Task<SagaCommitStatus> TryTransitionAsync(
+        string correlationId,
+        string messageId,
+        long expectedVersion,
+        TState? newState,
+        IReadOnlyList<OutboxMessage> outbox,
+        IReadOnlyList<string> additionalReceipts,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(additionalReceipts);
+        if (additionalReceipts.Any(static r => !string.IsNullOrWhiteSpace(r)))
+        {
+            throw new NotSupportedException(
+                $"State store '{GetType().Name}' does not support atomic persistence of additional receipts required for saga timeout cancellation.");
+        }
+
+        return TryTransitionAsync(correlationId, messageId, expectedVersion, newState, outbox, ct);
+    }
+
+
     /// <summary>
     /// Retrieves the current state for the given correlation ID, or null if not found.
     /// </summary>

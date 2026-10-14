@@ -30,6 +30,10 @@ internal sealed class SqlSagaStore<TDb, TState>(DatabaseWork<TDb> database, Tala
 
     public Task<SagaCommitStatus> TryTransitionAsync(string correlationId, string messageId, long expectedVersion,
         TState? newState, IReadOnlyList<OutboxMessage> outbox, CancellationToken ct = default)
+        => TryTransitionAsync(correlationId, messageId, expectedVersion, newState, outbox, Array.Empty<string>(), ct);
+
+    public Task<SagaCommitStatus> TryTransitionAsync(string correlationId, string messageId, long expectedVersion,
+        TState? newState, IReadOnlyList<OutboxMessage> outbox, IReadOnlyList<string> additionalReceipts, CancellationToken ct = default)
         => database.Run(async (db, token) =>
         {
             var id = Key(correlationId);
@@ -48,9 +52,18 @@ internal sealed class SqlSagaStore<TDb, TState>(DatabaseWork<TDb> database, Tala
             row.Version = version + 1; row.Completed = newState is null; row.ExpiresAt = now.AddDays(30);
             if (receipt is null) db.Add(receipt = new TalariaReceiptRow { Id = receiptId });
             receipt.ExpiresAt = now.AddDays(30);
+            foreach (var extra in additionalReceipts.Where(static r => !string.IsNullOrWhiteSpace(r)).Distinct(StringComparer.Ordinal))
+            {
+                var extraReceiptId = Receipt(id, extra);
+                if (string.Equals(extraReceiptId, receiptId, StringComparison.Ordinal)) continue;
+                var extraReceipt = await db.Set<TalariaReceiptRow>().SingleOrDefaultAsync(x => x.Id == extraReceiptId, token);
+                if (extraReceipt is null) db.Add(extraReceipt = new TalariaReceiptRow { Id = extraReceiptId });
+                extraReceipt.ExpiresAt = now.AddDays(30);
+            }
             foreach (var message in outbox) db.Add(SqlMessageStore<TDb>.Outbox(message, options.ApplicationName));
             return SagaCommitStatus.Committed;
         }, ct);
+
 
     public async Task<TState?> GetAsync(string correlationId, CancellationToken ct = default)
         => (await ReadSnapshotAsync(correlationId, "", ct)).State;

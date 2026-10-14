@@ -74,6 +74,34 @@ public class RedisStateStoreIntegrationTests : IAsyncLifetime
         Assert.Equal("first", (await stateStore.GetAsync("x"))!.Value);
         Assert.Equal("second", (await stateStore.GetAsync("x:history"))!.Value);
     }
+
+    [DockerFact]
+    public async Task TryTransitionAsync_WithAdditionalReceipts_PersistsTimeoutCancellationReceipts()
+    {
+        var stateStore = _serviceProvider.GetRequiredService<IStateStore<DummyState>>();
+        var correlationId = Guid.NewGuid().ToString("N");
+
+        Assert.Equal(SagaCommitStatus.Committed, await stateStore.TryTransitionAsync(
+            correlationId,
+            "starter-1",
+            expectedVersion: 0,
+            new DummyState { Value = "started", StepCount = 1 },
+            []));
+
+        const string cancelReceipt = "timeout-canceled:Talaria.Specs.OrderTimeout:v1";
+        Assert.Equal(SagaCommitStatus.Committed, await stateStore.TryTransitionAsync(
+            correlationId,
+            "cancel-1",
+            expectedVersion: 1,
+            new DummyState { Value = "canceled", StepCount = 2 },
+            [],
+            [cancelReceipt]));
+
+        var snapshot = await stateStore.ReadSnapshotAsync(correlationId, cancelReceipt);
+        Assert.True(snapshot.MessageProcessed);
+        Assert.Equal(2, snapshot.Version);
+        Assert.Equal("canceled", snapshot.State?.Value);
+    }
     
     public class DummyState
     {
@@ -81,3 +109,4 @@ public class RedisStateStoreIntegrationTests : IAsyncLifetime
         public int StepCount { get; set; }
     }
 }
+
