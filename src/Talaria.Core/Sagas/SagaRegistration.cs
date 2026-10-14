@@ -36,6 +36,9 @@ public class SagaStepRegistration
     /// <summary>True for steps that start a new saga instance; false for transitions.</summary>
     public required bool IsStarter { get; init; }
 
+    /// <summary>True for steps that handle a scheduled saga timeout message.</summary>
+    public bool IsTimeout { get; init; }
+
     // The generic delegate signature for executing the step from TalariaListener:
     // Task<SagaResult<object>> Execute(object? state, object payload, ISagaContext<object> context)
     /// <summary>The erased async handler invoked for each delivered message.</summary>

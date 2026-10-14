@@ -219,6 +219,38 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public async Task Saga_transition_with_additional_receipts_persists_timeout_cancellation_receipts()
+    {
+        await fixture.ResetAsync();
+        var store = fixture.Services.GetRequiredService<IStateStoreFactory>().GetStore<SagaState>();
+
+        Assert.Equal(SagaCommitStatus.Committed, await store.TryTransitionAsync(
+            "order-timeout-1",
+            "starter-msg",
+            expectedVersion: 0,
+            new SagaState { Step = 1 },
+            [],
+            default));
+
+        const string cancelReceiptKey = "timeout-canceled:Talaria.Specs.OrderTimeout:v1";
+        Assert.Equal(SagaCommitStatus.Committed, await store.TryTransitionAsync(
+            "order-timeout-1",
+            "cancel-msg",
+            expectedVersion: 1,
+            new SagaState { Step = 2 },
+            [],
+            [cancelReceiptKey],
+            default));
+
+        var cancelCheck = await store.ReadSnapshotAsync("order-timeout-1", cancelReceiptKey, default);
+        Assert.True(cancelCheck.MessageProcessed);
+        Assert.Equal(2, cancelCheck.Version);
+        Assert.NotNull(cancelCheck.State);
+        Assert.Equal(2, cancelCheck.State!.Step);
+    }
+
+
+    [Fact]
     public async Task Outbox_lease_token_fences_stale_completion_and_abandonment()
     {
         await fixture.ResetAsync();

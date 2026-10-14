@@ -41,4 +41,54 @@ public class SagaConfiguratorTests
         var handler = reg.Registrations[0].Steps[0].Handler;
         await Assert.ThrowsAsync<InvalidOperationException>(() => handler(null!, new TestMessage(), new SagaContext<object>()));
     }
+
+    private sealed class TestTimeoutMessage
+    {
+        public string CorrelationId { get; set; } = "123";
+    }
+
+    [Fact]
+    public void OnTimeout_WithoutTopic_UsesConventionTopicAndRegistersDispatchTopicAutomatically()
+    {
+        var reg = new SagaRegistry();
+        var config = new SagaConfigurator<TestState>(reg);
+
+        config.OnTimeout<TestTimeoutMessage>((state, _, ctx) => Task.FromResult(ctx.Transition(state)));
+        config.Complete();
+
+        var registration = Assert.Single(reg.Registrations);
+        var step = Assert.Single(registration.Steps);
+        var expectedTopic = Talaria.Core.Registration.MessageNames.Destination(
+            Talaria.Core.Registration.MessageNames.Contract(typeof(TestTimeoutMessage)));
+
+        Assert.Equal(expectedTopic, step.TopicName);
+        Assert.Equal(typeof(TestTimeoutMessage), step.MessageType);
+        Assert.False(step.IsStarter);
+        Assert.True(step.IsTimeout);
+        Assert.True(registration.DispatchTopics.TryGetValue(typeof(TestTimeoutMessage), out var dispatchTopic));
+        Assert.Equal(expectedTopic, dispatchTopic);
+    }
+
+    [Fact]
+    public void OnTimeout_WithExplicitTopic_UsesExplicitTopicInStepAndDispatchTopics()
+    {
+        var reg = new SagaRegistry();
+        var config = new SagaConfigurator<TestState>(reg);
+
+        config.OnTimeout<TestTimeoutMessage>(
+            "custom-timeout-topic",
+            (state, _, ctx) => Task.FromResult(ctx.Transition(state)),
+            correlateBy: m => m.CorrelationId);
+        config.Complete();
+
+        var registration = Assert.Single(reg.Registrations);
+        var step = Assert.Single(registration.Steps);
+
+        Assert.Equal("custom-timeout-topic", step.TopicName);
+        Assert.True(step.IsTimeout);
+        Assert.False(step.IsStarter);
+        Assert.NotNull(step.CorrelationResolver);
+        Assert.Equal("custom-timeout-topic", registration.DispatchTopics[typeof(TestTimeoutMessage)]);
+    }
 }
+

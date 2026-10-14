@@ -46,9 +46,15 @@ public sealed class InMemoryStateStore<TState> : IStateStore<TState>
 
     public Task<SagaCommitStatus> TryTransitionAsync(string correlationId, string messageId, long expectedVersion,
         TState? newState, IReadOnlyList<OutboxMessage> outbox, CancellationToken ct = default)
+        => TryTransitionAsync(correlationId, messageId, expectedVersion, newState, outbox, Array.Empty<string>(), ct);
+
+    /// <inheritdoc />
+    public Task<SagaCommitStatus> TryTransitionAsync(string correlationId, string messageId, long expectedVersion,
+        TState? newState, IReadOnlyList<OutboxMessage> outbox, IReadOnlyList<string> additionalReceipts, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(outbox);
+        ArgumentNullException.ThrowIfNull(additionalReceipts);
         var snapshot = Clone(newState); // Serialization must succeed before any state changes.
         if (outbox.Count > 0 && _outbox is null) throw new InvalidOperationException("Saga dispatch requires an outbox in the same persistence store.");
         var staged = _outbox is null ? Array.Empty<OutboxMessage>() : InMemoryOutboxStore.Prepare(outbox);
@@ -63,10 +69,18 @@ public sealed class InMemoryStateStore<TState> : IStateStore<TState>
             history.Version++;
             history.Completed = newState is null;
             history.Messages.Add(messageId);
+            foreach (var extra in additionalReceipts)
+            {
+                if (!string.IsNullOrWhiteSpace(extra))
+                {
+                    history.Messages.Add(extra);
+                }
+            }
             history.Expires = _time.GetUtcNow().AddDays(30);
             return Task.FromResult(SagaCommitStatus.Committed);
         }
     }
+
 
     private History? TryGetHistory(string id)
     {
