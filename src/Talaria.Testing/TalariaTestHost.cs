@@ -152,6 +152,34 @@ public sealed class TalariaTestHost : IAsyncDisposable
         await scope.ServiceProvider.GetRequiredService<IMessageBus>().PublishAsync(message, ct);
     }
 
+    /// <summary>Schedules a command to be sent to its mapped endpoint after the specified delay.</summary>
+    public async Task ScheduleSendAsync<T>(T command, TimeSpan delay, CancellationToken ct = default)
+    {
+        await using var scope = _host.Services.CreateAsyncScope();
+        await scope.ServiceProvider.GetRequiredService<IMessageBus>().ScheduleSendAsync(command, delay, ct);
+    }
+
+    /// <summary>Schedules a command to be sent to its mapped endpoint at or after the specified UTC due time.</summary>
+    public async Task ScheduleSendAsync<T>(T command, DateTimeOffset dueAt, CancellationToken ct = default)
+    {
+        await using var scope = _host.Services.CreateAsyncScope();
+        await scope.ServiceProvider.GetRequiredService<IMessageBus>().ScheduleSendAsync(command, dueAt, ct);
+    }
+
+    /// <summary>Schedules an event to be published to all subscribers after the specified delay.</summary>
+    public async Task SchedulePublishAsync<T>(T message, TimeSpan delay, CancellationToken ct = default)
+    {
+        await using var scope = _host.Services.CreateAsyncScope();
+        await scope.ServiceProvider.GetRequiredService<IMessageBus>().SchedulePublishAsync(message, delay, ct);
+    }
+
+    /// <summary>Schedules an event to be published to all subscribers at or after the specified UTC due time.</summary>
+    public async Task SchedulePublishAsync<T>(T message, DateTimeOffset dueAt, CancellationToken ct = default)
+    {
+        await using var scope = _host.Services.CreateAsyncScope();
+        await scope.ServiceProvider.GetRequiredService<IMessageBus>().SchedulePublishAsync(message, dueAt, ct);
+    }
+
     /// <summary>Waits for a handled message of the requested type, failing within the supplied bound.</summary>
     public Task<T> ReceiveAsync<T>(TimeSpan timeout, CancellationToken ct = default)
     {

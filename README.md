@@ -36,12 +36,13 @@ Talaria provides **at-least-once delivery with idempotent processing**:
 ## Core Features
 
 - **Decoupled architecture:** provider-agnostic abstractions (`ITransport`, `IMessageBus`, `IMessageOutbox`, `IMessageTransaction`, `IStateStore<TState>`, `IStateStoreFactory`, `IIdempotencyStore`, `IDeferralStore`, `IOutboxStore`, `IFailedMessageStore`, `IFailedMessages`, `ITopologyProvisioner`, `IConsumerReadiness`, `IDeadLetterHandler`) with Kafka, RabbitMQ, Azure Service Bus, Redis, SQL Server/EF Core, and in-memory implementations.
-- **Saga orchestration:** strongly typed state machines via `MapSaga<TState>` with explicit correlation and explicit dispatch routing (`DispatchTo`).
+- **Saga orchestration:** strongly typed state machines via `MapSaga<TState>` with explicit correlation, explicit dispatch routing (`DispatchTo`), delayed dispatches, and declarative saga timeouts (`OnTimeout<TTimeout>`, `RequestTimeout`, `CancelTimeout`) with atomic cancellation receipts.
+- **Scheduled messaging:** public delayed and due-time delivery via `IMessageBus.ScheduleSendAsync` and `IMessageBus.SchedulePublishAsync` (plus `TalariaTestHost` helpers), backed by the transactional outbox when inside `WithTransaction()` or the durable `IDeferralStore` otherwise.
 - **Idempotency:** fencing-token locks with active background lease renewal (`ProcessingLease`) filter duplicate `MessageId`s across a cluster; a stale lock holder can never release or complete another worker's lock.
 - **Transactional outbox:** saga state transitions and their outbound messages are staged atomically (single Lua script on Redis, database transaction on SQL Server, one shared lock in-memory); a background relay publishes staged messages with lease + fencing semantics. Registered automatically by `UseRedisPersistence()`, `UseSqlServerPersistence<TDb>()`, and `UseInMemory()` (or `UseRedisStateStore()` / `UseInMemoryStateStore()`).
 - **Durable deferral:** out-of-order saga messages (a step arriving before the starter) are persisted in an `IDeferralStore` (Redis sorted set, SQL Server table, or in-memory) and republished by a background sweeper using visibility-timeout leases; they survive restarts and sweeper crashes, unlike an in-process timer.
 - **Delayed retries:** topic handlers and saga step handlers can opt in to a configurable number of fixed or exponential backoff retries before routing to the DLQ. The built-in default `TalariaOptions.DefaultRetryPolicy` has `MaxRetryAttempts = 0`, so delayed retries are opt-in. Retry copies are persisted in the same `IDeferralStore` as saga deferrals and republished by the sweeper, preserving the original partition key and tracking attempts via `talaria.retry.attempt` / `talaria.retry.root_message_id` headers.
-- **Observability:** OpenTelemetry-native traces and metrics with W3C trace-context propagation across produce/consume boundaries. Includes relay monitoring: `talaria.outbox.*` / `talaria.deferral.*` counters and histograms for published/failed entries, re-acquisitions (lease expiry signal), active leases, and relay lag. Retries emit `talaria.messaging.retry.scheduled`, `talaria.messaging.retry.exhausted`, and `talaria.messaging.retry.delay`.
+- **Observability:** OpenTelemetry-native traces and metrics with W3C trace-context propagation across produce/consume boundaries. Includes relay monitoring: `talaria.outbox.*` / `talaria.deferral.*` counters and histograms for published/failed entries, re-acquisitions (lease expiry signal), active leases, and relay lag. Scheduled deliveries and retries emit `talaria.messaging.scheduled`, `talaria.messaging.retry.scheduled`, `talaria.messaging.retry.exhausted`, and `talaria.messaging.retry.delay`.
 - **Dead-letter resiliency:** automatic DLQ routing (suffix configurable via `DlqSuffix` on the transport-specific options, default `.dlq`) for handler exceptions, deserialization failures, missing correlation ids, unmapped dispatches, exceeded hop/deferral thresholds, exhausted retries (`retries_exhausted`), and retry misconfiguration (`retry_unavailable`). Exception detail in DLQ headers is gated behind `TalariaOptions.IncludeExceptionDetailsInDlq` (off by default).
 
 ---
@@ -293,20 +294,31 @@ services.MapSaga<OnboardingState>(saga =>
                 AccountId = msg.AccountId,
                 Email = msg.Email
             });
+            context.RequestTimeout(
+                new VerificationExpiredTimeout(msg.AccountId),
+                TimeSpan.FromHours(24));
 
             return context.Transition(state); // persist state, await the next event
         },
         correlateBy: msg => msg.AccountId);
 
-    // Follow-up step: correlates onto the existing state.
+    // Follow-up step: correlates onto the existing state and cancels any pending timeout.
     saga.On<AccountVerifiedEvent>(
         "account-events",
         async (state, msg, context) =>
         {
             state.VerificationReceived = true;
+            context.CancelTimeout<VerificationExpiredTimeout>();
             return context.Complete(); // finalize and purge state
         },
         correlateBy: msg => msg.AccountId);
+
+    // Declarative timeout step: auto-registers the convention destination unless a topic is specified.
+    saga.OnTimeout<VerificationExpiredTimeout>(
+        async (state, timeout, context) =>
+        {
+            return context.Complete();
+        });
 
     // Explicit dispatch routing: every dispatched message type must declare its topic.
     saga.DispatchTo<SendVerificationEmailCommand>("email-commands");
@@ -315,9 +327,10 @@ services.MapSaga<OnboardingState>(saga =>
 
 Notes:
 
-- `context.Transition(state)` persists the state; `context.Complete()` deletes it; `context.Defer()` reschedules the current message via the deferral store (any dispatches queued in the same handler invocation are discarded).
-- Dispatches are staged in the transactional outbox atomically with the state transition and published asynchronously by the relay. Expect a small relay-latency delay (poll interval configurable via `TalariaOptions.OutboxRelayInterval`, default 250ms).
-- Dispatching a message type with no `DispatchTo` mapping dead-letters the triggering message (`unmapped_dispatch`) without saving state.
+- `context.Transition(state)` persists the state; `context.Complete()` deletes it; `context.Defer()` reschedules the current message via the deferral store (any dispatches or timeout requests/cancellations queued in the same handler invocation are discarded).
+- `context.Dispatch(message, delay)` and `context.Dispatch(message, dueAt)` schedule outbound saga messages via `OutboxMessage.ScheduledAt`. `context.RequestTimeout(timeout, delay)` stages a correlated timeout message, and `context.CancelTimeout<TTimeout>()` records an atomic cancellation receipt in `IStateStore<TState>.TryTransitionAsync` so an already-in-flight timeout becomes a no-op on arrival.
+- Dispatches and timeout requests are staged in the transactional outbox atomically with the state transition and published asynchronously by the relay when due. Expect a small relay-latency delay (poll interval configurable via `TalariaOptions.OutboxRelayInterval`, default 250ms).
+- Dispatching a message type with no `DispatchTo` mapping dead-letters the triggering message (`unmapped_dispatch`) without saving state (`OnTimeout<TTimeout>` automatically registers the timeout contract's convention destination in `DispatchTo` when no explicit topic is passed).
 - Multiple saga steps (and stateless handlers) may share one topic; messages are fanned out by a `talaria.message_type` header.
 
 ### Host-agnostic usage (console apps / custom composition roots)

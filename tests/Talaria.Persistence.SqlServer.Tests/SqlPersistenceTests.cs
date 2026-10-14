@@ -21,7 +21,7 @@ public sealed class SqlServerCollection : ICollectionFixture<SqlServerFixture>
 
 public sealed class SqlServerFixture : IAsyncLifetime
 {
-    private readonly MsSqlContainer _container = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-latest").Build();
+    private MsSqlContainer? _container;
     private ServiceProvider? _provider;
 
     public IServiceProvider Services => _provider ?? throw new InvalidOperationException("Fixture is not initialized.");
@@ -29,6 +29,14 @@ public sealed class SqlServerFixture : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
+        if (!DockerFactAttribute.IsDockerRunning())
+        {
+            if (Environment.GetEnvironmentVariable("TALARIA_REQUIRE_DOCKER") == "1")
+                throw new InvalidOperationException("TALARIA_REQUIRE_DOCKER=1 but Docker is unavailable.");
+            return;
+        }
+
+        _container = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-latest").Build();
         await _container.StartAsync();
         var services = new ServiceCollection();
         services.AddLogging();
@@ -64,14 +72,14 @@ public sealed class SqlServerFixture : IAsyncLifetime
     public async Task DisposeAsync()
     {
         if (_provider is not null) await _provider.DisposeAsync();
-        await _container.DisposeAsync();
+        if (_container is not null) await _container.DisposeAsync();
     }
 }
 
 [Collection(SqlServerCollection.Name)]
 public sealed class SqlPersistenceTests(SqlServerFixture fixture)
 {
-    [Fact]
+    [DockerFact]
     public async Task Application_outbox_and_business_changes_commit_or_rollback_together_and_receipt_skips_duplicate()
     {
         await fixture.ResetAsync();
@@ -127,7 +135,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         }
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Transaction_receipt_uses_retry_root_across_new_attempt_message_ids()
     {
         await fixture.ResetAsync();
@@ -197,7 +205,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         }
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Saga_transitions_enforce_versions_and_replay_completed_message_receipts()
     {
         await fixture.ResetAsync();
@@ -218,7 +226,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         Assert.True(snapshot.MessageProcessed);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Saga_transition_with_additional_receipts_persists_timeout_cancellation_receipts()
     {
         await fixture.ResetAsync();
@@ -250,7 +258,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
     }
 
 
-    [Fact]
+    [DockerFact]
     public async Task Outbox_lease_token_fences_stale_completion_and_abandonment()
     {
         await fixture.ResetAsync();
@@ -290,7 +298,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         Assert.True(await store.CompleteAsync(third.Lease));
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Inbox_lease_expiration_fences_stale_release_renew_and_completion()
     {
         await fixture.ResetAsync();
@@ -310,7 +318,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         Assert.Equal(IdempotencyStatus.Completed, (await store.AcquireAsync("message-1", "orders", TimeSpan.FromSeconds(5))).Status);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Inbox_keys_and_lease_operations_are_scoped_to_application()
     {
         await fixture.ResetAsync();
@@ -370,7 +378,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         await storeB.MarkCompleteAsync(Assert.IsType<IdempotencyLock>(firstInB.Lock));
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Failed_messages_are_application_scoped_and_can_be_listed_and_deleted()
     {
         await fixture.ResetAsync();
@@ -392,7 +400,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         Assert.False(await failed.DeleteAsync(message.Id));
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Talaria_objects_use_dbo_when_application_context_has_a_default_schema()
     {
         await fixture.ResetAsync();
@@ -412,7 +420,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
             entity => Assert.Equal("dbo", entity.GetSchema()));
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Due_deferrals_are_acquired_under_read_committed_snapshot()
     {
         await fixture.ResetAsync();
@@ -428,7 +436,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         Assert.True(await store.CompleteAsync(leased.Lease));
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Transactional_command_shares_scoped_db_context_and_publishes_only_committed_messages()
     {
         await fixture.ResetAsync();
@@ -501,7 +509,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         }
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Outbox_rejects_invalid_lease_parameters()
     {
         await fixture.ResetAsync();
@@ -520,7 +528,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         Assert.Throws<InvalidOperationException>(() => builder.UseSqlServerPersistence<TestDbContext>());
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Given_NonTransactionalCommandHandlerPublishingViaMessageBus_When_MessageIsConsumedWithSqlServerPersistence_Then_StagedOutboxMessageIsFlushedAndRelayed()
     {
         await fixture.ResetAsync();
@@ -564,7 +572,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         }
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Given_MultipleFailedMessagesAtDifferentTimestamps_When_ListingFromSqlFailedMessageStore_Then_ReturnsNewestFirst()
     {
         await fixture.ResetAsync();
@@ -585,7 +593,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         Assert.Equal(newer.Id, topOne.Id);
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Given_CrossAppDeferralsMissingSagaAndExpiredRows_When_EnqueuingDeletingAndPruning_Then_IsolatesAppsDoesNotTombstoneAndPrunesExpiredRows()
     {
         await fixture.ResetAsync();
@@ -650,7 +658,7 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         }
     }
 
-    [Fact]
+    [DockerFact]
     public async Task Given_TransactionalHandlerCallingScheduleSendAsync_When_CommittedOrRolledBack_Then_StagesWithScheduledVisibilityAndRollsBackOnFailure()
     {
         await fixture.ResetAsync();
