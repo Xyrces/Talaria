@@ -618,6 +618,85 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         }
     }
 
+    [Fact]
+    public async Task Given_TransactionalHandlerCallingScheduleSendAsync_When_CommittedOrRolledBack_Then_StagesWithScheduledVisibilityAndRollsBackOnFailure()
+    {
+        await fixture.ResetAsync();
+        var transport = new InMemoryTransport();
+        var dueAt = DateTimeOffset.UtcNow.AddMinutes(10);
+        var host = Host.CreateDefaultBuilder()
+            .ConfigureLogging(logging => logging.ClearProviders())
+            .ConfigureServices(services =>
+            {
+                services.AddDbContext<TestDbContext>(options => options.UseSqlServer(fixture.ConnectionString, sql =>
+                    sql.EnableRetryOnFailure(3, TimeSpan.FromSeconds(2), null)));
+                services.AddTalaria(options =>
+                {
+                    options.ApplicationName = "sql-scheduled-tx-tests";
+                    options.OutboxRelayInterval = TimeSpan.FromHours(1); // Manual AcquirePendingAsync verification
+                    options.OutboxLeaseTimeout = TimeSpan.FromSeconds(30);
+                })
+                .UseTransport(transport)
+                .UseSqlServerPersistence<TestDbContext>();
+            }).Build();
+
+        try
+        {
+            host.MapCommand<PlaceOrderCommand>(async (PlaceOrderCommand message, TestDbContext db, IMessageBus bus) =>
+            {
+                db.BusinessRows.Add(new BusinessRow { Id = message.Id, Value = message.Fail ? "failed" : "scheduled-ok" });
+                await bus.ScheduleSendAsync(new OrderPlaced(message.Id), dueAt);
+                if (message.Fail)
+                {
+                    throw new InvalidOperationException("rollback scheduled message");
+                }
+            }).WithTransaction();
+
+            await host.StartAsync();
+            var commandTopic = MessageNames.Destination(MessageNames.Contract(typeof(PlaceOrderCommand)));
+            await using var producer = await transport.CreateProducerAsync<PlaceOrderCommand>(commandTopic, new ProducerOptions());
+
+            // 1. Committed command stages scheduled outbox message atomically with DbContext row
+            await producer.ProduceAsync(new PlaceOrderCommand(501, false), new MessageHeaders { MessageId = "sched-tx-501" });
+            await EventuallyAsync(async () =>
+            {
+                await using var scope = host.Services.CreateAsyncScope();
+                var db = scope.ServiceProvider.GetRequiredService<TestDbContext>();
+                return await db.BusinessRows.AnyAsync(r => r.Id == 501);
+            }, TimeSpan.FromSeconds(10));
+
+            // 2. Failing command rolls back both DbContext row and scheduled outbox message
+            await producer.ProduceAsync(new PlaceOrderCommand(502, true), new MessageHeaders { MessageId = "sched-tx-502" });
+            await EventuallyAsync(async () =>
+                (await transport.ReadAllFromTopicAsync<PlaceOrderCommand>(commandTopic + ".dlq")).Any(m => m.Payload.Id == 502),
+                TimeSpan.FromSeconds(10));
+
+            var outboxStore = host.Services.GetRequiredService<IOutboxStore>();
+
+            // Hidden before dueAt
+            Assert.Empty(await outboxStore.AcquirePendingAsync(dueAt.AddMinutes(-1), TimeSpan.FromSeconds(30), 10));
+
+            // Visible at dueAt, and only the committed message (501) exists
+            var acquired = Assert.Single(await outboxStore.AcquirePendingAsync(dueAt, TimeSpan.FromSeconds(30), 10));
+            Assert.Contains("501", acquired.Message.PayloadJson);
+            Assert.Equal(dueAt, acquired.Message.ScheduledAt);
+            Assert.True(await outboxStore.CompleteAsync(acquired.Lease));
+
+            await using (var verifyScope = host.Services.CreateAsyncScope())
+            {
+                var db = verifyScope.ServiceProvider.GetRequiredService<TestDbContext>();
+                var row = await db.BusinessRows.SingleAsync();
+                Assert.Equal(501, row.Id);
+                Assert.Equal("scheduled-ok", row.Value);
+            }
+        }
+        finally
+        {
+            await host.StopAsync();
+            host.Dispose();
+        }
+    }
+
     private static OutboxMessage NewOutbox(Guid id) => new(id, "orders", typeof(string).AssemblyQualifiedName!,
         "\"payload\"", new MessageHeaders(), DateTimeOffset.UtcNow);
 
@@ -680,4 +759,41 @@ public sealed class BusinessRow
 {
     public int Id { get; set; }
     public string Value { get; set; } = "";
+}
+
+public sealed class SqlScheduledOutboxUnitTests
+{
+    private sealed record ScheduledOrderCommand(int Id);
+
+    [Fact]
+    public async Task Given_SqlServerPersistence_When_ScheduleSendAsyncCalled_Then_StagesTalariaMessageRowWithVisibleAtEqualToDueAt()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddDbContext<TestDbContext>(options =>
+            options.UseSqlServer("Server=localhost;Database=TalariaUnitTest;TrustServerCertificate=True"));
+        services.AddTalaria(options => options.ApplicationName = "sql-unit-scheduled")
+            .UseTransport(new InMemoryTransport())
+            .UseSqlServerPersistence<TestDbContext>();
+
+        await using var provider = services.BuildServiceProvider();
+        await using var scope = provider.CreateAsyncScope();
+        var bus = scope.ServiceProvider.GetRequiredService<IMessageBus>();
+        var db = scope.ServiceProvider.GetRequiredService<TestDbContext>();
+
+        var dueAt = new DateTimeOffset(2026, 10, 14, 18, 0, 0, TimeSpan.Zero);
+        await bus.ScheduleSendAsync(new ScheduledOrderCommand(99), dueAt);
+
+        var entry = Assert.Single(db.ChangeTracker.Entries<TalariaMessageRow>());
+        Assert.Equal(EntityState.Added, entry.State);
+        Assert.Equal(0, entry.Entity.Kind);
+        Assert.Equal("sql-unit-scheduled", entry.Entity.Application);
+        Assert.Equal(dueAt, entry.Entity.VisibleAt);
+
+        var deserialized = System.Text.Json.JsonSerializer.Deserialize<OutboxMessage>(entry.Entity.Data);
+        Assert.NotNull(deserialized);
+        Assert.Equal(dueAt, deserialized!.ScheduledAt);
+        Assert.Equal("command", deserialized.Headers["talaria.intent"]);
+        Assert.Equal(dueAt.ToString("O"), deserialized.Headers["talaria.scheduled_due_at"]);
+    }
 }

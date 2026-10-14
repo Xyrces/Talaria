@@ -168,4 +168,37 @@ public class RedisOutboxIntegrationTests : IAsyncLifetime
         Assert.Equal(1, after.State!.Step);
         Assert.Single(await outbox.AcquirePendingAsync(DateTimeOffset.UtcNow.AddSeconds(1), TimeSpan.FromSeconds(10), 10));
     }
+
+    [DockerFact]
+    public async Task TryTransitionAsync_RespectsScheduledAtVisibilityScore()
+    {
+        var stateStore = _serviceProvider.GetRequiredService<IStateStore<SagaState>>();
+        var outbox = _serviceProvider.GetRequiredService<IOutboxStore>();
+        var now = DateTimeOffset.UtcNow;
+        var scheduledAt = now.AddMinutes(15);
+        var outbound = new OutboxMessage(
+            Guid.NewGuid(),
+            "scheduled-redis-topic",
+            "System.String",
+            "\"delayed-payload\"",
+            new MessageHeaders { MessageId = "sched-redis-1" },
+            now,
+            PartitionKey: "pk-1",
+            ScheduledAt: scheduledAt);
+
+        var status = await stateStore.TryTransitionAsync(
+            "sched-corr",
+            "sched-msg-1",
+            expectedVersion: 0,
+            new SagaState { Id = "sched-corr", Step = 1 },
+            [outbound]);
+        Assert.Equal(SagaCommitStatus.Committed, status);
+
+        Assert.Empty(await outbox.AcquirePendingAsync(now.AddMinutes(5), TimeSpan.FromSeconds(30), 10));
+
+        var acquired = Assert.Single(await outbox.AcquirePendingAsync(scheduledAt, TimeSpan.FromSeconds(30), 10));
+        Assert.Equal(outbound.Id, acquired.Message.Id);
+        Assert.Equal(scheduledAt.ToUnixTimeMilliseconds(), acquired.Message.ScheduledAt?.ToUnixTimeMilliseconds());
+        Assert.True(await outbox.CompleteAsync(acquired.Lease));
+    }
 }

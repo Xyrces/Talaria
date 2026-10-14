@@ -11,7 +11,7 @@ internal sealed class SqlMessageStore<TDb>(DatabaseWork<TDb> database, TalariaOp
 {
     internal static TalariaMessageRow Outbox(OutboxMessage message, string application) => new()
     {
-        Id = message.Id, Application = application, Kind = 0, Data = JsonSerializer.Serialize(message), VisibleAt = message.CreatedAt,
+        Id = message.Id, Application = application, Kind = 0, Data = JsonSerializer.Serialize(message), VisibleAt = message.ScheduledAt ?? message.CreatedAt,
     };
 
     public async Task EnqueueAsync(DeferredMessage message, CancellationToken ct = default)

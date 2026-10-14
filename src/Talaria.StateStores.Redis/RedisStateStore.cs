@@ -92,7 +92,7 @@ public sealed class RedisStateStore<TState> : IStateStore<TState>
         {
             args.Add(message.Id.ToString());
             args.Add(RedisOutboxStore.Serialize(message));
-            args.Add(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            args.Add((message.ScheduledAt ?? DateTimeOffset.UtcNow).ToUnixTimeMilliseconds());
         }
         args.Add(expectedVersion.ToString(System.Globalization.CultureInfo.InvariantCulture));
         args.Add(messageId);

@@ -94,8 +94,9 @@ internal sealed class OutboxRelayEngine : IAsyncDisposable
             await _outboxStore.CompleteAsync(leased.Lease, ct);
 
             Diagnostics.TalariaDiagnostics.OutboxPublished.Add(1, topicTag);
+            var eligibleAt = message.ScheduledAt ?? message.CreatedAt;
             Diagnostics.TalariaDiagnostics.OutboxLag.Record(
-                Math.Max(0, (DateTimeOffset.UtcNow - message.CreatedAt).TotalMilliseconds), topicTag);
+                Math.Max(0, (DateTimeOffset.UtcNow - eligibleAt).TotalMilliseconds), topicTag);
         }
         catch (System.Text.Json.JsonException ex)
         {
