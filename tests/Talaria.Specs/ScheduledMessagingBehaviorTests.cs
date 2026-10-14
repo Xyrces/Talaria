@@ -62,7 +62,10 @@ public sealed class ScheduledMessagingBehaviorTests
         provider.MapCommand<ScheduledCommand>((ScheduledCommand _) => Task.CompletedTask);
         provider.MapEvent<ScheduledEvent>((ScheduledEvent _) => Task.CompletedTask);
 
-        double scheduledMetricCount = 0;
+        var expectedCmdDestination = MessageNames.Destination(MessageNames.Contract(typeof(ScheduledCommand)));
+        var expectedEvtDestination = MessageNames.Destination(MessageNames.Contract(typeof(ScheduledEvent)));
+
+        long scheduledMetricCount = 0;
         using var meterListener = new MeterListener();
         meterListener.InstrumentPublished = (instrument, listener) =>
         {
@@ -71,7 +74,18 @@ public sealed class ScheduledMessagingBehaviorTests
                 listener.EnableMeasurementEvents(instrument);
             }
         };
-        meterListener.SetMeasurementEventCallback<long>((_, measurement, _, _) => scheduledMetricCount += measurement);
+        meterListener.SetMeasurementEventCallback<long>((_, measurement, tags, _) =>
+        {
+            foreach (var tag in tags)
+            {
+                if (tag.Key == "messaging.destination.name" &&
+                    (Equals(tag.Value, expectedCmdDestination) || Equals(tag.Value, expectedEvtDestination)))
+                {
+                    Interlocked.Add(ref scheduledMetricCount, measurement);
+                    break;
+                }
+            }
+        });
         meterListener.Start();
 
         await using var scope = provider.CreateAsyncScope();
@@ -84,14 +98,14 @@ public sealed class ScheduledMessagingBehaviorTests
         await bus.SchedulePublishAsync(new ScheduledEvent("evt-1"), explicitDueAt);
 
         Assert.Equal(2, deferralStore.Count);
-        Assert.Equal(2, scheduledMetricCount);
+        Assert.Equal(2L, Interlocked.Read(ref scheduledMetricCount));
 
         // Not due before 5 minutes
         Assert.Empty(await deferralStore.AcquireDueAsync(baseTime.AddMinutes(4), TimeSpan.FromSeconds(30), 10));
 
         // First entry due at +5 minutes
         var dueAtFive = Assert.Single(await deferralStore.AcquireDueAsync(baseTime.AddMinutes(5), TimeSpan.FromSeconds(30), 10));
-        Assert.Equal(MessageNames.Destination(MessageNames.Contract(typeof(ScheduledCommand))), dueAtFive.Message.Topic);
+        Assert.Equal(expectedCmdDestination, dueAtFive.Message.Topic);
         Assert.Equal("command", dueAtFive.Message.Headers["talaria.intent"]);
         Assert.Equal(baseTime.Add(delay).ToString("O"), dueAtFive.Message.Headers["talaria.scheduled_due_at"]);
         Assert.False(string.IsNullOrWhiteSpace(dueAtFive.Message.Headers.MessageId));
@@ -99,7 +113,7 @@ public sealed class ScheduledMessagingBehaviorTests
 
         // Second entry due at +10 minutes
         var dueAtTen = Assert.Single(await deferralStore.AcquireDueAsync(baseTime.AddMinutes(10), TimeSpan.FromSeconds(30), 10));
-        Assert.Equal(MessageNames.Destination(MessageNames.Contract(typeof(ScheduledEvent))), dueAtTen.Message.Topic);
+        Assert.Equal(expectedEvtDestination, dueAtTen.Message.Topic);
         Assert.Equal("event", dueAtTen.Message.Headers["talaria.intent"]);
         Assert.Equal(explicitDueAt.ToString("O"), dueAtTen.Message.Headers["talaria.scheduled_due_at"]);
         Assert.True(await deferralStore.CompleteAsync(dueAtTen.Lease));
