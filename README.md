@@ -35,11 +35,11 @@ Talaria provides **at-least-once delivery with idempotent processing**:
 
 ## Core Features
 
-- **Decoupled architecture:** provider-agnostic abstractions (`ITransport`, `IStateStore<TState>`, `IIdempotencyStore`, `IDeferralStore`, `IOutboxStore`, `ITopologyProvisioner`, `IDeadLetterHandler`) with Kafka, Azure Service Bus, Redis, and in-memory implementations.
+- **Decoupled architecture:** provider-agnostic abstractions (`ITransport`, `IMessageBus`, `IMessageOutbox`, `IMessageTransaction`, `IStateStore<TState>`, `IStateStoreFactory`, `IIdempotencyStore`, `IDeferralStore`, `IOutboxStore`, `IFailedMessageStore`, `IFailedMessages`, `ITopologyProvisioner`, `IConsumerReadiness`, `IDeadLetterHandler`) with Kafka, RabbitMQ, Azure Service Bus, Redis, SQL Server/EF Core, and in-memory implementations.
 - **Saga orchestration:** strongly typed state machines via `MapSaga<TState>` with explicit correlation and explicit dispatch routing (`DispatchTo`).
-- **Idempotency:** fencing-token locks (`SET ... NX` via StackExchange.Redis `When.NotExists`) filter duplicate `MessageId`s across a cluster; a stale lock holder can never release another worker's lock.
-- **Transactional outbox:** saga state transitions and their outbound messages are staged atomically (single Lua script on Redis, one lock in-memory); a background relay publishes staged messages with lease + fencing semantics. Registered automatically by `UseRedisStateStore()` / `UseInMemoryStateStore()`.
-- **Durable deferral:** out-of-order saga messages (a step arriving before the starter) are persisted in an `IDeferralStore` (Redis sorted set or in-memory) and republished by a background sweeper using visibility-timeout leases; they survive restarts and sweeper crashes, unlike an in-process timer.
+- **Idempotency:** fencing-token locks with active background lease renewal (`ProcessingLease`) filter duplicate `MessageId`s across a cluster; a stale lock holder can never release or complete another worker's lock.
+- **Transactional outbox:** saga state transitions and their outbound messages are staged atomically (single Lua script on Redis, database transaction on SQL Server, one shared lock in-memory); a background relay publishes staged messages with lease + fencing semantics. Registered automatically by `UseRedisPersistence()`, `UseSqlServerPersistence<TDb>()`, and `UseInMemory()` (or `UseRedisStateStore()` / `UseInMemoryStateStore()`).
+- **Durable deferral:** out-of-order saga messages (a step arriving before the starter) are persisted in an `IDeferralStore` (Redis sorted set, SQL Server table, or in-memory) and republished by a background sweeper using visibility-timeout leases; they survive restarts and sweeper crashes, unlike an in-process timer.
 - **Delayed retries:** topic handlers and saga step handlers can opt in to a configurable number of fixed or exponential backoff retries before routing to the DLQ. The built-in default `TalariaOptions.DefaultRetryPolicy` has `MaxRetryAttempts = 0`, so delayed retries are opt-in. Retry copies are persisted in the same `IDeferralStore` as saga deferrals and republished by the sweeper, preserving the original partition key and tracking attempts via `talaria.retry.attempt` / `talaria.retry.root_message_id` headers.
 - **Observability:** OpenTelemetry-native traces and metrics with W3C trace-context propagation across produce/consume boundaries. Includes relay monitoring: `talaria.outbox.*` / `talaria.deferral.*` counters and histograms for published/failed entries, re-acquisitions (lease expiry signal), active leases, and relay lag. Retries emit `talaria.messaging.retry.scheduled`, `talaria.messaging.retry.exhausted`, and `talaria.messaging.retry.delay`.
 - **Dead-letter resiliency:** automatic DLQ routing (suffix configurable via `DlqSuffix` on the transport-specific options, default `.dlq`) for handler exceptions, deserialization failures, missing correlation ids, unmapped dispatches, exceeded hop/deferral thresholds, exhausted retries (`retries_exhausted`), and retry misconfiguration (`retry_unavailable`). Exception detail in DLQ headers is gated behind `TalariaOptions.IncludeExceptionDetailsInDlq` (off by default).
@@ -75,7 +75,7 @@ dotnet test
 ### Dependency Injection
 
 ```csharp
-// Distributed production configuration (Kafka + Redis)
+// Distributed production configuration (Kafka + Redis bundle)
 builder.Services.AddTalaria()
     .UseKafkaTransport(opts =>
     {
@@ -84,72 +84,57 @@ builder.Services.AddTalaria()
         // The transport logs a startup warning when connecting to non-localhost
         // brokers over PLAINTEXT.
     })
-    .UseRedisStateStore(opts =>
+    .UseRedisPersistence(opts =>
     {
         // For production include TLS and auth: "host:6379,ssl=true,password=..."
-        opts.Configuration = builder.Configuration.GetConnectionString("redis")!;
-        opts.KeyPrefix = "mystate:";
-    })
-    .UseRedisIdempotencyStore(opts =>
-    {
-        opts.Configuration = builder.Configuration.GetConnectionString("redis")!;
-        opts.KeyPrefix = "mystate:";
-    })
-    .UseRedisDeferralStore(opts =>
-    {
         opts.Configuration = builder.Configuration.GetConnectionString("redis")!;
         opts.KeyPrefix = "mystate:";
     });
 ```
 
-All `UseRedis*` calls share one options registration — configure callbacks accumulate, so `KeyPrefix` only needs to be set once. `UseRedisStateStore` also registers the Redis transactional outbox used for saga dispatch.
+`UseRedisPersistence` registers the Redis state store, transactional outbox, idempotency store, deferral store, and failed-message store under a single `{KeyPrefix}` hash-tag keyspace (individual `UseRedisStateStore` / `UseRedisIdempotencyStore` / `UseRedisDeferralStore` / `UseRedisFailedMessageStore` extensions are also available).
 
 ```csharp
-// Azure Service Bus transport: same saga code, swap the transport extension.
-// Connection string comes from the namespace's "Shared access policies" blade,
-// or from the Service Bus emulator ("UseDevelopmentEnvironment=true") for local runs.
+// RabbitMQ + SQL Server/EF Core persistence bundle
+builder.Services.AddDbContext<OrdersDb>(options =>
+    options.UseSqlServer(builder.Configuration.GetConnectionString("orders")));
+builder.Services.AddTalaria(t => t
+    .UseRabbitMq(builder.Configuration.GetConnectionString("rabbitmq")!)
+    .UseSqlServerPersistence<OrdersDb>());
+```
+
+```csharp
+// Azure Service Bus transport: same saga/endpoint code, swap the transport extension.
+// Supports connection strings or TokenCredential (e.g. DefaultAzureCredential),
+// or the Service Bus emulator ("UseDevelopmentEnvironment=true") for local runs.
 builder.Services.AddTalaria()
     .UseAzureServiceBusTransport(opts =>
     {
         opts.ConnectionString = builder.Configuration.GetConnectionString("servicebus")
             ?? "UseDevelopmentEnvironment=true";
     })
-    .UseRedisStateStore(opts =>
-    {
-        opts.Configuration = builder.Configuration.GetConnectionString("redis")!;
-        opts.KeyPrefix = "mystate:";
-    })
-    .UseRedisIdempotencyStore(opts =>
-    {
-        opts.Configuration = builder.Configuration.GetConnectionString("redis")!;
-        opts.KeyPrefix = "mystate:";
-    })
-    .UseRedisDeferralStore(opts =>
+    .UseRedisPersistence(opts =>
     {
         opts.Configuration = builder.Configuration.GetConnectionString("redis")!;
         opts.KeyPrefix = "mystate:";
     });
 ```
 
-> The ASB transport implements the same `ITransport` / `IConsumer<T>` / `IProducer<T>` contract as Kafka and InMemory, so existing saga code runs unchanged. See [`src/Talaria.Client.Api/Sagas/OnboardingSaga.cs`](src/Talaria.Client.Api/Sagas/OnboardingSaga.cs) and the `ServiceBus` branch of the `Messaging:Provider` switch in [`src/Talaria.Client.Api/Program.cs`](src/Talaria.Client.Api/Program.cs).
+> The ASB and RabbitMQ transports implement the same `ITransport` / `IConsumer<T>` / `IProducer<T>` / `ITopologyProvisioner` contracts as Kafka and InMemory, so existing saga and endpoint code runs unchanged. See [`src/Talaria.Client.Api/Sagas/OnboardingSaga.cs`](src/Talaria.Client.Api/Sagas/OnboardingSaga.cs) and the `ServiceBus` branch of the `Messaging:Provider` switch in [`src/Talaria.Client.Api/Program.cs`](src/Talaria.Client.Api/Program.cs).
 >
 > Azure Service Bus and RabbitMQ reject `BeginTransactionAsync`: buffered sends cannot atomically commit application state. Use the persistence outbox for reliable saga dispatch, and SQL Server `WithTransaction()` for atomic application writes and outgoing messages.
 >
-> Entity provisioning (queues, topics, subscriptions) is the host's responsibility and is exposed through the `ITopologyProvisioner` abstraction. The transport exposes a convenience `EnsureEntityAsync(name, kind, ct)` helper for the saga sample; production deployments should call `ITopologyProvisioner.ProvisionAsync(declarations, ct)` from their startup code so the host's full topology is declared in one place.
+> Mapped broker entities (queues, topics, subscriptions) are provisioned automatically at startup when `TalariaOptions.AutoProvisionTopology` is true (the default) and the transport implements `ITopologyProvisioner`. With externally managed topology, set `AutoProvisionTopology = false` and use `TalariaListener.GetTopology()` to export the required declarations.
 >
 > ASB surfaces a built-in `MessageId`-based duplicate detection window on queues and topics; the engine does not use it, so deserialization and handler invocation still run for messages that pass the idempotency gate.
 
 ```csharp
 // Zero-dependency configuration (in-memory): lightweight single-process
 // deployments, prototyping, and tests — no backing message bus required.
-// The in-memory transport mirrors Kafka semantics: consumer-group fan-out,
-// backlog replay for late-joining groups, transactional produce buffering,
-// and redelivery of uncommitted messages on consumer restart.
+// Registers the in-memory transport, state store, outbox, idempotency store,
+// deferral store, and failed-message store.
 builder.Services.AddTalaria()
-    .UseInMemoryTransport()
-    .UseInMemoryStateStore()
-    .UseInMemoryIdempotencyStore()
-    .UseInMemoryDeferralStore();
+    .UseInMemory();
 ```
 
 > The in-memory transport's DLQ backlog is intentionally unbounded: dead letters
@@ -368,9 +353,12 @@ sagaRegistry.MapSaga<OnboardingState>(saga =>
     saga.DispatchTo<SendVerificationEmailCommand>("email-commands");
 });
 
-// Sagas require an IServiceProvider that can resolve IStateStore<TState>.
+// Sagas that dispatch messages require an IServiceProvider that resolves IStateStore<TState> and IOutboxStore.
+var outbox = new InMemoryOutboxStore();
 var services = new ServiceCollection()
     .AddSingleton<ITransport>(transport)
+    .AddSingleton(outbox)
+    .AddSingleton<IOutboxStore>(outbox)
     .AddSingleton(typeof(IStateStore<>), typeof(InMemoryStateStore<>))
     .BuildServiceProvider();
 
