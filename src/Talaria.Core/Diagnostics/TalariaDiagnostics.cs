@@ -141,6 +141,32 @@ public static class TalariaDiagnostics
         unit: "ms",
         description: "Computed delayed-retry delay before the next attempt.");
 
+    // ---- Saga compensation ----
+
+    /// <summary>Counter of sagas that have started a compensation workflow.</summary>
+    public static readonly Counter<long> SagaCompensationStarted = Meter.CreateCounter<long>(
+        "talaria.saga.compensation.started",
+        unit: "{saga}",
+        description: "Number of sagas that have initiated compensation.");
+
+    /// <summary>Counter of compensating commands staged for dispatch.</summary>
+    public static readonly Counter<long> CompensationDispatched = Meter.CreateCounter<long>(
+        "talaria.saga.compensation.dispatched",
+        unit: "{message}",
+        description: "Number of compensating commands staged for dispatch.");
+
+    /// <summary>Counter of sagas that have completed their compensation workflow.</summary>
+    public static readonly Counter<long> SagaCompensationCompleted = Meter.CreateCounter<long>(
+        "talaria.saga.compensation.completed",
+        unit: "{saga}",
+        description: "Number of sagas that have completed compensation.");
+
+    /// <summary>Counter of forward or duplicate messages ignored while a saga is compensating or compensated.</summary>
+    public static readonly Counter<long> CompensationLateMessageIgnored = Meter.CreateCounter<long>(
+        "talaria.saga.compensation.late_message_ignored",
+        unit: "{message}",
+        description: "Number of forward or duplicate messages ignored while a saga is compensating.");
+
     /// <summary>
     /// Attempts to extract existing W3C context from headers to resume a trace,
     /// or starts a new trace if no headers exist.

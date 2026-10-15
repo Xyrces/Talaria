@@ -333,10 +333,10 @@ internal sealed class SagaConsumerEngine
 
             if (state == null && !step.IsStarter)
             {
-                if (step.IsTimeout || (env.Headers.TryGetValue("talaria.saga.timeout", out var isTimeout) && string.Equals(isTimeout, "true", StringComparison.OrdinalIgnoreCase)))
+                if (step.IsTimeout || step.IsCompensationAck || (env.Headers.TryGetValue("talaria.saga.timeout", out var isTimeout) && string.Equals(isTimeout, "true", StringComparison.OrdinalIgnoreCase)))
                 {
                     _logger.LogDebug(
-                        "Received timeout message {MessageType} for Saga {SagaType} with correlation {Id}, but no active saga state exists. Completing as stale timeout.",
+                        "Received timeout or compensation ack message {MessageType} for Saga {SagaType} with correlation {Id}, but no active saga state exists. Completing as stale message.",
                         step.MessageType.Name, stateType.Name, correlationId);
                     await _pipeline.CompleteAsync(gate.Lock, consumer, env, ct);
                     return;
@@ -387,12 +387,266 @@ internal sealed class SagaConsumerEngine
                 return;
             }
 
+            if (step.IsCompensationAck)
+            {
+                if (state is not ICompensatableState ackCompCheck
+                    || ackCompCheck.Compensation is null
+                    || ackCompCheck.Compensation.Phase != SagaPhase.Compensating
+                    || ackCompCheck.Compensation.PendingSteps.Count == 0)
+                {
+                    await _pipeline.CompleteAsync(gate.Lock, consumer, env, ct);
+                    return;
+                }
+
+                var activePendingCheck = ackCompCheck.Compensation.PendingSteps[0];
+                if (!string.Equals(activePendingCheck.StepName, step.CompensationStepName, StringComparison.Ordinal))
+                {
+                    await _pipeline.CompleteAsync(gate.Lock, consumer, env, ct);
+                    return;
+                }
+
+                if (env.Headers.TryGetValue("talaria.saga.compensation_operation_id", out var headerOpId)
+                    && !string.IsNullOrWhiteSpace(headerOpId)
+                    && (!string.Equals(headerOpId, activePendingCheck.OperationId, StringComparison.Ordinal)
+                        || ackCompCheck.Compensation.CompletedSteps.Contains(headerOpId)))
+                {
+                    await _pipeline.CompleteAsync(gate.Lock, consumer, env, ct);
+                    return;
+                }
+
+                if (step.OperationIdSelector is not null)
+                {
+                    var payloadOpId = step.OperationIdSelector(payload);
+                    if (!string.IsNullOrWhiteSpace(payloadOpId)
+                        && (!string.Equals(payloadOpId, activePendingCheck.OperationId, StringComparison.Ordinal)
+                            || ackCompCheck.Compensation.CompletedSteps.Contains(payloadOpId)))
+                    {
+                        await _pipeline.CompleteAsync(gate.Lock, consumer, env, ct);
+                        return;
+                    }
+                }
+
+                if (env.Headers.TryGetValue("talaria.saga.compensation_generation", out var headerGen)
+                    && int.TryParse(headerGen, out var parsedGen)
+                    && parsedGen != activePendingCheck.Generation)
+                {
+                    await _pipeline.CompleteAsync(gate.Lock, consumer, env, ct);
+                    return;
+                }
+            }
+            else if (state is ICompensatableState activeComp
+                && activeComp.Compensation is { Phase: not SagaPhase.Forward })
+            {
+                var hasLateArrivalHandler = activeComp.Compensation.Phase == SagaPhase.Compensating
+                    && (route.Registration.LateArrivalHandlers.ContainsKey(step.MessageType)
+                        || step.LateArrivalMutator is not null);
+
+                if (!hasLateArrivalHandler)
+                {
+                    _logger.LogDebug(
+                        "Saga {SagaType} ({CorrelationId}) is in phase {Phase}; ignoring message {MessageType} on topic '{Topic}'.",
+                        stateType.Name,
+                        correlationId,
+                        activeComp.Compensation.Phase,
+                        step.MessageType.Name,
+                        step.TopicName);
+
+                    Diagnostics.TalariaDiagnostics.CompensationLateMessageIgnored.Add(
+                        1,
+                        new KeyValuePair<string, object?>("saga.type", stateType.Name),
+                        new KeyValuePair<string, object?>("messaging.destination.name", step.TopicName));
+
+                    await _pipeline.CompleteAsync(gate.Lock, consumer, env, ct);
+                    return;
+                }
+            }
+
             var timeProvider = scope.ServiceProvider.GetService<TimeProvider>();
             var context = new Core.Sagas.SagaContext<object>(timeProvider) { CancellationToken = ownership.Token };
             Core.Sagas.SagaResult<object> result;
+            PendingCompensationEntry? pendingToStage = null;
             try
             {
-                result = await step.Handler(state ?? stateStore.NewState(), payload, context);
+                if (step.IsCompensationAck)
+                {
+                    var ackCompState = (ICompensatableState)state!;
+                    var activePending = ackCompState.Compensation.PendingSteps[0];
+                    var matchingRule = route.Registration.Compensations.FirstOrDefault(
+                        c => string.Equals(c.StepName, activePending.StepName, StringComparison.Ordinal));
+                    matchingRule?.OnCompensated?.Invoke(state!, payload);
+
+                    ackCompState.Compensation.PendingSteps.RemoveAt(0);
+                    ackCompState.Compensation.CompletedSteps.Add(activePending.OperationId);
+                    if (!ackCompState.Compensation.CompletedSteps.Contains(activePending.StepName))
+                    {
+                        ackCompState.Compensation.CompletedSteps.Add(activePending.StepName);
+                    }
+
+                    if (ackCompState.Compensation.PendingSteps.Count > 0)
+                    {
+                        pendingToStage = ackCompState.Compensation.PendingSteps[0];
+                        result = Core.Sagas.SagaResult<object>.Transition(state!, Array.Empty<object>());
+                    }
+                    else
+                    {
+                        ackCompState.Compensation.Phase = SagaPhase.Compensated;
+                        Diagnostics.TalariaDiagnostics.SagaCompensationCompleted.Add(
+                            1,
+                            new KeyValuePair<string, object?>("saga.type", stateType.Name),
+                            new KeyValuePair<string, object?>("compensation.mode", "sequential"));
+
+                        if (route.Registration.OnCompensationCompleted is not null)
+                        {
+                            result = await route.Registration.OnCompensationCompleted(state!, context);
+                        }
+                        else
+                        {
+                            result = Core.Sagas.SagaResult<object>.Complete(Array.Empty<object>());
+                        }
+                    }
+                }
+                else if (state is ICompensatableState lateCompState
+                    && lateCompState.Compensation is { Phase: SagaPhase.Compensating })
+                {
+                    var mutator = route.Registration.LateArrivalHandlers.TryGetValue(step.MessageType, out var registeredMutator)
+                        ? registeredMutator
+                        : step.LateArrivalMutator!;
+
+                    var existingSteps = lateCompState.Compensation.PendingSteps
+                        .Select(static p => p.StepName)
+                        .Concat(lateCompState.Compensation.CompletedSteps)
+                        .ToHashSet(StringComparer.Ordinal);
+
+                    mutator(state, payload);
+
+                    var applicableLate = SagaCompensationEvaluator.EvaluateApplicableCompensations(route.Registration, state);
+                    var nextIndex = lateCompState.Compensation.PendingSteps.Count + lateCompState.Compensation.CompletedSteps.Count;
+                    foreach (var (rule, cmd) in applicableLate)
+                    {
+                        if (rule.IsSequential && !existingSteps.Contains(rule.StepName))
+                        {
+                            var resolvedTopic = route.Registration.DispatchTopics.TryGetValue(rule.CommandType, out var mapped)
+                                ? mapped
+                                : rule.CommandTopic;
+                            var opId = $"{correlationId}:comp:{lateCompState.Compensation.Generation}:{nextIndex}:{rule.StepName}";
+                            nextIndex++;
+                            lateCompState.Compensation.PendingSteps.Add(new PendingCompensationEntry(
+                                opId,
+                                rule.StepName,
+                                rule.CommandType.AssemblyQualifiedName ?? rule.CommandType.FullName!,
+                                resolvedTopic,
+                                JsonSerializer.Serialize(cmd, rule.CommandType),
+                                lateCompState.Compensation.Generation));
+                            existingSteps.Add(rule.StepName);
+                        }
+                    }
+
+                    result = Core.Sagas.SagaResult<object>.Transition(state, Array.Empty<object>());
+                }
+                else
+                {
+                    result = await step.Handler(state ?? stateStore.NewState(), payload, context);
+
+                    if (result.IsCompensating)
+                    {
+                        if (!result.IsCompleted
+                            && result.State is ICompensatableState seqCompState
+                            && route.Registration.Compensations.Any(static c => c.IsSequential))
+                        {
+                            seqCompState.Compensation ??= new SagaCompensationState();
+                            if (seqCompState.Compensation.Phase == SagaPhase.Forward)
+                            {
+                                seqCompState.Compensation.Generation++;
+                                seqCompState.Compensation.Phase = SagaPhase.Compensating;
+
+                                var applicable = SagaCompensationEvaluator.EvaluateApplicableCompensations(route.Registration, result.State);
+                                var index = 0;
+                                var mixedBatchDispatches = new List<SagaScheduledDispatch>();
+                                foreach (var (rule, cmd) in applicable)
+                                {
+                                    if (rule.IsSequential)
+                                    {
+                                        var resolvedTopic = route.Registration.DispatchTopics.TryGetValue(rule.CommandType, out var mapped)
+                                            ? mapped
+                                            : rule.CommandTopic;
+                                        var opId = $"{correlationId}:comp:{seqCompState.Compensation.Generation}:{index}:{rule.StepName}";
+                                        index++;
+                                        seqCompState.Compensation.PendingSteps.Add(new PendingCompensationEntry(
+                                            opId,
+                                            rule.StepName,
+                                            rule.CommandType.AssemblyQualifiedName ?? rule.CommandType.FullName!,
+                                            resolvedTopic,
+                                            JsonSerializer.Serialize(cmd, rule.CommandType),
+                                            seqCompState.Compensation.Generation));
+                                    }
+                                    else
+                                    {
+                                        mixedBatchDispatches.Add(new SagaScheduledDispatch(cmd)
+                                        {
+                                            IsCompensation = true,
+                                            CompensationStepName = rule.StepName,
+                                            CompensationOperationId = Guid.NewGuid().ToString("N"),
+                                            CompensationGeneration = seqCompState.Compensation.Generation
+                                        });
+                                    }
+                                }
+
+                                if (mixedBatchDispatches.Count > 0)
+                                {
+                                    var combined = mixedBatchDispatches.Concat(result.Dispatches).ToArray();
+                                    var combinedOutbound = combined.Select(static d => d.Message).ToArray();
+                                    result = Core.Sagas.SagaResult<object>.Compensate(
+                                        result.State,
+                                        combinedOutbound,
+                                        combined,
+                                        result.CanceledTimeouts,
+                                        result.RecordedSteps);
+                                }
+
+                                Diagnostics.TalariaDiagnostics.SagaCompensationStarted.Add(
+                                    1,
+                                    new KeyValuePair<string, object?>("saga.type", stateType.Name),
+                                    new KeyValuePair<string, object?>("compensation.mode", "sequential"));
+
+                                if (seqCompState.Compensation.PendingSteps.Count > 0)
+                                {
+                                    pendingToStage = seqCompState.Compensation.PendingSteps[0];
+                                }
+                                else
+                                {
+                                    seqCompState.Compensation.Phase = SagaPhase.Compensated;
+                                    Diagnostics.TalariaDiagnostics.SagaCompensationCompleted.Add(
+                                        1,
+                                        new KeyValuePair<string, object?>("saga.type", stateType.Name),
+                                        new KeyValuePair<string, object?>("compensation.mode", "sequential"));
+
+                                    if (route.Registration.OnCompensationCompleted is not null)
+                                    {
+                                        var completionContext = new Core.Sagas.SagaContext<object>(timeProvider) { CancellationToken = ownership.Token };
+                                        var completionResult = await route.Registration.OnCompensationCompleted(result.State, completionContext);
+                                        var mergedDispatches = result.Dispatches.Concat(completionResult.Dispatches).ToArray();
+                                        var mergedOutbound = mergedDispatches.Select(static d => d.Message).ToArray();
+                                        var mergedCanceled = result.CanceledTimeouts.Concat(completionResult.CanceledTimeouts).Distinct().ToArray();
+                                        result = completionResult.IsCompleted
+                                            ? Core.Sagas.SagaResult<object>.Complete(mergedOutbound, mergedDispatches, mergedCanceled)
+                                            : Core.Sagas.SagaResult<object>.Transition(completionResult.State!, mergedOutbound, mergedDispatches, mergedCanceled);
+                                    }
+                                }
+                            }
+                        }
+                        else
+                        {
+                            Diagnostics.TalariaDiagnostics.SagaCompensationStarted.Add(
+                                1,
+                                new KeyValuePair<string, object?>("saga.type", stateType.Name),
+                                new KeyValuePair<string, object?>("compensation.mode", "batch"));
+                            Diagnostics.TalariaDiagnostics.SagaCompensationCompleted.Add(
+                                1,
+                                new KeyValuePair<string, object?>("saga.type", stateType.Name),
+                                new KeyValuePair<string, object?>("compensation.mode", "batch"));
+                        }
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -484,10 +738,50 @@ internal sealed class SagaConsumerEngine
                 }
             }
 
-            if (_outboxStore is not null || result.Dispatches.Count == 0)
+            if (_outboxStore is not null || (result.Dispatches.Count == 0 && pendingToStage is null))
             {
                 var now = (timeProvider ?? TimeProvider.System).GetUtcNow();
-                var staged = new List<OutboxMessage>(result.Dispatches.Count);
+                var staged = new List<OutboxMessage>(result.Dispatches.Count + (pendingToStage is not null ? 1 : 0));
+
+                if (pendingToStage is not null)
+                {
+                    var compHeaders = new MessageHeaders { MessageId = Guid.NewGuid().ToString("N") };
+                    if (System.Diagnostics.Activity.Current != null)
+                    {
+                        compHeaders.TraceParent = System.Diagnostics.Activity.Current.Id;
+                        compHeaders.TraceState = System.Diagnostics.Activity.Current.TraceStateString;
+                    }
+
+                    compHeaders["talaria.saga.compensation"] = "true";
+                    compHeaders["talaria.saga.compensation_saga"] = MessageNames.Contract(stateType);
+                    compHeaders["talaria.intent"] = "command";
+                    if (!string.IsNullOrWhiteSpace(pendingToStage.StepName))
+                    {
+                        compHeaders["talaria.saga.compensation_step"] = pendingToStage.StepName;
+                    }
+                    if (!string.IsNullOrWhiteSpace(pendingToStage.OperationId))
+                    {
+                        compHeaders["talaria.saga.compensation_operation_id"] = pendingToStage.OperationId;
+                    }
+                    compHeaders["talaria.saga.compensation_generation"] = pendingToStage.Generation.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    compHeaders.CorrelationId = correlationId;
+
+                    Diagnostics.TalariaDiagnostics.CompensationDispatched.Add(
+                        1,
+                        new KeyValuePair<string, object?>("saga.type", stateType.Name),
+                        new KeyValuePair<string, object?>("messaging.destination.name", pendingToStage.DestinationTopic));
+
+                    staged.Add(new OutboxMessage(
+                        Guid.NewGuid(),
+                        pendingToStage.DestinationTopic,
+                        pendingToStage.CommandType,
+                        pendingToStage.PayloadJson,
+                        compHeaders,
+                        now,
+                        env.PartitionKey,
+                        ScheduledAt: null));
+                }
+
                 foreach (var dispatch in result.Dispatches)
                 {
                     var outbound = dispatch.Message;
@@ -514,6 +808,33 @@ internal sealed class SagaConsumerEngine
                         }
                     }
 
+                    if (dispatch.IsCompensation)
+                    {
+                        headers["talaria.saga.compensation"] = "true";
+                        headers["talaria.saga.compensation_saga"] = MessageNames.Contract(stateType);
+                        headers["talaria.intent"] = "command";
+                        if (!string.IsNullOrWhiteSpace(dispatch.CompensationStepName))
+                        {
+                            headers["talaria.saga.compensation_step"] = dispatch.CompensationStepName;
+                        }
+                        if (!string.IsNullOrWhiteSpace(dispatch.CompensationOperationId))
+                        {
+                            headers["talaria.saga.compensation_operation_id"] = dispatch.CompensationOperationId;
+                        }
+                        if (dispatch.CompensationGeneration.HasValue)
+                        {
+                            headers["talaria.saga.compensation_generation"] = dispatch.CompensationGeneration.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                        }
+                        if (string.IsNullOrWhiteSpace(headers.CorrelationId))
+                        {
+                            headers.CorrelationId = correlationId;
+                        }
+
+                        Diagnostics.TalariaDiagnostics.CompensationDispatched.Add(
+                            1,
+                            new KeyValuePair<string, object?>("saga.type", stateType.Name),
+                            new KeyValuePair<string, object?>("messaging.destination.name", outboundTopic));
+                    }
 
                     if (dispatch.ScheduledAt.HasValue)
                     {

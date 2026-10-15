@@ -257,6 +257,86 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
         Assert.Equal(2, cancelCheck.State!.Step);
     }
 
+    [DockerFact]
+    public async Task Saga_transition_with_compensatable_state_round_trips_compensation_journal_outbox_and_timeout_receipts()
+    {
+        await fixture.ResetAsync();
+        var store = fixture.Services.GetRequiredService<IStateStoreFactory>().GetStore<CompensatableSqlSagaState>();
+        const string correlationId = "order-comp-sql-1";
+
+        var compState = new CompensatableSqlSagaState
+        {
+            OrderId = correlationId,
+            Compensation = new Talaria.Core.Sagas.SagaCompensationState
+            {
+                Phase = Talaria.Core.Sagas.SagaPhase.Compensating,
+                Generation = 1,
+                RecordedSteps = ["reserve-inventory", "charge-payment"],
+                PendingSteps =
+                [
+                    new Talaria.Core.Sagas.PendingCompensationEntry(
+                        $"{correlationId}:comp:1:0:refund-payment",
+                        "refund-payment",
+                        typeof(string).AssemblyQualifiedName!,
+                        "payments.refund",
+                        "\"refund-cmd\"",
+                        1),
+                    new Talaria.Core.Sagas.PendingCompensationEntry(
+                        $"{correlationId}:comp:1:1:release-inventory",
+                        "release-inventory",
+                        typeof(string).AssemblyQualifiedName!,
+                        "inventory.release",
+                        "\"release-cmd\"",
+                        1)
+                ],
+                CompletedSteps = []
+            }
+        };
+
+        var outboxMsg = new OutboxMessage(
+            Guid.NewGuid(),
+            "payments.refund",
+            typeof(string).AssemblyQualifiedName!,
+            "\"refund-cmd\"",
+            new MessageHeaders
+            {
+                MessageId = "sql-comp-out-1",
+                CorrelationId = correlationId,
+                ["talaria.saga.compensation"] = "true",
+                ["talaria.saga.compensation_step"] = "refund-payment"
+            },
+            DateTimeOffset.UtcNow);
+
+        const string cancelReceiptKey = "timeout-canceled:Talaria.Specs.OrderPaymentTimeout:v1";
+        Assert.Equal(SagaCommitStatus.Committed, await store.TryTransitionAsync(
+            correlationId,
+            "fail-msg-1",
+            expectedVersion: 0,
+            compState,
+            [outboxMsg],
+            [cancelReceiptKey],
+            default));
+
+        var snapshot = await store.ReadSnapshotAsync(correlationId, "next-ack-msg", default);
+        Assert.NotNull(snapshot.State);
+        Assert.Equal(1, snapshot.Version);
+        Assert.Equal(Talaria.Core.Sagas.SagaPhase.Compensating, snapshot.State!.Compensation.Phase);
+        Assert.Equal(1, snapshot.State.Compensation.Generation);
+        Assert.Equal(["reserve-inventory", "charge-payment"], snapshot.State.Compensation.RecordedSteps);
+        Assert.Equal(2, snapshot.State.Compensation.PendingSteps.Count);
+        Assert.Equal("refund-payment", snapshot.State.Compensation.PendingSteps[0].StepName);
+        Assert.Equal("release-inventory", snapshot.State.Compensation.PendingSteps[1].StepName);
+
+        var cancelCheck = await store.ReadSnapshotAsync(correlationId, cancelReceiptKey, default);
+        Assert.True(cancelCheck.MessageProcessed);
+
+        var outboxStore = fixture.Services.GetRequiredService<IOutboxStore>();
+        var leased = Assert.Single(await outboxStore.AcquirePendingAsync(DateTimeOffset.UtcNow, TimeSpan.FromSeconds(10), 10));
+        Assert.Equal("true", leased.Message.Headers["talaria.saga.compensation"]);
+        Assert.Equal("refund-payment", leased.Message.Headers["talaria.saga.compensation_step"]);
+        Assert.True(await outboxStore.CompleteAsync(leased.Lease));
+    }
+
 
     [DockerFact]
     public async Task Outbox_lease_token_fences_stale_completion_and_abandonment()
@@ -775,6 +855,12 @@ public sealed class SqlPersistenceTests(SqlServerFixture fixture)
     public sealed class SagaState
     {
         public int Step { get; set; }
+    }
+
+    public sealed class CompensatableSqlSagaState : Talaria.Core.Sagas.ICompensatableState
+    {
+        public string OrderId { get; set; } = string.Empty;
+        public Talaria.Core.Sagas.SagaCompensationState Compensation { get; set; } = new();
     }
 
 }

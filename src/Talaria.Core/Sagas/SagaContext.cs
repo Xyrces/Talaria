@@ -10,6 +10,7 @@ internal sealed class SagaContext<TState> : ISagaContext<TState>
     private readonly TimeProvider _time;
     private readonly List<SagaScheduledDispatch> _dispatches = new();
     private readonly List<Type> _canceledTimeouts = new();
+    private readonly List<string> _recordedSteps = new();
 
     public SagaContext(TimeProvider? timeProvider = null)
     {
@@ -78,6 +79,13 @@ internal sealed class SagaContext<TState> : ISagaContext<TState>
         return this;
     }
 
+    public ISagaContext<TState> RecordStep(string stepName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(stepName);
+        _recordedSteps.Add(stepName.Trim());
+        return this;
+    }
+
     public SagaResult<TState> Complete()
     {
         // Snapshot: later Dispatch calls must not mutate an already-returned result.
@@ -89,16 +97,53 @@ internal sealed class SagaContext<TState> : ISagaContext<TState>
 
     public SagaResult<TState> Transition(TState newState)
     {
+        ArgumentNullException.ThrowIfNull(newState);
         var dispatches = _dispatches.ToArray();
         var outbound = dispatches.Select(static d => d.Message).ToArray();
         var canceled = _canceledTimeouts.ToArray();
-        return SagaResult<TState>.Transition(newState, outbound, dispatches, canceled);
+        var recorded = _recordedSteps.ToArray();
+        AppendRecordedSteps(newState, recorded);
+        return SagaResult<TState>.Transition(newState, outbound, dispatches, canceled, recorded);
+    }
+
+    public SagaResult<TState> Compensate(TState newState)
+    {
+        ArgumentNullException.ThrowIfNull(newState);
+        var dispatches = _dispatches.ToArray();
+        var outbound = dispatches.Select(static d => d.Message).ToArray();
+        var canceled = _canceledTimeouts.ToArray();
+        var recorded = _recordedSteps.ToArray();
+        AppendRecordedSteps(newState, recorded);
+        return SagaResult<TState>.Compensate(newState, outbound, dispatches, canceled, recorded);
+    }
+
+    public SagaResult<TState> CompensateAndComplete(TState? stateSnapshot = default)
+    {
+        var dispatches = _dispatches.ToArray();
+        var outbound = dispatches.Select(static d => d.Message).ToArray();
+        var canceled = _canceledTimeouts.ToArray();
+        var recorded = _recordedSteps.ToArray();
+        AppendRecordedSteps(stateSnapshot, recorded);
+        return SagaResult<TState>.CompensateAndComplete(stateSnapshot, outbound, dispatches, canceled, recorded);
     }
 
     public SagaResult<TState> Defer()
     {
         _dispatches.Clear();
         _canceledTimeouts.Clear();
+        _recordedSteps.Clear();
         return SagaResult<TState>.Defer();
+    }
+
+    private static void AppendRecordedSteps(TState? state, IReadOnlyList<string> recorded)
+    {
+        if (recorded.Count > 0 && state is ICompensatableState compState)
+        {
+            compState.Compensation ??= new SagaCompensationState();
+            foreach (var step in recorded)
+            {
+                compState.Compensation.RecordedSteps.Add(step);
+            }
+        }
     }
 }
