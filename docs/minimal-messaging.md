@@ -34,7 +34,9 @@ Retries are off by default. `WithRetries(attempts)` or `WithRetryPolicy(...)` pe
 
 ## Roadmap boundaries
 
-Richer compensation workflows and generated Native AOT bindings remain future work. Scheduled delivery (`ScheduleSendAsync`/`SchedulePublishAsync`), declarative saga timeouts (`OnTimeout<TTimeout>`, `RequestTimeout`, `CancelTimeout`), and request/reply (`IRequestClient<TRequest>` and `MapRequest<TRequest,TResponse>`) are available today.
+Generated Native AOT bindings remain future work. Scheduled delivery (`ScheduleSendAsync`/`SchedulePublishAsync`), declarative saga timeouts (`OnTimeout<TTimeout>`, `RequestTimeout`, `CancelTimeout`), declarative saga compensation workflows (`CompensateStep<TCompensation, TAck>`, `CompensateWith<TCompensation>`, `Compensate`, `CompensateAndComplete`, `OnCompensationCompleted`, `OnLateArrival<TMessage>`, `RecordStep`), and request/reply (`IRequestClient<TRequest>` and `MapRequest<TRequest,TResponse>`) are available today.
+
+For saga compensation, use `CompensateStep<TCompensation, TAck>` with `ICompensatableState` and `context.Compensate(state)` when compensating commands must execute strictly one-by-one in LIFO (or reverse recorded `RecordStep`) order gated on downstream `TAck` acknowledgments. Use `CompensateWith<TCompensation>` with `context.CompensateAndComplete()` for lightweight single-phase batch compensation where all matching compensating commands are durably staged in a single outbox transition without cross-service execution ordering.
 
 ## Runtime readiness and failed-message operations
 

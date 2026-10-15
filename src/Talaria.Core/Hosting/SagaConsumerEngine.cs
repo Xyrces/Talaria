@@ -623,7 +623,7 @@ internal sealed class SagaConsumerEngine
                                     if (route.Registration.OnCompensationCompleted is not null)
                                     {
                                         var completionContext = new Core.Sagas.SagaContext<object>(timeProvider) { CancellationToken = ownership.Token };
-                                        var completionResult = await route.Registration.OnCompensationCompleted(result.State, completionContext);
+                                        var completionResult = await route.Registration.OnCompensationCompleted(result.State!, completionContext);
                                         var mergedDispatches = result.Dispatches.Concat(completionResult.Dispatches).ToArray();
                                         var mergedOutbound = mergedDispatches.Select(static d => d.Message).ToArray();
                                         var mergedCanceled = result.CanceledTimeouts.Concat(completionResult.CanceledTimeouts).Distinct().ToArray();

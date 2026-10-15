@@ -13,10 +13,11 @@ This tracks the accepted roadmap. Checked items are implemented and verified; un
 - [x] Readiness, failure inspection/replay, graceful shutdown, and public test harness.
 - [x] Mandatory provider integration matrix, migration guide, and executable quickstarts.
 - [x] Public scheduled-send API and declarative saga timeouts with atomic cancellation.
+- [x] Declarative saga compensation workflows (sequential acknowledged LIFO rollback and single-phase batch compensation).
 
 Request/reply remains supported through the existing typed request clients. The new minimal command/event API is additive.
 
-Subsequent releases: compensation workflows and Native AOT generation. Public scheduled-send (`ScheduleSendAsync`/`SchedulePublishAsync`), delayed saga dispatches (`OutboxMessage.ScheduledAt`), and declarative saga timeouts (`OnTimeout<TTimeout>`, `RequestTimeout`, `CancelTimeout`) with atomic cancellation receipts are now implemented across all persistence providers.
+Subsequent releases: Native AOT generation. Public scheduled-send (`ScheduleSendAsync`/`SchedulePublishAsync`), delayed saga dispatches (`OutboxMessage.ScheduledAt`), declarative saga timeouts (`OnTimeout<TTimeout>`, `RequestTimeout`, `CancelTimeout`) with atomic cancellation receipts, and declarative saga compensation workflows (`CompensateStep<TCompensation, TAck>`, `CompensateWith<TCompensation>`, `Compensate`, `CompensateAndComplete`, `OnCompensationCompleted`, `OnLateArrival<TMessage>`, `RecordStep`) are now implemented across all persistence providers.
 
 ## Reproducing validation
 

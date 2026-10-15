@@ -36,13 +36,14 @@ Talaria provides **at-least-once delivery with idempotent processing**:
 ## Core Features
 
 - **Decoupled architecture:** provider-agnostic abstractions (`ITransport`, `IMessageBus`, `IMessageOutbox`, `IMessageTransaction`, `IStateStore<TState>`, `IStateStoreFactory`, `IIdempotencyStore`, `IDeferralStore`, `IOutboxStore`, `IFailedMessageStore`, `IFailedMessages`, `ITopologyProvisioner`, `IConsumerReadiness`, `IDeadLetterHandler`) with Kafka, RabbitMQ, Azure Service Bus, Redis, SQL Server/EF Core, and in-memory implementations.
-- **Saga orchestration:** strongly typed state machines via `MapSaga<TState>` with explicit correlation, explicit dispatch routing (`DispatchTo`), delayed dispatches, and declarative saga timeouts (`OnTimeout<TTimeout>`, `RequestTimeout`, `CancelTimeout`) with atomic cancellation receipts.
+- **Saga orchestration:** strongly typed state machines via `MapSaga<TState>` with explicit correlation, explicit dispatch routing (`DispatchTo`), delayed dispatches, declarative saga timeouts (`OnTimeout<TTimeout>`, `RequestTimeout`, `CancelTimeout`) with atomic cancellation receipts, and declarative saga compensation workflows.
+- **Saga compensation workflows:** supports both **sequential acknowledged compensation** (`CompensateStep<TCompensation, TAck>`, `ICompensatableState`, `OnCompensationCompleted`, `OnLateArrival<TMessage>`, `context.RecordStep(...)`, `context.Compensate(state)`) for strict 1-by-1 LIFO rollback gated on step acknowledgments, and **single-phase batch compensation** (`CompensateWith<TCompensation>`, `context.CompensateAndComplete()`) for lightweight sagas that stage all matching compensating commands atomically in one outbox transition.
 - **Scheduled messaging:** public delayed and due-time delivery via `IMessageBus.ScheduleSendAsync` and `IMessageBus.SchedulePublishAsync` (plus `TalariaTestHost` helpers), backed by the transactional outbox when inside `WithTransaction()` or the durable `IDeferralStore` otherwise.
 - **Idempotency:** fencing-token locks with active background lease renewal (`ProcessingLease`) filter duplicate `MessageId`s across a cluster; a stale lock holder can never release or complete another worker's lock.
 - **Transactional outbox:** saga state transitions and their outbound messages are staged atomically (single Lua script on Redis, database transaction on SQL Server, one shared lock in-memory); a background relay publishes staged messages with lease + fencing semantics. Registered automatically by `UseRedisPersistence()`, `UseSqlServerPersistence<TDb>()`, and `UseInMemory()` (or `UseRedisStateStore()` / `UseInMemoryStateStore()`).
 - **Durable deferral:** out-of-order saga messages (a step arriving before the starter) are persisted in an `IDeferralStore` (Redis sorted set, SQL Server table, or in-memory) and republished by a background sweeper using visibility-timeout leases; they survive restarts and sweeper crashes, unlike an in-process timer.
 - **Delayed retries:** topic handlers and saga step handlers can opt in to a configurable number of fixed or exponential backoff retries before routing to the DLQ. The built-in default `TalariaOptions.DefaultRetryPolicy` has `MaxRetryAttempts = 0`, so delayed retries are opt-in. Retry copies are persisted in the same `IDeferralStore` as saga deferrals and republished by the sweeper, preserving the original partition key and tracking attempts via `talaria.retry.attempt` / `talaria.retry.root_message_id` headers.
-- **Observability:** OpenTelemetry-native traces and metrics with W3C trace-context propagation across produce/consume boundaries. Includes relay monitoring: `talaria.outbox.*` / `talaria.deferral.*` counters and histograms for published/failed entries, re-acquisitions (lease expiry signal), active leases, and relay lag. Scheduled deliveries and retries emit `talaria.messaging.scheduled`, `talaria.messaging.retry.scheduled`, `talaria.messaging.retry.exhausted`, and `talaria.messaging.retry.delay`.
+- **Observability:** OpenTelemetry-native traces and metrics with W3C trace-context propagation across produce/consume boundaries. Includes relay monitoring: `talaria.outbox.*` / `talaria.deferral.*` counters and histograms for published/failed entries, re-acquisitions (lease expiry signal), active leases, and relay lag. Scheduled deliveries, retries, and saga compensations emit `talaria.messaging.scheduled`, `talaria.messaging.retry.scheduled`, `talaria.messaging.retry.exhausted`, `talaria.messaging.retry.delay`, and `talaria.saga.compensation.*` (`started`, `dispatched`, `completed`, `late_message_ignored`).
 - **Dead-letter resiliency:** automatic DLQ routing (suffix configurable via `DlqSuffix` on the transport-specific options, default `.dlq`) for handler exceptions, deserialization failures, missing correlation ids, unmapped dispatches, exceeded hop/deferral thresholds, exhausted retries (`retries_exhausted`), and retry misconfiguration (`retry_unavailable`). Exception detail in DLQ headers is gated behind `TalariaOptions.IncludeExceptionDetailsInDlq` (off by default).
 
 ---
@@ -332,6 +333,60 @@ Notes:
 - Dispatches and timeout requests are staged in the transactional outbox atomically with the state transition and published asynchronously by the relay when due. Expect a small relay-latency delay (poll interval configurable via `TalariaOptions.OutboxRelayInterval`, default 250ms).
 - Dispatching a message type with no `DispatchTo` mapping dead-letters the triggering message (`unmapped_dispatch`) without saving state (`OnTimeout<TTimeout>` automatically registers the timeout contract's convention destination in `DispatchTo` when no explicit topic is passed).
 - Multiple saga steps (and stateless handlers) may share one topic; messages are fanned out by a `talaria.message_type` header.
+
+#### Saga Compensation
+
+Talaria supports two compensation models depending on whether downstream rollbacks must execute sequentially or can be requested in a single batch:
+
+1. **Sequential Acknowledged Compensation (`CompensateStep<TCompensation, TAck>` + `ICompensatableState` + `context.Compensate(state)`):**
+   When `TState` implements `ICompensatableState`, `context.Compensate(state)` transitions the saga to `SagaPhase.Compensating` while preserving `state` and dispatches **only the first** pending compensation command (`PendingSteps[0]`) in reverse chronological (`context.RecordStep(stepName)`) or reverse registration (LIFO) order. Subsequent compensating commands are dispatched **one-by-one** only after each corresponding `TAck` message arrives and is validated against the active step and operation ID / generation fence. Once the final acknowledgment arrives, `OnCompensationCompleted` runs (or the saga completes and purges its state). Late forward messages arriving during `SagaPhase.Compensating` are ignored by default (`talaria.saga.compensation.late_message_ignored`) unless registered via `OnLateArrival<TMessage>`.
+
+```csharp
+public sealed class OrderSagaState : ICompensatableState
+{
+    public string OrderId { get; set; } = string.Empty;
+    public bool InventoryReserved { get; set; }
+    public string? ReservationId { get; set; }
+    public bool PaymentCharged { get; set; }
+    public string? ChargeId { get; set; }
+    public SagaCompensationState Compensation { get; set; } = new();
+}
+
+services.MapSaga<OrderSagaState>(saga =>
+{
+    saga.CompensateStep<ReleaseInventory, InventoryReleased>(
+            when: s => s.InventoryReserved,
+            create: s => new ReleaseInventory(s.OrderId, s.ReservationId!),
+            onCompensated: (s, _) => s.InventoryReserved = false,
+            correlateBy: ack => ack.OrderId)
+        .CompensateStep<RefundPayment, PaymentRefunded>(
+            when: s => s.PaymentCharged,
+            create: s => new RefundPayment(s.OrderId, s.ChargeId!),
+            onCompensated: (s, _) => s.PaymentCharged = false,
+            correlateBy: ack => ack.OrderId)
+        .OnCompensationCompleted((state, ctx) =>
+            Task.FromResult(ctx.Dispatch(new OrderFailed(state.OrderId)).Complete()))
+        .DispatchTo<OrderFailed>("orders.failed")
+        .StartedBy<OrderPlaced>("orders.placed", (msg, ctx) =>
+            Task.FromResult(ctx.Transition(new OrderSagaState
+            {
+                OrderId = msg.OrderId,
+                InventoryReserved = true,
+                ReservationId = msg.ReservationId
+            })), m => m.OrderId)
+        .On<PaymentSucceeded>("payments.succeeded", (state, msg, ctx) =>
+        {
+            state.PaymentCharged = true;
+            state.ChargeId = msg.ChargeId;
+            return Task.FromResult(ctx.Transition(state));
+        }, m => m.OrderId)
+        .On<ShipmentBookingFailed>("shipping.failed", (state, _, ctx) =>
+            Task.FromResult(ctx.Compensate(state)), m => m.OrderId);
+});
+```
+
+2. **Single-Phase Batch Compensation (`CompensateWith<TCompensation>` + `context.CompensateAndComplete()`):**
+   For lightweight sagas that do not need `TAck` coordination across services, register unacknowledged compensations with `CompensateWith<TCompensation>(when, create, topic)` and return `context.CompensateAndComplete()`. All matching compensating commands are staged atomically in a single outbox batch alongside saga completion (deleting state). Note that batch mode guarantees **durable compensation request staging**, not cross-service execution ordering across separate topics.
 
 ### Host-agnostic usage (console apps / custom composition roots)
 
