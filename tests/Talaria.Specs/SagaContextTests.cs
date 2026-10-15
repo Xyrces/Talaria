@@ -162,5 +162,66 @@ public class SagaContextTests
         Assert.Throws<ArgumentNullException>(() => ctx.RequestTimeout<DummyTimeout>(null!, DateTimeOffset.UtcNow));
         Assert.Throws<ArgumentOutOfRangeException>(() => ctx.RequestTimeout(new DummyTimeout(), TimeSpan.FromTicks(-1)));
     }
+
+    private sealed class DummyCompensatableState : ICompensatableState
+    {
+        public string Value { get; set; } = string.Empty;
+        public SagaCompensationState Compensation { get; set; } = new();
+    }
+
+    [Fact]
+    public void RecordStep_AppendsToResultAndCompensatableState_AndDeferClearsRecordedSteps()
+    {
+        var ctx = new SagaContext<DummyCompensatableState>();
+        Assert.Throws<ArgumentNullException>(() => ctx.RecordStep(null!));
+        Assert.Throws<ArgumentException>(() => ctx.RecordStep("   "));
+
+        ctx.RecordStep("reserve-inventory")
+           .RecordStep("charge-payment");
+
+        var state = new DummyCompensatableState { Value = "active" };
+        var result = ctx.Transition(state);
+
+        Assert.Equal(new[] { "reserve-inventory", "charge-payment" }, result.RecordedSteps);
+        Assert.Equal(new[] { "reserve-inventory", "charge-payment" }, state.Compensation.RecordedSteps);
+
+        var deferCtx = new SagaContext<DummyCompensatableState>();
+        deferCtx.RecordStep("will-be-discarded");
+        var deferredResult = deferCtx.Defer();
+        Assert.True(deferredResult.IsDeferred);
+        Assert.Empty(deferredResult.RecordedSteps);
+        Assert.False(deferredResult.IsCompensating);
+    }
+
+    [Fact]
+    public void Compensate_And_CompensateAndComplete_PopulateResultFlagsAndSnapshots()
+    {
+        var ctx = new SagaContext<DummyCompensatableState>();
+        Assert.Throws<ArgumentNullException>(() => ctx.Compensate(null!));
+
+        var msg = new DummyMessage();
+        var state = new DummyCompensatableState { Value = "compensating" };
+        ctx.Dispatch(msg)
+           .CancelTimeout<DummyTimeout>()
+           .RecordStep("step-a");
+
+        var compResult = ctx.Compensate(state);
+        Assert.True(compResult.IsCompensating);
+        Assert.False(compResult.IsCompleted);
+        Assert.False(compResult.IsDeferred);
+        Assert.Same(state, compResult.State);
+        Assert.Single(compResult.Dispatches);
+        Assert.Equal(typeof(DummyTimeout), Assert.Single(compResult.CanceledTimeouts));
+        Assert.Equal(new[] { "step-a" }, compResult.RecordedSteps);
+
+        var completeCtx = new SagaContext<DummyCompensatableState>();
+        var snapState = new DummyCompensatableState { Value = "final-snapshot" };
+        var compCompleteResult = completeCtx.CompensateAndComplete(snapState);
+        Assert.True(compCompleteResult.IsCompensating);
+        Assert.True(compCompleteResult.IsCompleted);
+        Assert.False(compCompleteResult.IsDeferred);
+        Assert.Null(compCompleteResult.State);
+        Assert.Same(snapState, compCompleteResult.CompensationState);
+    }
 }
 

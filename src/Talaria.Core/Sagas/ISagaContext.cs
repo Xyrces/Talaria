@@ -120,4 +120,39 @@ public interface ISagaContext<TState>
     /// </summary>
     /// <returns>A result describing a deferral.</returns>
     SagaResult<TState> Defer();
+
+    /// <summary>
+    /// Records the execution of a named forward step in the compensation journal so that
+    /// branching or repeated steps are compensated in exact reverse chronological order.
+    /// </summary>
+    /// <param name="stepName">The logical name of the forward step that succeeded.</param>
+    /// <returns>The same context, for fluent chaining.</returns>
+    /// <exception cref="ArgumentException">Thrown when <paramref name="stepName"/> is null, empty, or whitespace.</exception>
+    ISagaContext<TState> RecordStep(string stepName)
+        => throw new NotSupportedException($"Saga context '{GetType().Name}' does not support step recording.");
+
+    /// <summary>
+    /// Initiates or continues durable compensation for <paramref name="newState"/>, canceling all
+    /// prior saga timeouts. When sequential <c>CompensateStep</c> rules are configured on an
+    /// <see cref="ICompensatableState"/>, persists the pending compensation queue and dispatches
+    /// only the first compensating command; if no steps require compensation, runs
+    /// <c>OnCompensationCompleted</c> (or completes immediately).
+    /// </summary>
+    /// <param name="newState">The updated saga state to persist while compensating. Must not be null.</param>
+    /// <returns>A result describing a compensating transition.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="newState"/> is null.</exception>
+    SagaResult<TState> Compensate(TState newState)
+        => throw new NotSupportedException($"Saga context '{GetType().Name}' does not support compensation.");
+
+    /// <summary>
+    /// Performs single-phase batch compensation: evaluates all applicable compensation rules in
+    /// reverse order against <paramref name="stateSnapshot"/> (or the current step state when null),
+    /// stages all compensating commands to the outbox in a single batch (durably requesting
+    /// compensation without cross-service execution ordering), cancels prior timeouts, and marks
+    /// the saga completed.
+    /// </summary>
+    /// <param name="stateSnapshot">Optional state snapshot used to evaluate compensation predicates; defaults to the step's current state.</param>
+    /// <returns>A result describing a compensating completion.</returns>
+    SagaResult<TState> CompensateAndComplete(TState? stateSnapshot = default)
+        => throw new NotSupportedException($"Saga context '{GetType().Name}' does not support compensation.");
 }

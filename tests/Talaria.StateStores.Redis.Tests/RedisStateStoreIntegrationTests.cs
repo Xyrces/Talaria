@@ -102,11 +102,89 @@ public class RedisStateStoreIntegrationTests : IAsyncLifetime
         Assert.Equal(2, snapshot.Version);
         Assert.Equal("canceled", snapshot.State?.Value);
     }
-    
+
+    [DockerFact]
+    public async Task TryTransitionAsync_WithCompensatableSagaState_RoundTripsSagaCompensationStateAndOutboxAndTimeoutReceipts()
+    {
+        var stateStore = _serviceProvider.GetRequiredService<IStateStore<CompensatableRedisState>>();
+        var correlationId = Guid.NewGuid().ToString("N");
+
+        var initialState = new CompensatableRedisState
+        {
+            OrderId = correlationId,
+            Compensation = new Talaria.Core.Sagas.SagaCompensationState
+            {
+                Phase = Talaria.Core.Sagas.SagaPhase.Compensating,
+                Generation = 1,
+                RecordedSteps = ["reserve-inventory", "charge-payment"],
+                PendingSteps =
+                [
+                    new Talaria.Core.Sagas.PendingCompensationEntry(
+                        $"{correlationId}:comp:1:0:refund-payment",
+                        "refund-payment",
+                        typeof(string).AssemblyQualifiedName!,
+                        "payments.refund",
+                        "\"refund-cmd\"",
+                        1),
+                    new Talaria.Core.Sagas.PendingCompensationEntry(
+                        $"{correlationId}:comp:1:1:release-inventory",
+                        "release-inventory",
+                        typeof(string).AssemblyQualifiedName!,
+                        "inventory.release",
+                        "\"release-cmd\"",
+                        1)
+                ],
+                CompletedSteps = []
+            }
+        };
+
+        var outboxMsg = new OutboxMessage(
+            Guid.NewGuid(),
+            "payments.refund",
+            typeof(string).AssemblyQualifiedName!,
+            "\"refund-cmd\"",
+            new MessageHeaders
+            {
+                MessageId = "comp-out-1",
+                CorrelationId = correlationId,
+                ["talaria.saga.compensation"] = "true",
+                ["talaria.saga.compensation_step"] = "refund-payment"
+            },
+            DateTimeOffset.UtcNow);
+
+        const string cancelReceipt = "timeout-canceled:Talaria.Specs.OrderPaymentTimeout:v1";
+        Assert.Equal(SagaCommitStatus.Committed, await stateStore.TryTransitionAsync(
+            correlationId,
+            "fail-trigger-1",
+            expectedVersion: 0,
+            initialState,
+            [outboxMsg],
+            [cancelReceipt]));
+
+        var snapshot = await stateStore.ReadSnapshotAsync(correlationId, "ack-check-1");
+        Assert.NotNull(snapshot.State);
+        Assert.Equal(1, snapshot.Version);
+        Assert.Equal(Talaria.Core.Sagas.SagaPhase.Compensating, snapshot.State!.Compensation.Phase);
+        Assert.Equal(1, snapshot.State.Compensation.Generation);
+        Assert.Equal(["reserve-inventory", "charge-payment"], snapshot.State.Compensation.RecordedSteps);
+        Assert.Equal(2, snapshot.State.Compensation.PendingSteps.Count);
+        Assert.Equal("refund-payment", snapshot.State.Compensation.PendingSteps[0].StepName);
+        Assert.Equal("release-inventory", snapshot.State.Compensation.PendingSteps[1].StepName);
+
+        var receiptCheck = await stateStore.ReadSnapshotAsync(correlationId, cancelReceipt);
+        Assert.True(receiptCheck.MessageProcessed);
+    }
+
     public class DummyState
     {
         public string Value { get; set; } = string.Empty;
         public int StepCount { get; set; }
+    }
+
+    public sealed class CompensatableRedisState : Talaria.Core.Sagas.ICompensatableState
+    {
+        public string OrderId { get; set; } = string.Empty;
+        public Talaria.Core.Sagas.SagaCompensationState Compensation { get; set; } = new();
     }
 }
 
